@@ -77,9 +77,29 @@ export async function handleUpdate(app: App, update: TelegramUpdate) {
 
   if (message.photo?.length || message.document) {
     if (!app.codex.isAttached(message.chat.id, ownerId!)) {
-      await app.codex.ensureLobbyAttached(message.chat.id, ownerId!);
+      const attached = await app.codex.ensureLobbyAttached(
+        message.chat.id,
+        ownerId!,
+      );
+      if (!attached) {
+        await tgSend(
+          app.env,
+          message.chat.id,
+          "⚠️ The session bridge is still starting. Your attachment was not sent; try again in a moment.",
+          message.message_id,
+        );
+        return;
+      }
     }
-    await app.codex.routeAttachedMedia(message);
+    const routed = await app.codex.routeAttachedMedia(message);
+    if (!routed) {
+      await tgSend(
+        app.env,
+        message.chat.id,
+        "⚠️ That attachment could not be routed to the current session.",
+        message.message_id,
+      );
+    }
     return;
   }
   if (message.text === undefined) return;
@@ -110,7 +130,7 @@ export async function handleUpdate(app: App, update: TelegramUpdate) {
         await tgSend(
           app.env,
           message.chat.id,
-          "⚠️ The Codex bridge is not ready yet. Try /codex in a moment.",
+          "⚠️ The session bridge is still starting. Try <code>/codex</code> in a moment.",
           message.message_id,
         );
         return;
@@ -124,11 +144,11 @@ async function welcome(app: App, message: TelegramMessage): Promise<void> {
   await tgSend(
     app.env,
     message.chat.id,
-    "🪄 <b>Chatinabox is awake.</b>\n\n" +
-      "Just talk: detached messages wake the Lobby automatically. " +
-      "Use <code>/codex</code> to discover, start, resume, rename, or switch " +
-      "sessions; <code>/screen</code> to see and control the terminal; " +
-      "<code>/help</code> for every command.",
+    "🪄 <b>Chatinabox</b>\n" +
+      "Your Codex sessions, through Telegram.\n\n" +
+      "Talk normally—the Lobby wakes automatically when nothing is attached. " +
+      "Use <code>/codex</code> to switch sessions, <code>/screen</code> for " +
+      "the terminal, and <code>/help</code> for every control.",
     message.message_id,
   );
   await app.codex.handleCommand(message, { name: "codex", argument: "" });

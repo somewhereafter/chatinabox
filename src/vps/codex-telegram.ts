@@ -288,7 +288,15 @@ export class CodexTelegramController {
       callback.data,
       { chatId: chatId!, userId: ownerUserId },
     );
-    if (!parsed.ok || !parsed.value.action.startsWith("codex.")) return false;
+    if (!parsed.ok) {
+      await tgAnswerCallbackQuery(this.dependencies.env, callback.id, {
+        text: parsed.message,
+        showAlert: true,
+        cacheTime: 0,
+      }).catch(() => undefined);
+      return true;
+    }
+    if (!parsed.value.action.startsWith("codex.")) return false;
 
     await tgAnswerCallbackQuery(this.dependencies.env, callback.id, {
       text: callbackAnswer(parsed.value.action),
@@ -335,7 +343,7 @@ export class CodexTelegramController {
             messageId!,
             result && !result.ok
               ? result.error
-              : "The Codex bridge is unavailable.",
+              : "The session bridge is unavailable.",
           );
           return true;
         }
@@ -360,7 +368,7 @@ export class CodexTelegramController {
             messageId!,
             result && !result.ok
               ? result.error
-              : "The Codex bridge is unavailable.",
+              : "The session bridge is unavailable.",
           );
           return true;
         }
@@ -479,7 +487,7 @@ export class CodexTelegramController {
       attachment.owner_user_id,
       target,
       message.message_id,
-      message.text,
+      buildTelegramTextPrompt(message),
     );
     if (queuedCount > 1 && !hadActivityStatus) {
       await this.setTransientStatus(
@@ -592,7 +600,7 @@ export class CodexTelegramController {
           response && !response.ok
             ? `⚠️ ${escapeTelegramHtml(response.error)}\n` +
               "🪄 You’re back in Lobby; resend your message there."
-            : "⚠️ The Codex bridge is unavailable. Your message was not sent.",
+            : "⚠️ The session bridge is unavailable. Your message was not sent.",
           replyToMessageId,
         );
       }
@@ -624,7 +632,7 @@ export class CodexTelegramController {
     const timer = setTimeout(() => {
       this.textBurstTimers.delete(key);
       void this.flushTextBurst(key).catch(() => {
-        console.error("[CodexTelegram] Text burst relay failed.");
+        console.error("[ChatinaboxTelegram] Text burst relay failed.");
       });
     }, delayMs);
     timer.unref();
@@ -742,7 +750,7 @@ export class CodexTelegramController {
   private scheduleMediaGroup(key: string): NodeJS.Timeout {
     const timer = setTimeout(() => {
       void this.flushMediaGroup(key).catch(() => {
-        console.error("[CodexTelegram] Media album relay failed.");
+        console.error("[ChatinaboxTelegram] Media album relay failed.");
       });
     }, TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS);
     timer.unref();
@@ -889,7 +897,7 @@ export class CodexTelegramController {
 
   async run(signal: AbortSignal): Promise<void> {
     await this.bridge.request({ op: "lobby" }).catch(() => {
-      console.error("[CodexTelegram] Lobby could not be started.");
+      console.error("[ChatinaboxTelegram] Lobby could not be started.");
     });
     while (!signal.aborted) {
       try {
@@ -897,7 +905,7 @@ export class CodexTelegramController {
         await this.flushReadyTextBursts();
       } catch {
         if (!signal.aborted) {
-          console.error("[CodexTelegram] Event delivery pass failed; retrying.");
+          console.error("[ChatinaboxTelegram] Event delivery pass failed; retrying.");
         }
       }
       await abortableSleep(1_000, signal).catch(() => undefined);
@@ -1269,7 +1277,7 @@ export class CodexTelegramController {
       await tgSend(
         this.dependencies.env,
         chatId,
-        "⚠️ The Codex bridge is unavailable. Try <code>/codex</code> again shortly.",
+        "⚠️ The session bridge is unavailable. Try <code>/codex</code> again shortly.",
         replyToMessageId,
       );
     }
@@ -1293,7 +1301,7 @@ export class CodexTelegramController {
       await this.editError(
         chatId,
         messageId,
-        "The Codex bridge is unavailable. Try again shortly.",
+        "The session bridge is unavailable. Try again shortly.",
       );
     }
   }
@@ -1334,7 +1342,8 @@ export class CodexTelegramController {
       (left, right) =>
         Number(isLobbyPane(right)) - Number(isLobbyPane(left)),
     );
-    for (const pane of orderedPanes.slice(0, 12)) {
+    const visiblePanes = orderedPanes.slice(0, 12);
+    for (const pane of visiblePanes) {
       const attached = activePane && samePaneIdentity(activePane, pane);
       const issued = await issueCallbackReference(
         this.dependencies.store.callbackStore(),
@@ -1348,12 +1357,7 @@ export class CodexTelegramController {
       );
       rows.push([
         {
-          label:
-            isLobbyPane(pane)
-              ? `${attached ? "✓ " : ""}${pane.busy ? "⏳" : "🪄"} Lobby`
-              : `${attached ? "✓ " : ""}${pane.busy ? "⏳" : "●"} ` +
-                `${normalizeAssistantName(pane.assistantName)} · ` +
-                `${pane.windowName} · ${shortPath(pane.cwd)}`,
+          label: sessionButtonLabel(pane, Boolean(attached)),
           callbackData: issued.callbackData,
         },
       ]);
@@ -1377,7 +1381,7 @@ export class CodexTelegramController {
       );
       rows.push([
         {
-          label: `↩ ${session.name}`,
+          label: `↩ ${truncateVisible(session.name, 48)}`,
           callbackData: issued.callbackData,
         },
       ]);
@@ -1389,7 +1393,7 @@ export class CodexTelegramController {
       ownerUserId,
     );
     rows.push([
-      { label: "＋ New Codex", callbackData: newAction },
+      { label: "＋ New session", callbackData: newAction },
       { label: "↻ Refresh", callbackData: refreshAction },
     ]);
     if (activePane) {
@@ -1417,23 +1421,22 @@ export class CodexTelegramController {
       ]);
     }
 
-    const lines = ["🪩 <b>Codex sessions</b>", ""];
+    const lines = ["🪄 <b>Chatinabox</b> · sessions", ""];
     if (activePane && isLobbyPane(activePane)) {
       lines.push(
-        "You’re talking to <b>🪄 Lobby</b> — Chatinabox’s persistent control layer.",
+        "<b>🪄 Lobby</b> · control layer",
         "",
-        "Ask it to find, resume, rename, or start a Codex worker. " +
-          "New workers default to <b>Sol · high</b> unless you specify otherwise.",
-        "Bot controls stay local; other slash commands go to this session.",
+        "Ask naturally to find, resume, rename, or start a worker. " +
+          "New sessions default to <b>Sol · high</b>.",
       );
     } else if (activePane) {
       lines.push(
-        `Connected to <b>${normalizeAssistantName(activePane.assistantName)}</b> ` +
-          `in <b>${escapeTelegramHtml(activePane.windowName)}</b>`,
+        `<b>${activePane.busy ? "⏳ Working" : "● Ready"}</b> · ` +
+          `<b>${normalizeAssistantName(activePane.assistantName)}</b>`,
+        `<b>${escapeTelegramHtml(activePane.windowName)}</b>`,
         `<code>${escapeTelegramHtml(activePane.cwd)}</code>`,
         "",
-        "Send any normal message to talk directly to this session.",
-        "Bot controls stay local; other slash commands go to this session.",
+        "Messages and unknown slash commands go straight to this session.",
       );
     } else {
       lines.push(
@@ -1448,11 +1451,18 @@ export class CodexTelegramController {
         "<b>Recent chats</b> — tap ↩ to resume one in tmux.",
       );
     }
+    if (orderedPanes.length > visiblePanes.length) {
+      lines.push(
+        "",
+        `${orderedPanes.length - visiblePanes.length} more running ` +
+          `${orderedPanes.length - visiblePanes.length === 1 ? "session" : "sessions"} · ` +
+          "use <code>/attach name</code>",
+      );
+    }
     lines.push(
       "",
-      "<code>/codex new name</code> · <code>/codex rename name</code>",
-      "<code>/codex detach</code> → Lobby · <code>/codex off</code> → routing off",
-      "<code>/codex_help</code> for all controls",
+      "<code>/codex new name</code> · <code>/codex rename name</code> · " +
+        "<code>/help</code>",
     );
     return { text: lines.join("\n"), keyboard: buildInlineKeyboard(rows) };
   }
@@ -1502,6 +1512,15 @@ export class CodexTelegramController {
     const panes = await this.listPanes().catch(() => []);
     const pane = resolvePaneArgument(panes, argument);
     if (!pane) {
+      if (argument.trim()) {
+        const selection = truncateVisible(argument.trim(), 120);
+        await tgSend(
+          this.dependencies.env,
+          chatId,
+          `No unique session matched <code>${escapeTelegramHtml(selection)}</code>.`,
+          replyToMessageId,
+        );
+      }
       await this.sendMenu(chatId, ownerUserId, replyToMessageId);
       return;
     }
@@ -1578,7 +1597,7 @@ export class CodexTelegramController {
         chatId,
         result && !result.ok
           ? `⚠️ ${escapeTelegramHtml(result.error)}`
-          : "⚠️ The Codex bridge is unavailable.",
+          : "⚠️ The session bridge is unavailable.",
         replyToMessageId,
       );
       return;
@@ -1611,7 +1630,7 @@ export class CodexTelegramController {
         this.dependencies.env,
         chatId,
         attachment
-          ? "Use <code>/codex_rename descriptive name</code>."
+          ? "Use <code>/codex rename descriptive name</code>."
           : "Attach a session with <code>/codex</code> first.",
         replyToMessageId,
       );
@@ -1628,7 +1647,7 @@ export class CodexTelegramController {
         chatId,
         result && !result.ok
           ? `⚠️ ${escapeTelegramHtml(result.error)}`
-          : "⚠️ The Codex bridge is unavailable.",
+          : "⚠️ The session bridge is unavailable.",
         replyToMessageId,
       );
       return;
@@ -1744,7 +1763,7 @@ export class CodexTelegramController {
       .slice(11, 19);
     const caption =
       `🖥 <b>${escapeTelegramHtml(displayName(attachment))}</b>\n` +
-      `Updated ${updatedAt} UTC · tall clarity view`;
+      `${updatedAt} UTC · tap a key to send it and refresh`;
     let sent = replacement
       ? await tgEditPhotoMedia(
           this.dependencies.env,
@@ -1822,7 +1841,7 @@ export class CodexTelegramController {
       await tgSend(
         this.dependencies.env,
         chatId,
-        "Unknown key. Use <code>/codex_help</code> for the complete key list " +
+        "Unknown key. Use <code>/help</code> for the complete key list " +
           "and multi-key examples.",
         replyToMessageId,
       );
@@ -1982,6 +2001,30 @@ export function buildBundledTelegramPrompt(
       "",
     ]),
   ].join("\n").trimEnd();
+}
+
+export function buildTelegramTextPrompt(message: TelegramMessage): string {
+  const text = message.text?.trim() ?? "";
+  const repliedTo =
+    message.reply_to_message?.text?.trim() ||
+    message.reply_to_message?.caption?.trim();
+  if (!repliedTo) return text;
+
+  const sender = message.reply_to_message?.from;
+  const senderName =
+    sender?.first_name?.trim() ||
+    (sender?.username ? `@${sender.username}` : "") ||
+    (sender?.is_bot ? "Chatinabox" : "Earlier message");
+  const snippet = truncateVisible(
+    repliedTo.replace(/\s+/gu, " "),
+    280,
+  );
+  return [
+    `Sent from Telegram in reply to ${senderName}:`,
+    `“${snippet}”`,
+    "",
+    text,
+  ].join("\n");
 }
 
 export function formatCodexActivityStatus(
@@ -2199,14 +2242,35 @@ function shortPath(value: string): string {
   return value.slice(0, 42);
 }
 
+function truncateVisible(value: string, maxCharacters: number): string {
+  const characters = Array.from(value.trim());
+  return characters.length <= maxCharacters
+    ? characters.join("")
+    : `${characters.slice(0, Math.max(1, maxCharacters - 1)).join("")}…`;
+}
+
+function sessionButtonLabel(pane: CodexPane, attached: boolean): string {
+  if (isLobbyPane(pane)) {
+    return `${attached ? "✓ " : ""}${pane.busy ? "⏳" : "🪄"} Lobby`;
+  }
+  const state = pane.busy ? "⏳" : "●";
+  const name = truncateVisible(pane.windowName, 25);
+  const cwd = shortPath(pane.cwd);
+  return truncateVisible(
+    `${attached ? "✓ " : ""}${state} ` +
+      `${normalizeAssistantName(pane.assistantName)} · ${name} · ${cwd}`,
+    64,
+  );
+}
+
 function nextFriendlyName(): string {
-  return `codex-${new Date().toISOString().slice(11, 16).replace(":", "")}`;
+  return `Session · ${new Date().toISOString().slice(11, 16).replace(":", "")}`;
 }
 
 function callbackAnswer(action: string): string {
   const labels: Record<string, string> = {
     "codex.attach": "Connecting…",
-    "codex.detach": "Detached",
+    "codex.detach": "Opening Lobby…",
     "codex.new": "Starting Codex…",
     "codex.refresh": "Refreshing…",
     "codex.interrupt": "Interrupting…",
@@ -2218,18 +2282,16 @@ function callbackAnswer(action: string): string {
 
 export function codexHelpText(): string {
   return (
-    "🪩 <b>Codex · complete control guide</b>\n\n" +
+    "🪄 <b>Chatinabox controls</b>\n\n" +
     "<b>Sessions</b>\n" +
     "<code>/codex</code> — list running and recent chats; tap one to attach\n" +
     "<code>/codex new [name]</code> — start and attach a Sol · high worker\n" +
     "<code>/codex rename name</code> — rename the attached session\n" +
     "<code>/codex detach</code> — return to the persistent 🪄 Lobby\n" +
-    "<code>/codex off</code> — stop routing this Telegram chat to Codex\n" +
+    "<code>/codex off</code> — pause routing; your next message wakes Lobby\n" +
     "<code>/codex interrupt</code> — interrupt the current run with Ctrl-C\n\n" +
-    "<b>Terminal screen</b>\n" +
-    "<code>/screen</code> — post a fresh, tall terminal view with tap controls\n" +
-    "Buttons send Esc, arrows, Enter, Tab, PgUp/PgDn, then refresh the screen.\n\n" +
-    "<b>Send terminal keys</b>\n" +
+    "<b>Terminal</b>\n" +
+    "<code>/screen</code> — fresh terminal view with tap controls\n" +
     "<code>/key KEY [KEY…]</code> — send 1–8 keys, separated by spaces or commas\n" +
     "Keys: <code>esc</code>, <code>enter</code>, <code>up</code>, " +
     "<code>down</code>, <code>left</code>, <code>right</code>, " +
@@ -2244,8 +2306,8 @@ export function codexHelpText(): string {
     "Mobile shortcut: send only <code>up</code>, <code>down</code>, " +
     "<code>left</code>, or <code>right</code> as a normal message—alone or " +
     "in a sequence such as <code>down down right</code>.\n" +
-    "A successful key command automatically refreshes the terminal view.\n\n" +
-    "<b>Talking and attachments</b>\n" +
+    "A sent key automatically refreshes the terminal view.\n\n" +
+    "<b>Messages and files</b>\n" +
     "While attached, normal messages go to this session. Several quick messages " +
     "are bundled in order. Photos, files, albums, and captions are supported.\n" +
     "Codex slash commands such as <code>/model</code> are forwarded too. If one " +
@@ -2256,10 +2318,8 @@ export function codexHelpText(): string {
     "🎱 working · ⚙️ tool/file activity · ⏳ waiting for terminal\n" +
     "🟠 your follow-up is queued for the next tool boundary\n" +
     "🧶 context is compacting · 🖼️ an image was viewed\n\n" +
-    "<b>Aliases</b>\n" +
-    "<code>/codex_new</code>, <code>/codex_rename</code>, " +
-    "<code>/codex_interrupt</code>, <code>/codex_screen</code>, " +
-    "<code>/codex_key</code>, <code>/codex_detach</code>"
+    "Aliases such as <code>/codex_new</code> and <code>/codex_screen</code> " +
+    "remain available for Telegram command menus."
   );
 }
 

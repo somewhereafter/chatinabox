@@ -36,6 +36,8 @@ Chatinabox is an independent open-source project. It is not an OpenAI product.
   order and flushes them together at the next tool boundary.
 - See messages typed locally in tmux, transient activity, context compaction,
   image views, rich links, and final turns from the same thread.
+- Reply to a Telegram message and pass Codex a short attributed snippet for
+  context, without copying the entire quoted turn.
 
 When no worker is attached, **🪄 Lobby** stays available as a small persistent
 control intelligence. Talk to it normally; it can orient you, recover recent
@@ -73,7 +75,8 @@ sudo ./scripts/install.sh
 The installer asks for the bot token and owner ID, verifies the complete source
 tree, installs an immutable release under `/opt/chatinabox`, merges the Codex
 lifecycle hooks, installs Lobby and worker instructions, claims the bot's
-long-poll update stream, and starts both services.
+long-poll update stream, configures the bot profile and command menu, and starts
+both services.
 
 For a non-interactive install:
 
@@ -102,6 +105,7 @@ new worker, or simply talk to the Lobby. Verify the server at any time:
 
 ```sh
 chatinabox doctor
+chatinabox doctor --json
 systemctl status chatinabox chatinabox-bridge
 ```
 
@@ -190,9 +194,8 @@ sudo ./scripts/uninstall.sh          # preserve state and secrets
 sudo ./scripts/uninstall.sh --purge  # also remove state, secrets, and user
 ```
 
-Managed Codex hooks and instruction blocks remain after uninstall so a reinstall
-preserves behavior. Their markers and commands can be removed manually for a
-complete configuration cleanup.
+Uninstall removes the managed Codex hooks and instruction block. Without
+`--purge`, local session state and secrets remain available for a reinstall.
 
 ## Project notes
 

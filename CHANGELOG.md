@@ -4,6 +4,15 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+- Refined the session picker, first-run copy, terminal captions, and canonical
+  command guidance.
+- Added concise Telegram bot metadata and a native command menu during install.
+- Added quoted-reply context, explicit expired-button feedback, and attachment
+  routing failures instead of silent drops.
+- Expanded `chatinabox doctor` with service, webhook, ownership, version, hints,
+  and JSON diagnostics.
+- Made uninstall remove managed hooks and global instructions cleanly.
+
 ## 0.1.0 — 2026-07-26
 
 - Extracted the Codex-to-Telegram system into a standalone project.

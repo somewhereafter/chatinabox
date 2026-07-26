@@ -28,7 +28,7 @@ for (const [event, sourceGroups] of Object.entries(source.hooks)) {
 
 const temporaryPath = path.join(
   path.dirname(targetPath),
-  `.hooks.json.codex-telegram-${process.pid}.tmp`,
+  `.hooks.json.chatinabox-${process.pid}.tmp`,
 );
 writeFileSync(temporaryPath, `${JSON.stringify(target, null, 2)}\n`, {
   mode: 0o600,

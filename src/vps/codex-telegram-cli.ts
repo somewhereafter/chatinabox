@@ -241,7 +241,7 @@ async function main(): Promise<number> {
         `${JSON.stringify({ ok: false, code: "UNAVAILABLE", error: message })}\n`,
       );
     } else {
-      process.stderr.write(`codex-telegram: ${message}\n`);
+      process.stderr.write(`chatinabox: ${message}\n`);
     }
     return 1;
   }
@@ -306,7 +306,7 @@ function output(response: CodexBridgeResponse, json: boolean): number {
     return response.ok ? 0 : 1;
   }
   if (!response.ok) {
-    process.stderr.write(`codex-telegram: ${response.error}\n`);
+    process.stderr.write(`chatinabox: ${response.error}\n`);
     return 1;
   }
   if ("panes" in response) {

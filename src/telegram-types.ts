@@ -13,12 +13,18 @@ export interface TelegramUpdate {
 export interface TelegramMessage {
   message_id: number;
   chat: { id: number };
-  from?: { id: number };
+  from?: {
+    id: number;
+    is_bot?: boolean;
+    first_name?: string;
+    username?: string;
+  };
   text?: string;
   caption?: string;
   media_group_id?: string;
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
+  reply_to_message?: TelegramMessage;
   date: number;
 }
 

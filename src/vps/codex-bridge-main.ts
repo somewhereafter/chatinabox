@@ -19,7 +19,7 @@ let stopping = false;
 const stop = async (signal: string): Promise<void> => {
   if (stopping) return;
   stopping = true;
-  console.log(`[CodexBridge] ${signal} received; shutting down.`);
+  console.log(`[ChatinaboxBridge] ${signal} received; shutting down.`);
   await bridge.close();
 };
 
@@ -27,9 +27,9 @@ process.on("SIGINT", () => void stop("SIGINT"));
 process.on("SIGTERM", () => void stop("SIGTERM"));
 
 bridge.listen().then(
-  () => console.log("[CodexBridge] Ready."),
+  () => console.log("[ChatinaboxBridge] Ready."),
   () => {
-    console.error("[CodexBridge] Failed to start.");
+    console.error("[ChatinaboxBridge] Failed to start.");
     process.exit(1);
   },
 );

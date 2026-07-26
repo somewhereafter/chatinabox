@@ -21,6 +21,8 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
+printf '\n› Checking the host\n'
+
 need() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "Missing required command: $1" >&2
@@ -58,7 +60,7 @@ if [[ -z "$chrome_path" || ! -x "$chrome_path" ]]; then
   exit 1
 fi
 
-echo "Building and testing Chatinabox…"
+printf '\n› Building and testing Chatinabox\n'
 (
   cd "$repo_dir"
   npm ci
@@ -70,6 +72,8 @@ if $dry_run; then
   echo "Dry run passed. No system files or services were changed."
   exit 0
 fi
+
+printf '\n› Installing the release\n'
 
 bot_token="${CHATINABOX_TG_BOT_TOKEN:-${TG_BOT_TOKEN:-}}"
 owner_ids="${CHATINABOX_TG_USER_ID:-${TG_ALLOWED_USER_IDS:-}}"
@@ -159,14 +163,16 @@ install -o root -g root -m 0600 \
   "$repo_dir/ops/chatinabox-lobby-AGENTS.md" \
   /var/lib/chatinabox-bridge/lobby/AGENTS.md
 
-# Polling and webhooks are mutually exclusive. Installing Chatinabox claims
-# this bot's update stream.
-TG_BOT_TOKEN="$bot_token" node -e \
-  'fetch(`https://api.telegram.org/bot${process.env.TG_BOT_TOKEN}/deleteWebhook`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({drop_pending_updates:false})}).then(r=>r.json()).then(v=>{if(!v.ok)process.exit(1)})'
+printf '\n› Configuring Telegram\n'
+
+# Polling and webhooks are mutually exclusive. The bot also owns its concise
+# command menu and public description.
+TG_BOT_TOKEN="$bot_token" node "$repo_dir/scripts/configure-telegram.mjs"
 
 systemctl daemon-reload
 systemctl enable chatinabox-bridge.service chatinabox.service >/dev/null
 if ! $no_start; then
+  printf '\n› Starting Chatinabox\n'
   systemctl restart chatinabox-bridge.service
   systemctl restart chatinabox.service
   sleep 2

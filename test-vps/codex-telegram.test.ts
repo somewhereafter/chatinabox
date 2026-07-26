@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildCodexAttachmentPrompt,
   buildBundledTelegramPrompt,
+  buildTelegramTextPrompt,
   codexHelpText,
   formatCodexActivityStatus,
   formatCodexEvent,
@@ -121,6 +122,21 @@ describe("Codex Telegram attachments", () => {
     expect(bundled).toContain("--- Message 2 ---\nand one more detail");
     expect(bundled.indexOf("first thought"))
       .toBeLessThan(bundled.indexOf("and one more detail"));
+  });
+
+  it("adds a short quoted-reply reference without copying an entire message", () => {
+    const prompt = buildTelegramTextPrompt(message({
+      text: "This is the part I mean.",
+      reply_to_message: message({
+        message_id: 41,
+        from: { id: 9, is_bot: true, first_name: "Sol" },
+        text: "A".repeat(400),
+      }),
+    }));
+    expect(prompt).toContain("Sent from Telegram in reply to Sol:");
+    expect(prompt).toContain("This is the part I mean.");
+    expect(prompt).toContain("…");
+    expect(prompt.length).toBeLessThan(380);
   });
 
   it("formats accumulating Codex activity with natural plurals", () => {

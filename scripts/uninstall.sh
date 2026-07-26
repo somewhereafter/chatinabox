@@ -7,10 +7,23 @@ if [[ "$(id -u)" -ne 0 ]]; then
 fi
 
 purge=false
-[[ "${1:-}" == "--purge" ]] && purge=true
+case "${1:-}" in
+  "") ;;
+  --purge) purge=true ;;
+  -h|--help)
+    echo "Usage: sudo ./scripts/uninstall.sh [--purge]"
+    echo "Without --purge, local state and secrets are preserved."
+    exit 0
+    ;;
+  *) echo "Unknown option: ${1}" >&2; exit 2 ;;
+esac
+repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 
 systemctl disable --now chatinabox.service chatinabox-bridge.service \
   >/dev/null 2>&1 || true
+if ! node "$repo_dir/ops/uninstall-chatinabox-config.mjs"; then
+  echo "Warning: managed Codex configuration could not be cleaned automatically." >&2
+fi
 rm -f /etc/systemd/system/chatinabox.service
 rm -f /etc/systemd/system/chatinabox-bridge.service
 rm -f /usr/local/bin/chatinabox

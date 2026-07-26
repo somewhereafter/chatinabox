@@ -356,7 +356,7 @@ export class CodexBridge {
           socket.end(`${JSON.stringify(response)}\n`);
         } catch (error) {
           console.error(
-            "[CodexBridge] Operation failed:",
+            "[ChatinaboxBridge] Operation failed:",
             error instanceof Error ? error.message : "unknown error",
           );
           socket.end(
@@ -585,7 +585,7 @@ export class CodexBridge {
       height = clarity.height;
     } catch (error) {
       console.error(
-        "[CodexBridge] Clarity renderer failed; using SVG fallback:",
+        "[ChatinaboxBridge] Clarity renderer failed; using SVG fallback:",
         error instanceof Error ? error.message : "unknown error",
       );
       const rendered = renderAnsiTerminalSvg(captured);
@@ -2288,7 +2288,8 @@ function normalizeCwd(value: string): string {
 function normalizeRequestedName(value: unknown): string {
   const normalized =
     typeof value === "string" ? normalizeLabel(value, 60) : "";
-  return normalized || `codex-${new Date().toISOString().slice(11, 16).replace(":", "")}`;
+  return normalized ||
+    `Session · ${new Date().toISOString().slice(11, 16).replace(":", "")}`;
 }
 
 function normalizeRequestedCwd(value: unknown, fallback: string): string {
