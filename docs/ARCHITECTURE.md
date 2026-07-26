@@ -10,7 +10,8 @@ Telegram Bot API
 chatinabox service (unprivileged)
       │
       ├── owner policy, menus, formatting, attachments
-      ├── routing, queue, status, and delivery SQLite state
+      ├── forum routing, setup, presence, and delivery state
+      ├── read-only private experience profile
       │
       └── group-only Unix socket
                     │
@@ -21,7 +22,7 @@ chatinabox-bridge (root)
       ├── Codex process and transcript discovery
       ├── terminal capture and ANSI-aware rendering
       ├── lifecycle event ingestion
-      └── root-only bridge and Lobby SQLite state
+      └── root-only bridge, Lobby, and manager workspaces
                     │
                     ▼
               tmux + Codex CLI
@@ -30,9 +31,9 @@ chatinabox-bridge (root)
 ## Process boundary
 
 The Telegram process runs as the `chatinabox` system user. It can read its bot
-environment and write only its own state and attachment tree. It cannot rewrite
-the root bridge environment, Lobby instructions, bridge database, release
-files, or systemd units.
+environment and private experience profile, and write only its own state and
+attachment tree. It cannot rewrite the root bridge environment, profile, Lobby
+instructions, bridge database, release files, or systemd units.
 
 The bridge runs as root because it controls root-owned tmux sessions and starts
 Codex in the project's deliberate full-access mode. Its only client surface is
@@ -40,6 +41,35 @@ Codex in the project's deliberate full-access mode. Its only client surface is
 
 This separation limits accidental local reachability. It does not reduce the
 authority of an allowed Telegram user: that user can direct root Codex.
+
+## Forum control layer
+
+Forum registration is explicit and owner-bound:
+
+- one overview/dashboard topic per managed forum;
+- one manager topic per managed forum;
+- any number of work topics, each attached to an exact Codex pane.
+
+Overview and manager topics are isolated from ordinary worker routing. Work
+topics store their launch profile, activity state, idle clock, and durable Codex
+session ID. When the inactivity window elapses, the bridge closes only an idle
+pane; the topic keeps enough state to resume the same Codex thread later.
+
+Telegram topic icons are presentation state. A worker must remain idle across a
+stable polling interval before changing from working to ready, and an active
+turn record overrides a momentary tmux status miss.
+
+## Experience profile
+
+`/etc/chatinabox/profile.json` separates product behavior from one person's
+names, symbols, manager identity, model defaults, and idle policy. The
+unprivileged Telegram service hot-reloads the validated file read-only.
+
+Root Codex sessions can update the profile through `chatinabox profile set`.
+That command accepts an allowlisted set of fields, normalizes lengths and
+values, writes atomically, and constrains manager workspaces beneath
+`/var/lib/chatinabox-bridge/`. The installer creates the neutral profile only
+when no profile exists, so upgrades preserve local identity.
 
 ## Session identity
 
@@ -85,5 +115,6 @@ and then refresh the same screen message.
 | `/var/lib/chatinabox` | `chatinabox` | Telegram routing, queues, attachments |
 | `/var/lib/chatinabox-bridge` | `root` | bridge events, bindings, Lobby |
 | `/etc/chatinabox/chatinabox.env` | `root:chatinabox` | bot secret and paths |
+| `/etc/chatinabox/profile.json` | `root` | names, symbols, defaults, idle policy |
 | `/opt/chatinabox/releases` | `root` | immutable installed releases |
 | `/run/chatinabox/bridge.sock` | `root:chatinabox` | local bridge API |

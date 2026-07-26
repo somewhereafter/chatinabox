@@ -1,6 +1,7 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { CodexBridgeClient } from "./codex-bridge-client";
+import { normalizeExperienceProfile } from "./experience-profile";
 
 interface Check {
   readonly ok: boolean;
@@ -17,6 +18,10 @@ async function main(): Promise<void> {
 
   const checks: Check[] = [];
   checks.push(environmentCheck(environmentPath));
+  checks.push(profileCheck(
+    process.env.CHATINABOX_PROFILE_PATH ||
+      "/etc/chatinabox/profile.json",
+  ));
 
   const tmux = executableCheck("tmux", process.env.CHATINABOX_TMUX_PATH, [
     "/usr/bin/tmux",
@@ -153,6 +158,49 @@ async function main(): Promise<void> {
     }
   }
   process.exitCode = failed.length === 0 ? 0 : 1;
+}
+
+function profileCheck(profilePath: string): Check {
+  if (!existsSync(profilePath)) {
+    return {
+      ok: false,
+      label: "Experience profile",
+      detail: `missing: ${profilePath}`,
+      hint: "Re-run the installer to create the neutral profile.",
+    };
+  }
+  try {
+    const stats = statSync(profilePath);
+    const mode = stats.mode & 0o777;
+    const parsed = JSON.parse(readFileSync(profilePath, "utf8")) as unknown;
+    const normalized = normalizeExperienceProfile(parsed);
+    const root = typeof parsed === "object" && parsed !== null
+      ? parsed as Record<string, unknown>
+      : {};
+    const safe = stats.uid === 0 && (mode & 0o022) === 0;
+    const valid = root.version === 1 &&
+      typeof root.assistant === "object" &&
+      typeof root.overview === "object" &&
+      typeof root.manager === "object" &&
+      typeof root.sessions === "object";
+    return {
+      ok: safe && valid,
+      label: "Experience profile",
+      detail:
+        `${profilePath} · ${normalized.setupComplete ? "configured" : "setup pending"} · ` +
+        `mode ${mode.toString(8).padStart(3, "0")}`,
+      hint: safe
+        ? "Run chatinabox profile defaults, then revisit /settings."
+        : `Run chown root:root ${profilePath} && chmod 644 ${profilePath}.`,
+    };
+  } catch {
+    return {
+      ok: false,
+      label: "Experience profile",
+      detail: `invalid JSON: ${profilePath}`,
+      hint: "Run chatinabox profile defaults, then revisit /settings.",
+    };
+  }
 }
 
 function environmentCheck(path: string): Check {

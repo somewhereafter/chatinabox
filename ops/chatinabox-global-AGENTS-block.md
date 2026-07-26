@@ -10,14 +10,14 @@ merely describing it:
 - `chatinabox self rename NAME --json`
 - `chatinabox self lobby --json`
 - `chatinabox handoff TARGET --json`
-- `chatinabox new-and-handoff NAME --cwd PATH --model sol --effort high --json`
+- `chatinabox new-and-handoff NAME --cwd PATH --json`
 - `chatinabox send-image FILE CAPTION --json`
 - `chatinabox send-file FILE CAPTION --json`
 
 Self-lobby and handoff actions take effect only after the current final response
-has reached Telegram. New workers default to Sol with high reasoning unless the
-user specifies Luna, Terra, another effort level, or `--fast`. Refresh the
-catalog before routing and use its canonical session selector rather than a tmux
-container name. Use `send-image` or `send-file` when the user asks to receive a
-local artifact in Telegram.
+has reached Telegram. New workers inherit the private Chatinabox profile unless
+the user specifies a model, effort level, `--fast`, or `--standard`. Refresh
+the catalog before routing and use its canonical session selector rather than a
+tmux container name. Use `send-image` or `send-file` when the user asks to
+receive a local artifact in Telegram.
 <!-- chatinabox:end -->

@@ -6,6 +6,7 @@ export interface ChatinaboxEnv {
   readonly DATA_DIR: string;
   readonly CODEX_BRIDGE_SOCKET: string;
   readonly DEFAULT_CWD: string;
+  readonly PROFILE_PATH?: string;
 }
 
 export function loadChatinaboxEnv(
@@ -33,6 +34,10 @@ export function loadChatinaboxEnv(
       "/run/chatinabox/bridge.sock",
     DEFAULT_CWD: path.resolve(
       source.CHATINABOX_DEFAULT_CWD?.trim() || process.cwd(),
+    ),
+    PROFILE_PATH: path.resolve(
+      source.CHATINABOX_PROFILE_PATH?.trim() ||
+        "/etc/chatinabox/profile.json",
     ),
   };
 }

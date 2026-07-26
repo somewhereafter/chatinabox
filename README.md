@@ -2,59 +2,62 @@
   <img src="assets/chatinabox.svg" alt="Chatinabox — your Codex terminal, carried through Telegram" width="100%">
 </p>
 
-Chatinabox is a private Telegram surface for the Codex CLI already running on
-your server. It discovers real tmux sessions, attaches to one, and carries the
-conversation, terminal state, files, and controls into your pocket.
+Chatinabox carries the Codex CLI already running on your server into a private
+Telegram chat or forum. A topic can hold one real Codex session: same process,
+same thread, same workspace, same terminal when you come back.
 
 [Quick start](#quick-start) ·
-[The experience](#the-experience) ·
-[Controls](#telegram-controls) ·
+[Forum setup](#forum-setup) ·
+[Controls](#controls) ·
 [Architecture](docs/ARCHITECTURE.md) ·
-[Security](SECURITY.md) ·
-[Contributing](CONTRIBUTING.md)
+[Security](SECURITY.md)
 
-Codex still owns authentication, threads, models, tools, compaction, and the
-terminal UI. Chatinabox controls discovery, routing, Telegram presentation,
-session continuity, and the small local API that lets a session move itself.
+Codex still owns the model conversation, tools, authentication, compaction, and
+terminal UI. Chatinabox handles discovery, routing, Telegram presentation, and
+continuity around it.
 
-This is your actual Codex session—not a second assistant pretending to be it.
+No parallel assistant backend. No second copy of the thread.
 
-Chatinabox is an independent open-source project. It is not an OpenAI product.
+Chatinabox is an independent open-source project, not an OpenAI product.
 
-## The experience
+## A quiet control room
 
-Walk away from the VPS and continue the exact same Codex process from Telegram.
-When you return to tmux, the thread, model, working directory, terminal UI, and
-interactive state are still there. Chatinabox does not create a parallel API
-conversation or hide Codex behind another assistant.
+A forum gives the system a useful shape without turning it into a dashboard
+product:
 
-- Discover running sessions and recent saved threads automatically. Start,
-  resume, rename, interrupt, or switch between them with tap controls—and let a
-  Codex session rename or hand off itself through the local control API.
-- Keep one conversation across phone and terminal. Prompts typed locally are
-  mirrored to Telegram, and Telegram messages enter the live Codex TUI rather
-  than a separate backend.
-- Know what is happening without watching a terminal: working, accumulating
-  tool and file activity, waiting for input, queued follow-ups, compaction, and
-  image views appear as clean transient or durable events.
-- Send several thoughts while Codex is busy. They remain ordered and are
-  delivered together at the next safe tool boundary instead of starting
-  competing turns or disappearing.
-- Open a tall, readable, color-preserving terminal view with `/screen`. Use its
-  buttons—or `/key`—for Esc, arrows, Enter, Tab, paging, control keys, and
-  interactive pickers such as `/model`.
-- Send photos, albums, captions, and files with a prompt. Codex can send
-  generated images and local files back through the same connection.
-- Read answers as Telegram-native messages with headings, emphasis, links,
-  lists, quotes, code blocks, and rich tables instead of raw terminal text.
-  Long responses are split without breaking formatting.
-- Reply to a specific Telegram message to pass Codex a short attributed snippet
-  as context without copying the entire quoted turn.
+- **overview** — live session counts, working/idle state, and usage windows;
+- **🔮 manager** — a conversational guide for finding, creating, resuming, and
+  coordinating sessions;
+- **work topics** — one topic per Codex thread, named and configured before it
+  starts.
 
-When no worker is attached, **🪄 Lobby** stays available as a small persistent
-control intelligence. Talk to it normally; it can orient you, recover recent
-work, or hand you to the right session. A detached message wakes it
-automatically.
+Topic icons carry simple presence: working, ready, or resting. Idle workers can
+close after a configurable window while their Codex history and launch profile
+remain available behind a restart button.
+
+The names above are defaults, not branding requirements. First-run setup lets
+you talk through the tone, names, symbols, models, workspaces, and idle policy
+you want. Those choices live in a private host profile rather than the source
+tree.
+
+The older one-chat flow remains available. Chatinabox can still discover,
+attach, resume, rename, interrupt, and switch ordinary tmux sessions without a
+forum.
+
+## What comes through
+
+- Normal prompts, local tmux prompts, progress, reasoning summaries, final
+  responses, and context compaction.
+- Compact transient state for commands, edited files, explored items, active
+  shells, queued messages, terminal waits, and elapsed turn time.
+- Ordered follow-ups while a turn is busy, flushed at the next safe tool
+  boundary.
+- Telegram-native headings, emphasis, links, lists, quotes, code blocks,
+  tables, details, and long-message splitting.
+- Photos, albums, captions, files, generated images, and local file delivery.
+- A tall color-preserving `/screen` view with tap controls for terminal keys
+  and interactive Codex pickers.
+- Topic/session name sync, safe handoffs, and exact tmux pane identity checks.
 
 ## Quick start
 
@@ -62,21 +65,21 @@ automatically.
 
 - A dedicated Debian/Ubuntu-style VPS with systemd
 - Node.js 22 or newer
-- A recent [Codex CLI](https://developers.openai.com/codex) authenticated for
+- A recent [Codex CLI](https://developers.openai.com/codex), authenticated for
   the root account
 - tmux
 - ImageMagick (`convert`)
-- Google Chrome or Chromium and a readable monospace font
+- Google Chrome or Chromium with a readable monospace font
 - A Telegram bot from [@BotFather](https://t.me/BotFather)
 - Your numeric Telegram user ID
 
-The Codex CLI can be installed with its official installer or npm:
+Install Codex using its official installer or npm:
 
 ```sh
 npm install -g @openai/codex
 ```
 
-### Install Chatinabox
+Then install Chatinabox:
 
 ```sh
 git clone https://github.com/somewhereafter/chatinabox.git
@@ -84,11 +87,9 @@ cd chatinabox
 sudo ./scripts/install.sh
 ```
 
-The installer asks for the bot token and owner ID, verifies the complete source
-tree, installs an immutable release under `/opt/chatinabox`, merges the Codex
-lifecycle hooks, installs Lobby and worker instructions, claims the bot's
-long-poll update stream, configures the bot profile and command menu, and starts
-both services.
+The installer verifies the source tree, creates an immutable release under
+`/opt/chatinabox`, merges the Codex lifecycle hooks and managed instructions,
+configures Telegram, and starts the unprivileged bot plus root session bridge.
 
 For a non-interactive install:
 
@@ -98,70 +99,88 @@ sudo CHATINABOX_TG_BOT_TOKEN='123:secret' \
   ./scripts/install.sh
 ```
 
-Validate a host without changing it:
+Check a host without changing it:
 
 ```sh
 sudo ./scripts/install.sh --dry-run
 ```
 
-### Codex instructions
+Open the bot and send `/start`. On a fresh install, the first conversation is
+setup: describe what you want, or say “keep it simple.” The guide writes a
+validated private profile and walks you through the Telegram side.
 
-The normal installer safely merges Chatinabox's managed worker block into
-`/root/.codex/AGENTS.md` without replacing existing personal instructions. It
-also installs the Lobby's more specialized `AGENTS.md` in the Lobby workspace.
+## Forum setup
 
-To install or repair only the global worker instructions manually:
+Create a private Telegram supergroup, enable **Topics**, add the bot as an
+administrator, and allow it to manage topics.
 
-```sh
-sudo install -d -m 0700 /root/.codex
-sudo node ops/install-chatinabox-instructions.mjs \
-  ops/chatinabox-global-AGENTS-block.md \
-  /root/.codex/AGENTS.md
-```
+Then make:
 
-Alternatively, copy the complete marked block from
-[`ops/chatinabox-global-AGENTS-block.md`](ops/chatinabox-global-AGENTS-block.md)
-into `/root/.codex/AGENTS.md`. Keep its `chatinabox:begin` and
-`chatinabox:end` comments so upgrades and uninstall can update only that block.
-Start a new Codex session afterward so the instructions are loaded.
+1. an overview/dashboard topic and send `/overview setup`;
+2. a manager topic and send `/manager setup`;
+3. a normal work topic and send `/setup`.
 
-### First conversation
+The manager keeps the 🔮 topic icon. Pin the manager and overview/dashboard
+topics in the forum list so the two control surfaces stay easy to reach. The bot
+does not pin messages.
 
-Open the bot and send:
+In each work topic, `/setup` opens a compact starter for topic name, model,
+reasoning effort, speed, and workspace. Telegram topic renames remain synced to
+the live Codex/tmux session.
+
+`/nexus` and `/wizard` remain compatibility aliases for existing installs.
+
+## Private profile
+
+Public defaults are deliberately plain. Personal presentation and launch policy
+live at:
 
 ```text
-/start
+/etc/chatinabox/profile.json
 ```
 
-Chatinabox presents the running and recent session catalog. Pick one, start a
-new worker, or simply talk to the Lobby. Verify the server at any time:
+The installer creates it once and preserves it across upgrades. It contains no
+bot token. The bot reads it; root Codex sessions can update it through a narrow
+typed command:
 
 ```sh
-chatinabox doctor
-chatinabox doctor --json
-systemctl status chatinabox chatinabox-bridge
+chatinabox profile show --json
+chatinabox profile set --assistant-name "mori" --assistant-mark "⌁" --json
+chatinabox profile set --overview-name "desk" --overview-emoji "◉" --json
+chatinabox profile set --manager-name "guide" --manager-icon "🔮" --json
+chatinabox profile set --idle-minutes 45 --complete --json
 ```
 
-## Telegram controls
+`ops/chatinabox-profile.json` documents the complete neutral profile. Manager
+workspaces are constrained beneath `/var/lib/chatinabox-bridge/`.
+
+## Controls
 
 | Command | Purpose |
 | --- | --- |
-| `/codex` | Show active and recent sessions with tap-to-attach controls |
-| `/codex new [name]` | Start and attach a Sol/high full-access worker |
+| `/start` | First-run setup or the normal session entry point |
+| `/settings` | Revisit names, symbols, and defaults with the guide |
+| `/setup` | Configure and start a Codex chat in the current work topic |
+| `/overview setup` | Register the current topic as the live dashboard |
+| `/overview refresh` | Refresh the dashboard immediately |
+| `/manager setup` | Register and start the 🔮 manager topic |
+| `/manager wake` | Reconnect the manager topic |
+| `/codex` | Show active and recent sessions |
+| `/codex new [name]` | Start and attach a worker |
 | `/codex rename name` | Rename the attached session |
 | `/codex detach` | Return to the persistent Lobby |
-| `/codex off` | Turn routing off until the next message wakes Lobby |
-| `/codex interrupt` | Send Ctrl-C to the attached session |
-| `/screen` | Post a fresh terminal view with interactive key controls |
-| `/key KEY [KEY…]` | Send Esc, Enter, arrows, Tab, paging, and control keys |
-| `/help` | Show the complete guide inside Telegram |
+| `/codex off` | Pause routing until the next message |
+| `/codex interrupt` | Interrupt the current turn |
+| `/screen` | Post a fresh terminal view with key controls |
+| `/key KEY [KEY…]` | Send allowlisted terminal keys |
+| `/help` | Show the complete in-Telegram guide |
 
 On mobile, a message containing only `up`, `down`, `left`, or `right` also acts
 as a key command. Sequences such as `down down enter` work too.
 
-## Session control API
+## Local control API
 
-Codex can operate the connection instead of merely describing what to do:
+Codex can operate the connection instead of merely describing an action:
 
 ```sh
 chatinabox catalog --json
@@ -172,31 +191,14 @@ chatinabox self lobby --json
 chatinabox send-image /tmp/chart.png "Latest result" --json
 ```
 
-`--json` is the stable machine-readable surface used by Lobby and the managed
-worker instructions. Pane actions bind to the tmux server PID, pane ID, and
-pane PID rather than trusting a display name.
-
-## Under the hood
-
-| Layer | Approach |
-| --- | --- |
-| Telegram | Owner-bound long polling; no public webhook or ingress |
-| Routing | One Telegram chat attached to one exact tmux pane identity |
-| Continuity | Running panes plus Codex's session index and transcripts |
-| Delivery | Lifecycle hooks with transcript fallback and final deduplication |
-| Follow-ups | Durable ordered queue flushed at the next tool boundary |
-| Terminal | ANSI-aware HTML render in headless Chrome, delivered as PNG |
-| Control | Unprivileged bot over a group-only Unix socket to a root bridge |
-| State | Separate bot-writable and root-only SQLite stores |
-
-The complete design and trust boundaries are documented in
-[Architecture](docs/ARCHITECTURE.md).
+`--json` is the stable machine-readable surface used by the managed Codex
+instructions. Pane mutations bind to tmux server PID, pane ID, and pane PID
+rather than trusting a display name.
 
 ## Model profiles
 
-Friendly profiles are Sol (default/high-cost), Terra (medium), and Luna (low).
-Lobby uses Terra/low/fast; workers default to Sol/high/standard. Model IDs are
-configuration, not baked-in product assumptions:
+The friendly internal profiles are Sol, Terra, and Luna. Their actual model IDs
+are environment mappings:
 
 ```ini
 CHATINABOX_SOL_MODEL=gpt-5.6-sol
@@ -204,38 +206,37 @@ CHATINABOX_TERRA_MODEL=gpt-5.6-terra
 CHATINABOX_LUNA_MODEL=gpt-5.6-luna
 ```
 
-Change the mapping in `/etc/chatinabox/chatinabox.env` when your Codex
-installation uses different model IDs.
+Worker and manager defaults are selected separately in the private profile.
 
 ## Full-access boundary
 
-Chatinabox deliberately launches Codex with approval and sandbox bypass flags.
-That is the product mode, not an optional shortcut.
+Chatinabox launches Codex with approval and sandbox bypass flags. An allowed
+Telegram user can therefore direct a root Codex process and control the host.
 
-An allowed Telegram user can direct a root Codex process and therefore control
-the host. Install Chatinabox only on a dedicated, disposable, externally
-sandboxed VPS with no unrelated secrets, workloads, credentials, or trusted
-network access. Read [SECURITY.md](SECURITY.md) before using it.
+Use it only on a dedicated, disposable, externally sandboxed VPS with no
+unrelated secrets, workloads, credentials, or trusted network access. Read
+[SECURITY.md](SECURITY.md) before installing.
 
-## Upgrade and uninstall
+## Operations
 
-Pull a new checkout and run the installer again. Each install creates a new
-release directory and atomically moves `/opt/chatinabox/current`.
+```sh
+chatinabox doctor
+chatinabox doctor --json
+systemctl status chatinabox chatinabox-bridge
+```
+
+Pull a newer checkout and run the installer again. Releases are installed
+atomically and the private profile is preserved.
 
 ```sh
 sudo ./scripts/uninstall.sh          # preserve state and secrets
-sudo ./scripts/uninstall.sh --purge  # also remove state, secrets, and user
+sudo ./scripts/uninstall.sh --purge  # remove state, secrets, and system user
 ```
 
-Uninstall removes the managed Codex hooks and instruction block. Without
-`--purge`, local session state and secrets remain available for a reinstall.
+Further notes:
+[Architecture](docs/ARCHITECTURE.md) ·
+[Changelog](CHANGELOG.md) ·
+[Contributing](CONTRIBUTING.md) ·
+[Acknowledgements](ACKNOWLEDGEMENTS.md)
 
-## Project notes
-
-- [Changelog](CHANGELOG.md)
-- [Acknowledgements](ACKNOWLEDGEMENTS.md)
-- [Architecture](docs/ARCHITECTURE.md)
-- [Contributing](CONTRIBUTING.md)
-- [Security](SECURITY.md)
-
-Chatinabox is available under the [MIT License](LICENSE).
+MIT licensed.

@@ -25,5 +25,16 @@ Telegram 2FA protects account login, while bot messages are still handled by
 Telegram's cloud Bot API. Treat the bot token as a root-equivalent secret for
 this VPS. Revoke it with BotFather if exposed.
 
+Forum mode requires the bot to manage topics in the selected private
+supergroup. Do not add the bot to unrelated groups. Chatinabox still checks the
+numeric owner allowlist before routing messages or callbacks, and topic
+attachments are scoped by chat, owner, and thread.
+
+The first-run guide is a root Codex session, not a lower-trust configuration
+assistant. Its profile command can change only validated presentation and launch
+defaults, but the conversation itself retains the full host authority described
+above. The profile is stored at `/etc/chatinabox/profile.json`, contains no bot
+token, is read-only to the Telegram service, and is preserved across upgrades.
+
 Please report vulnerabilities privately through GitHub's security advisory
 flow. Do not include bot tokens, Telegram IDs, transcripts, or terminal images.

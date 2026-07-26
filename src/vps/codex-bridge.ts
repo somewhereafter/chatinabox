@@ -2,9 +2,12 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   rmSync,
   statSync,
 } from "node:fs";
@@ -31,6 +34,8 @@ import {
   type CodexPane,
   type CodexPaneIdentity,
   type CodexRecentSession,
+  type CodexUsage,
+  type CodexUsageLimit,
   type CodexEvent,
   type CodexEventKind,
   type CodexAssistantName,
@@ -132,6 +137,18 @@ interface TurnActivity {
   readonly turnId: string;
   toolCalls: number;
   readonly editedFiles: Set<string>;
+  exploredThings: number;
+  readonly reasoningSummaryKeys: Set<string>;
+  readonly activeShells: Set<number>;
+  readonly pendingShellCalls: Map<string, number>;
+  readonly startedAt: number;
+}
+
+interface PaneProfile {
+  readonly model: string;
+  readonly reasoningEffort: "low" | "medium" | "high" | "xhigh";
+  readonly fast: boolean;
+  readonly cwd: string;
 }
 
 export class CodexBridge {
@@ -139,6 +156,9 @@ export class CodexBridge {
   private readonly server: net.Server;
   private mirrorTimer: NodeJS.Timeout | null = null;
   private mirrorRunning = false;
+  private usageCache:
+    { readonly value: CodexUsage | null; readonly cachedAt: number } | null =
+      null;
 
   constructor(private readonly options: BridgeOptions) {
     mkdirSync(path.dirname(options.databasePath), {
@@ -172,6 +192,7 @@ export class CodexBridge {
         session_id TEXT NOT NULL,
         turn_id TEXT NOT NULL,
         message TEXT NOT NULL,
+        turn_started_at INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS transcript_bindings (
@@ -213,6 +234,22 @@ export class CodexBridge {
         turn_id TEXT NOT NULL,
         tool_calls INTEGER NOT NULL DEFAULT 0,
         edited_files TEXT NOT NULL DEFAULT '[]',
+        explored_things INTEGER NOT NULL DEFAULT 0,
+        reasoning_summary_keys TEXT NOT NULL DEFAULT '[]',
+        active_shells TEXT NOT NULL DEFAULT '[]',
+        pending_shell_calls TEXT NOT NULL DEFAULT '{}',
+        started_at INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (server_pid, pane_id, pane_pid)
+      );
+      CREATE TABLE IF NOT EXISTS pane_profiles (
+        server_pid INTEGER NOT NULL,
+        pane_id TEXT NOT NULL,
+        pane_pid INTEGER NOT NULL,
+        model TEXT NOT NULL,
+        reasoning_effort TEXT NOT NULL,
+        fast INTEGER NOT NULL DEFAULT 0,
+        cwd TEXT NOT NULL,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (server_pid, pane_id, pane_pid)
       );
@@ -248,6 +285,7 @@ export class CodexBridge {
     `);
     this.migrateHookSessions();
     this.migrateEvents();
+    this.migrateTurnActivity();
     this.server = net.createServer(
       { allowHalfOpen: true },
       (socket) => this.handleSocket(socket),
@@ -290,11 +328,16 @@ export class CodexBridge {
       case "ping":
         return { ok: true, pong: true };
       case "list":
+        {
+          const savedSessions = this.listSavedSessions();
         return {
           ok: true,
           panes: await this.listCodexPanes(),
-          recent: this.listRecentSessions(),
+          recent: savedSessions.slice(0, 8),
+          totalSessions: savedSessions.length,
+          usage: await this.latestCodexUsage(),
         };
+        }
       case "send":
         return this.sendPrompt(request);
       case "interrupt":
@@ -303,6 +346,8 @@ export class CodexBridge {
         return this.sendKeys(request);
       case "screen":
         return this.captureScreen(request);
+      case "close":
+        return this.closeSession(request);
       case "new":
         return this.createSession(request);
       case "resume":
@@ -628,9 +673,13 @@ export class CodexBridge {
       request.reasoningEffort !== undefined &&
       request.reasoningEffort !== "low" &&
       request.reasoningEffort !== "medium" &&
-      request.reasoningEffort !== "high"
+      request.reasoningEffort !== "high" &&
+      request.reasoningEffort !== "xhigh"
     ) {
-      return failure("BAD_PROFILE", "Worker effort must be low, medium, or high.");
+      return failure(
+        "BAD_PROFILE",
+        "Worker effort must be low, medium, high, or xhigh.",
+      );
     }
     if (request.fast !== undefined && typeof request.fast !== "boolean") {
       return failure("BAD_PROFILE", "Worker fast mode must be a boolean.");
@@ -645,20 +694,31 @@ export class CodexBridge {
       normalizeRequestedTmuxSession(request.tmuxSession) ??
       existing[0]?.sessionName ??
       "codex";
-    const command = workerCodexCommand({
-      model: normalizeWorkerModel(request.model),
-      reasoningEffort: normalizeWorkerReasoningEffort(
-        request.reasoningEffort,
-      ),
+    const model = normalizeWorkerModel(request.model);
+    const profile = {
+      model,
+      reasoningEffort: normalizeWorkerReasoningEffort(request.reasoningEffort),
       fast: request.fast === true,
-    });
-    return this.startTmuxCodex({
+      cwd,
+    };
+    const command = workerCodexCommand(profile);
+    const response = await this.startTmuxCodex({
       existing,
       tmuxSession,
       name,
       cwd,
       command,
     });
+    if (response.ok && "pane" in response) {
+      const assistantName = assistantNameForModel(model);
+      this.saveAssistantName(response.pane, assistantName);
+      this.savePaneProfile(response.pane, profile);
+      return {
+        ...response,
+        pane: { ...response.pane, assistantName },
+      };
+    }
+    return response;
   }
 
   private async ensureLobby(): Promise<CodexBridgeResponse> {
@@ -732,7 +792,7 @@ export class CodexBridge {
     ) {
       return failure("BAD_SESSION", "That saved Codex session id is invalid.");
     }
-    const recent = this.listRecentSessions();
+    const recent = this.listSavedSessions();
     const saved = recent.find((session) => session.id === request.sessionId);
     if (!saved) {
       return failure("BAD_SESSION", "That saved Codex session is no longer available.");
@@ -743,19 +803,96 @@ export class CodexBridge {
     );
     if (alreadyRunning) return { ok: true, pane: alreadyRunning };
     const name = normalizeRequestedName(request.name ?? saved.name);
+    if (
+      request.model !== undefined &&
+      request.model !== "sol" &&
+      request.model !== "luna" &&
+      request.model !== "terra"
+    ) {
+      return failure("BAD_PROFILE", "Worker model must be Sol, Luna, or Terra.");
+    }
+    if (
+      request.reasoningEffort !== undefined &&
+      request.reasoningEffort !== "low" &&
+      request.reasoningEffort !== "medium" &&
+      request.reasoningEffort !== "high" &&
+      request.reasoningEffort !== "xhigh"
+    ) {
+      return failure(
+        "BAD_PROFILE",
+        "Worker effort must be low, medium, high, or xhigh.",
+      );
+    }
+    if (request.fast !== undefined && typeof request.fast !== "boolean") {
+      return failure("BAD_PROFILE", "Worker fast mode must be a boolean.");
+    }
     const tmuxSession =
       normalizeRequestedTmuxSession(request.tmuxSession) ??
       existing[0]?.sessionName ??
       "codex";
+    const profile = {
+      model: normalizeWorkerModel(request.model),
+      reasoningEffort: normalizeWorkerReasoningEffort(
+        request.reasoningEffort,
+      ),
+      fast: request.fast === true,
+      cwd: normalizeRequestedCwd(
+        request.cwd,
+        this.options.defaultCwd ?? homedir(),
+      ),
+    };
     const command =
-      `${fullAccessCodexCommand()} resume ${request.sessionId}`;
-    return this.startTmuxCodex({
+      `${workerCodexCommand(profile)} resume ${request.sessionId}`;
+    const response = await this.startTmuxCodex({
       existing,
       tmuxSession,
       name,
-      cwd: this.options.defaultCwd ?? homedir(),
+      cwd: profile.cwd,
       command,
     });
+    if (response.ok && "pane" in response) {
+      const assistantName = assistantNameForModel(profile.model);
+      this.saveAssistantName(response.pane, assistantName);
+      this.savePaneProfile(response.pane, profile);
+      return {
+        ...response,
+        pane: { ...response.pane, assistantName },
+      };
+    }
+    return response;
+  }
+
+  private async closeSession(
+    request: Record<string, unknown>,
+  ): Promise<CodexBridgeResponse> {
+    const target = await this.requireTarget(request.target);
+    if (!target) {
+      return failure("STALE_TARGET", "That Codex session is no longer available.");
+    }
+    if (target.busy) {
+      return failure("SESSION_BUSY", "A working Codex session cannot be closed.");
+    }
+    const saved = this.paneProfile(target);
+    const profile = {
+      model: profileModelFamily(saved?.model, target.assistantName),
+      reasoningEffort: saved?.reasoningEffort ?? "high",
+      fast: saved?.fast ?? false,
+      cwd: saved?.cwd ?? target.cwd,
+    } as const;
+    const sessionId = target.sessionId ?? null;
+    await run(TMUX, ["send-keys", "-l", "-t", target.paneId, "/exit"])
+      .catch(() => undefined);
+    await run(TMUX, ["send-keys", "-t", target.paneId, "Enter"])
+      .catch(() => undefined);
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await delay(100);
+      const panes = await this.listCodexPanes();
+      if (!panes.some((pane) => samePaneIdentity(pane, target))) {
+        return { ok: true, closed: true, sessionId, profile };
+      }
+    }
+    await run(TMUX, ["kill-pane", "-t", target.paneId]);
+    return { ok: true, closed: true, sessionId, profile };
   }
 
   private async startTmuxCodex(input: {
@@ -808,6 +945,10 @@ export class CodexBridge {
   }
 
   private listRecentSessions(): CodexRecentSession[] {
+    return this.listSavedSessions().slice(0, 8);
+  }
+
+  private listSavedSessions(): CodexRecentSession[] {
     const indexPath =
       process.env.CODEX_SESSION_INDEX ??
       path.join(CODEX_HOME, "session_index.jsonl");
@@ -847,11 +988,60 @@ export class CodexBridge {
         .sort(
           (left, right) =>
             Date.parse(right.updatedAt) - Date.parse(left.updatedAt),
-        )
-        .slice(0, 8);
+        );
     } catch {
       return [];
     }
+  }
+
+  private async latestCodexUsage(): Promise<CodexUsage | null> {
+    const now = Date.now();
+    if (this.usageCache && now - this.usageCache.cachedAt < 10_000) {
+      return this.usageCache.value;
+    }
+    const rows = this.db.prepare(`
+      SELECT transcript_path
+      FROM transcript_bindings
+      GROUP BY transcript_path
+      ORDER BY MAX(updated_at) DESC
+      LIMIT 12
+    `).all() as unknown as Array<{ transcript_path: string }>;
+    const candidates = (
+      await Promise.all(rows.map(async ({ transcript_path: transcriptPath }) => {
+        const fileStat = await statFile(transcriptPath).catch(() => null);
+        return fileStat?.isFile()
+          ? { transcriptPath, modifiedAt: fileStat.mtimeMs, size: fileStat.size }
+          : null;
+      }))
+    )
+      .filter((candidate) => candidate !== null)
+      .sort((left, right) => right.modifiedAt - left.modifiedAt);
+
+    let latest: CodexUsage | null = null;
+    for (const candidate of candidates) {
+      const bytesToRead = Math.min(candidate.size, 512 * 1024);
+      if (bytesToRead <= 0) continue;
+      const file = await openFile(candidate.transcriptPath, "r");
+      let buffer: Buffer;
+      try {
+        buffer = Buffer.alloc(bytesToRead);
+        const result = await file.read(
+          buffer,
+          0,
+          bytesToRead,
+          candidate.size - bytesToRead,
+        );
+        buffer = buffer.subarray(0, result.bytesRead);
+      } finally {
+        await file.close();
+      }
+      const parsed = parseCodexUsageFromTranscriptTail(buffer.toString("utf8"));
+      if (parsed && (!latest || parsed.observedAt > latest.observedAt)) {
+        latest = parsed;
+      }
+    }
+    this.usageCache = { value: latest, cachedAt: now };
+    return latest;
   }
 
   private async renameSession(
@@ -861,7 +1051,28 @@ export class CodexBridge {
     const target = await this.requireTarget(request.target);
     if (!target) return failure("STALE_TARGET", "That Codex session is no longer available.");
     const name = normalizeRequestedName(request.name);
-    await run(TMUX, ["rename-window", "-t", target.paneId, name]);
+    const panes = await this.listCodexPanes();
+    const sharesWindow = panes.some(
+      (pane) =>
+        !samePaneIdentity(pane, target) &&
+        pane.sessionName === target.sessionName &&
+        pane.windowIndex === target.windowIndex,
+    );
+    if (sharesWindow) {
+      // A window name belongs to every pane in that window. Legacy sessions
+      // may share one, so detach only the target pane into its own window
+      // before renaming; the Codex process and transcript remain untouched.
+      await run(TMUX, [
+        "break-pane",
+        "-d",
+        "-s",
+        target.paneId,
+        "-n",
+        name,
+      ]);
+    } else {
+      await run(TMUX, ["rename-window", "-t", target.paneId, name]);
+    }
     const renamed = await this.requireTarget(target);
     if (renamed && notifyTelegram) {
       this.insertMessageEvent(
@@ -961,26 +1172,42 @@ export class CodexBridge {
       turn_id: string;
       assistant_name?: string;
       message: string;
+      turn_started_at?: number;
       created_at: number;
     }>;
-    const events: CodexEvent[] = rows.map((row) => ({
-      id: row.id,
-      kind: isCodexEventKind(row.kind) ? row.kind : "assistant_final",
-      target: {
+    const events: CodexEvent[] = rows.map((row) => {
+      const target = {
         serverPid: row.server_pid,
         paneId: row.pane_id,
         panePid: row.pane_pid,
-      },
-      sessionId: row.session_id,
-      turnId: row.turn_id,
-      assistantName: this.assistantNameForTarget({
-        serverPid: row.server_pid,
-        paneId: row.pane_id,
-        panePid: row.pane_pid,
-      }),
-      message: row.message,
-      createdAt: row.created_at,
-    }));
+      };
+      const profile = this.paneProfile(target);
+      const contextUsedPercent = row.kind === "assistant_final"
+        ? this.contextUsedPercent(target, row.session_id)
+        : null;
+      return {
+        id: row.id,
+        kind: isCodexEventKind(row.kind) ? row.kind : "assistant_final",
+        target,
+        sessionId: row.session_id,
+        turnId: row.turn_id,
+        assistantName: this.assistantNameForTarget(target),
+        message: row.message,
+        createdAt: row.created_at,
+        ...(row.turn_started_at && row.turn_started_at > 0
+          ? { turnStartedAt: row.turn_started_at }
+          : {}),
+        ...(profile
+          ? {
+              model: profile.model,
+              reasoningEffort: profile.reasoningEffort,
+              fast: profile.fast,
+              cwd: profile.cwd,
+            }
+          : {}),
+        ...(contextUsedPercent !== null ? { contextUsedPercent } : {}),
+      };
+    });
     return { ok: true, events };
   }
 
@@ -992,6 +1219,48 @@ export class CodexBridge {
       .prepare(`DELETE FROM stop_events WHERE id = ?`)
       .run(Number(request.eventId));
     return { ok: true, acked: result.changes > 0 };
+  }
+
+  private contextUsedPercent(
+    target: CodexPaneIdentity,
+    sessionId: string,
+  ): number | null {
+    const binding = this.db.prepare(`
+      SELECT transcript_path FROM transcript_bindings
+      WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+        AND session_id = ?
+    `).get(
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      sessionId,
+    ) as { transcript_path: string } | undefined;
+    if (!binding) return null;
+    let descriptor: number | null = null;
+    try {
+      const fileStat = statSync(binding.transcript_path);
+      const bytes = Math.min(fileStat.size, TRANSCRIPT_DISCOVERY_TAIL_BYTES);
+      if (bytes <= 0) return null;
+      descriptor = openSync(binding.transcript_path, "r");
+      const buffer = Buffer.alloc(bytes);
+      const read = readSync(
+        descriptor,
+        buffer,
+        0,
+        bytes,
+        fileStat.size - bytes,
+      );
+      let contents = buffer.subarray(0, read).toString("utf8");
+      if (fileStat.size > bytes) {
+        const firstNewline = contents.indexOf("\n");
+        contents = firstNewline >= 0 ? contents.slice(firstNewline + 1) : "";
+      }
+      return parseCodexContextUsedPercentFromTranscriptTail(contents);
+    } catch {
+      return null;
+    } finally {
+      if (descriptor !== null) closeSync(descriptor);
+    }
   }
 
   private async acceptHook(
@@ -1415,11 +1684,22 @@ export class CodexBridge {
     eventKey: string,
   ): void {
     if (!message || Buffer.byteLength(message) > MAX_STOP_BYTES) return;
+    const activity = this.db.prepare(`
+      SELECT started_at FROM turn_activity
+      WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+        AND session_id = ? AND turn_id = ?
+    `).get(
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      sessionId,
+      turnId,
+    ) as { started_at: number } | undefined;
     const inserted = this.db.prepare(`
       INSERT OR IGNORE INTO stop_events (
         event_key, kind, server_pid, pane_id, pane_pid, session_id, turn_id,
-        message, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        message, turn_started_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       eventKey,
       kind,
@@ -1429,6 +1709,7 @@ export class CodexBridge {
       sessionId,
       turnId,
       message,
+      activity?.started_at ?? 0,
       Date.now(),
     );
     if (inserted.changes > 0 && kind === "assistant_final") {
@@ -1503,7 +1784,9 @@ export class CodexBridge {
     sessionId: string,
   ): TurnActivity | null {
     const row = this.db.prepare(`
-      SELECT session_id, turn_id, tool_calls, edited_files
+      SELECT session_id, turn_id, tool_calls, edited_files,
+        explored_things, reasoning_summary_keys, active_shells,
+        pending_shell_calls, started_at
       FROM turn_activity
       WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
     `).get(
@@ -1515,6 +1798,11 @@ export class CodexBridge {
       turn_id: string;
       tool_calls: number;
       edited_files: string;
+      explored_things: number;
+      reasoning_summary_keys: string;
+      active_shells: string;
+      pending_shell_calls: string;
+      started_at: number;
     } | undefined;
     if (!row || row.session_id !== sessionId) return null;
     let editedFiles: string[] = [];
@@ -1529,11 +1817,18 @@ export class CodexBridge {
     } catch {
       editedFiles = [];
     }
+    const activeShells = parseNumberSet(row.active_shells);
+    const pendingShellCalls = parseNumberMap(row.pending_shell_calls);
     return {
       sessionId,
       turnId: row.turn_id,
       toolCalls: Math.max(0, row.tool_calls),
       editedFiles: new Set(editedFiles),
+      exploredThings: Math.max(0, row.explored_things),
+      reasoningSummaryKeys: parseStringSet(row.reasoning_summary_keys),
+      activeShells,
+      pendingShellCalls,
+      startedAt: row.started_at > 0 ? row.started_at : Date.now(),
     };
   }
 
@@ -1544,13 +1839,19 @@ export class CodexBridge {
     this.db.prepare(`
       INSERT INTO turn_activity (
         server_pid, pane_id, pane_pid, session_id, turn_id,
-        tool_calls, edited_files, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        tool_calls, edited_files, explored_things, reasoning_summary_keys,
+        active_shells, pending_shell_calls, started_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(server_pid, pane_id, pane_pid) DO UPDATE SET
         session_id = excluded.session_id,
         turn_id = excluded.turn_id,
         tool_calls = excluded.tool_calls,
         edited_files = excluded.edited_files,
+        explored_things = excluded.explored_things,
+        reasoning_summary_keys = excluded.reasoning_summary_keys,
+        active_shells = excluded.active_shells,
+        pending_shell_calls = excluded.pending_shell_calls,
+        started_at = excluded.started_at,
         updated_at = excluded.updated_at
     `).run(
       target.serverPid,
@@ -1560,6 +1861,11 @@ export class CodexBridge {
       activity.turnId,
       activity.toolCalls,
       JSON.stringify([...activity.editedFiles]),
+      activity.exploredThings,
+      JSON.stringify([...activity.reasoningSummaryKeys]),
+      JSON.stringify([...activity.activeShells]),
+      JSON.stringify(Object.fromEntries(activity.pendingShellCalls)),
+      activity.startedAt,
       Date.now(),
     );
   }
@@ -1614,9 +1920,12 @@ export class CodexBridge {
         target,
         binding.session_id,
         activity.turnId,
-        `${activity.toolCalls}\u001f${activity.editedFiles.size}`,
+        `${activity.toolCalls}\u001f${activity.editedFiles.size}\u001f` +
+          `${activity.exploredThings}\u001f${activity.activeShells.size}`,
         `transcript-activity:${binding.session_id}:${activity.turnId}:` +
-          `${activity.toolCalls}:${activity.editedFiles.size}:${recordOffset}`,
+          `${activity.toolCalls}:${activity.editedFiles.size}:` +
+          `${activity.exploredThings}:${activity.activeShells.size}:` +
+          `${recordOffset}`,
       );
       activityDirty = false;
     };
@@ -1701,7 +2010,21 @@ export class CodexBridge {
           assistantNameForModel(payload.model),
         );
       }
+      if (
+        record.type === "turn_context" ||
+        (
+          record.type === "event_msg" &&
+          payload.type === "thread_settings_applied"
+        )
+      ) {
+        const profile = transcriptPaneProfile(
+          record,
+          this.paneProfile(target),
+        );
+        if (profile) this.savePaneProfile(target, profile);
+      }
       const compactionSignal = transcriptCompactionSignal(record);
+      const turnEndSignal = transcriptTurnEndSignal(record);
       if (compactionSignal === "started") {
         this.insertMessageEvent(
           "state_compacting",
@@ -1737,6 +2060,11 @@ export class CodexBridge {
           turnId,
           toolCalls: 0,
           editedFiles: new Set(),
+          exploredThings: 0,
+          reasoningSummaryKeys: new Set(),
+          activeShells: new Set(),
+          pendingShellCalls: new Map(),
+          startedAt: transcriptRecordTime(record) ?? Date.now(),
         };
         this.saveTurnActivity(target, activity);
         activityDirty = false;
@@ -1748,6 +2076,43 @@ export class CodexBridge {
           "working",
           `transcript-state:${binding.session_id}:${recordOffset}`,
         );
+        continue;
+      }
+      if (
+        record.type === "event_msg" &&
+        payload.type === "agent_reasoning" &&
+        typeof payload.text === "string" &&
+        payload.text.trim()
+      ) {
+        activity ??= {
+          sessionId: binding.session_id,
+          turnId:
+            typeof payload.turn_id === "string"
+              ? payload.turn_id.slice(0, 200)
+              : `transcript-${binding.session_id}`,
+          toolCalls: 0,
+          editedFiles: new Set(),
+          exploredThings: 0,
+          reasoningSummaryKeys: new Set(),
+          activeShells: new Set(),
+          pendingShellCalls: new Map(),
+          startedAt: transcriptRecordTime(record) ?? Date.now(),
+        };
+        const message = payload.text.trim().slice(0, MAX_STOP_BYTES);
+        const summaryKey = reasoningSummaryKey(message);
+        if (!activity.reasoningSummaryKeys.has(summaryKey)) {
+          activity.reasoningSummaryKeys.add(summaryKey);
+          activity.exploredThings += 1;
+          activityDirty = true;
+          this.insertMessageEvent(
+            "agent_reasoning",
+            target,
+            binding.session_id,
+            activity.turnId,
+            message,
+            `transcript-reasoning:${binding.session_id}:${recordOffset}`,
+          );
+        }
         continue;
       }
       if (
@@ -1792,6 +2157,36 @@ export class CodexBridge {
         pendingKey = null;
         pendingAt = null;
       }
+      const reasoningSummaries = transcriptReasoningSummaries(record);
+      if (reasoningSummaries.length > 0) {
+        activity ??= {
+          sessionId: binding.session_id,
+          turnId: `transcript-${binding.session_id}`,
+          toolCalls: 0,
+          editedFiles: new Set(),
+          exploredThings: 0,
+          reasoningSummaryKeys: new Set(),
+          activeShells: new Set(),
+          pendingShellCalls: new Map(),
+          startedAt: transcriptRecordTime(record) ?? Date.now(),
+        };
+        for (const [index, summary] of reasoningSummaries.entries()) {
+          const summaryKey = reasoningSummaryKey(summary);
+          if (activity.reasoningSummaryKeys.has(summaryKey)) continue;
+          activity.reasoningSummaryKeys.add(summaryKey);
+          activity.exploredThings += 1;
+          this.insertMessageEvent(
+            "agent_reasoning",
+            target,
+            binding.session_id,
+            activity.turnId,
+            summary,
+            `transcript-reasoning-summary:${binding.session_id}:` +
+              `${recordOffset}:${index}`,
+          );
+        }
+        activityDirty = true;
+      }
       if (
         record.type === "response_item" &&
         (payload.type === "function_call" || payload.type === "custom_tool_call")
@@ -1801,12 +2196,22 @@ export class CodexBridge {
           turnId: `transcript-${binding.session_id}`,
           toolCalls: 0,
           editedFiles: new Set(),
+          exploredThings: 0,
+          reasoningSummaryKeys: new Set(),
+          activeShells: new Set(),
+          pendingShellCalls: new Map(),
+          startedAt: transcriptRecordTime(record) ?? Date.now(),
         };
         activity.toolCalls += 1;
         activityDirty = true;
         const toolName = typeof payload.name === "string" ? payload.name : "";
+        const callId = stringField(payload, "call_id", 300);
+        const shellTarget = shellSessionFromToolInput(payload);
+        if (callId && shellTarget !== null) {
+          activity.pendingShellCalls.set(callId, shellTarget);
+          activity.activeShells.add(shellTarget);
+        }
         if (toolName === "view_image") {
-          const callId = stringField(payload, "call_id", 300);
           if (callId) {
             this.rememberImageViewCall(
               target,
@@ -1839,6 +2244,11 @@ export class CodexBridge {
           turnId: `transcript-${binding.session_id}`,
           toolCalls: 0,
           editedFiles: new Set(),
+          exploredThings: 0,
+          reasoningSummaryKeys: new Set(),
+          activeShells: new Set(),
+          pendingShellCalls: new Map(),
+          startedAt: transcriptRecordTime(record) ?? Date.now(),
         };
         for (const filePath of Object.keys(payload.changes)) {
           if (filePath.length <= 4_096 && activity.editedFiles.size < 500) {
@@ -1856,6 +2266,17 @@ export class CodexBridge {
       ) {
         if (activity) activityDirty = true;
         const callId = stringField(payload, "call_id", 300);
+        if (activity && callId) {
+          const targetShell = activity.pendingShellCalls.get(callId);
+          const runningShell = shellSessionFromToolOutput(payload);
+          if (targetShell !== undefined && runningShell !== targetShell) {
+            activity.activeShells.delete(targetShell);
+          }
+          if (runningShell !== null) {
+            activity.activeShells.add(runningShell);
+          }
+          activity.pendingShellCalls.delete(callId);
+        }
         if (
           callId &&
           this.consumeImageViewCall(
@@ -1898,8 +2319,42 @@ export class CodexBridge {
         }
       }
       if (
-        record.type === "event_msg" &&
-        payload.type === "task_complete"
+        turnEndSignal === "aborted"
+      ) {
+        const abortedTurnId =
+          typeof payload.turn_id === "string" && payload.turn_id.length <= 200
+            ? payload.turn_id
+            : activity?.turnId ?? `transcript-${recordOffset}`;
+        const reason = typeof payload.reason === "string"
+          ? payload.reason.slice(0, 160)
+          : "aborted";
+        pendingAgent = null;
+        pendingKey = null;
+        pendingAt = null;
+        this.deleteTurnActivity(target);
+        activity = null;
+        activityDirty = false;
+        this.db.prepare(`
+          UPDATE hook_sessions SET busy = 0, updated_at = ?
+          WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+        `).run(
+          Date.now(),
+          target.serverPid,
+          target.paneId,
+          target.panePid,
+        );
+        this.insertMessageEvent(
+          "turn_aborted",
+          target,
+          binding.session_id,
+          abortedTurnId,
+          reason,
+          `transcript-aborted:${binding.session_id}:${recordOffset}`,
+        );
+        continue;
+      }
+      if (
+        turnEndSignal === "completed"
       ) {
         flushActivity(recordOffset);
         if (pendingAgent && pendingKey && !this.hasHookRegistration(target)) {
@@ -1975,6 +2430,57 @@ export class CodexBridge {
     this.db.prepare(`
       DELETE FROM pending_image_views WHERE created_at < ?
     `).run(now - 24 * 60 * 60 * 1_000);
+  }
+
+  private savePaneProfile(
+    target: CodexPaneIdentity,
+    profile: PaneProfile,
+  ): void {
+    this.db.prepare(`
+      INSERT INTO pane_profiles (
+        server_pid, pane_id, pane_pid, model, reasoning_effort,
+        fast, cwd, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(server_pid, pane_id, pane_pid) DO UPDATE SET
+        model = excluded.model,
+        reasoning_effort = excluded.reasoning_effort,
+        fast = excluded.fast,
+        cwd = excluded.cwd,
+        updated_at = excluded.updated_at
+    `).run(
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      profile.model,
+      profile.reasoningEffort,
+      profile.fast ? 1 : 0,
+      profile.cwd,
+      Date.now(),
+    );
+  }
+
+  private paneProfile(target: CodexPaneIdentity): PaneProfile | null {
+    const row = this.db.prepare(`
+      SELECT model, reasoning_effort, fast, cwd
+      FROM pane_profiles
+      WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+    `).get(
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+    ) as {
+      model: string;
+      reasoning_effort: string;
+      fast: number;
+      cwd: string;
+    } | undefined;
+    if (!row) return null;
+    return {
+      model: row.model,
+      reasoningEffort: normalizeProfileEffort(row.reasoning_effort),
+      fast: row.fast === 1,
+      cwd: normalizeCwd(row.cwd),
+    };
   }
 
   private saveAssistantName(
@@ -2122,6 +2628,33 @@ export class CodexBridge {
         ALTER TABLE stop_events
         ADD COLUMN kind TEXT NOT NULL DEFAULT 'assistant_final'
       `);
+    }
+    if (!columns.has("turn_started_at")) {
+      this.db.exec(`
+        ALTER TABLE stop_events
+        ADD COLUMN turn_started_at INTEGER NOT NULL DEFAULT 0
+      `);
+    }
+  }
+
+  private migrateTurnActivity(): void {
+    const columns = new Set(
+      (this.db.prepare(`PRAGMA table_info(turn_activity)`).all() as unknown as
+        Array<{ name: string }>).map((column) => column.name),
+    );
+    const additions = [
+      ["explored_things", "INTEGER NOT NULL DEFAULT 0"],
+      ["reasoning_summary_keys", "TEXT NOT NULL DEFAULT '[]'"],
+      ["active_shells", "TEXT NOT NULL DEFAULT '[]'"],
+      ["pending_shell_calls", "TEXT NOT NULL DEFAULT '{}'"],
+      ["started_at", "INTEGER NOT NULL DEFAULT 0"],
+    ] as const;
+    for (const [name, definition] of additions) {
+      if (!columns.has(name)) {
+        this.db.exec(
+          `ALTER TABLE turn_activity ADD COLUMN ${name} ${definition}`,
+        );
+      }
     }
   }
 }
@@ -2274,11 +2807,11 @@ function parseNonNegativeInteger(value: string): number {
 }
 
 function normalizeLabel(value: string, max: number): string {
-  return value
+  const normalized = value
     .normalize("NFC")
     .replace(/[\u0000-\u001f\u007f]/gu, " ")
-    .trim()
-    .slice(0, max);
+    .trim();
+  return [...normalized].slice(0, max).join("");
 }
 
 function normalizeCwd(value: string): string {
@@ -2287,7 +2820,7 @@ function normalizeCwd(value: string): string {
 
 function normalizeRequestedName(value: unknown): string {
   const normalized =
-    typeof value === "string" ? normalizeLabel(value, 60) : "";
+    typeof value === "string" ? normalizeLabel(value, 128) : "";
   return normalized ||
     `Session · ${new Date().toISOString().slice(11, 16).replace(":", "")}`;
 }
@@ -2311,37 +2844,49 @@ function normalizeRequestedTmuxSession(value: unknown): string | null {
   return /^[A-Za-z0-9_.-]+$/u.test(normalized) ? normalized : null;
 }
 
-function fullAccessCodexCommand(): string {
+export function fullAccessCodexCommand(): string {
   return (
     `${shellArgument(CODEX)} --dangerously-bypass-approvals-and-sandbox ` +
-    "--dangerously-bypass-hook-trust"
+    "--dangerously-bypass-hook-trust " +
+    `-c 'model_reasoning_summary="detailed"' ` +
+    `-c 'model_verbosity="medium"' ` +
+    `-c 'personality="friendly"' ` +
+    `-c 'web_search="live"' ` +
+    `-c 'plan_mode_reasoning_effort="high"' ` +
+    `-c 'hide_agent_reasoning=false' ` +
+    `-c 'show_raw_agent_reasoning=false' ` +
+    `-c 'service_tier="default"' ` +
+    "--disable fast_mode --enable hooks"
   );
 }
 
-function workerCodexCommand(input: {
+export function workerCodexCommand(input: {
   readonly model: "sol" | "luna" | "terra";
-  readonly reasoningEffort: "low" | "medium" | "high";
+  readonly reasoningEffort: "low" | "medium" | "high" | "xhigh";
   readonly fast: boolean;
 }): string {
-  const fast = input.fast
+  const tier = input.fast
     ? ` -c 'service_tier="fast"' --enable fast_mode`
     : "";
   return (
     `${fullAccessCodexCommand()} ` +
     `-c 'model="${modelForProfile(input.model)}"' ` +
     `-c 'model_reasoning_effort="${input.reasoningEffort}"'` +
-    fast
+    tier
   );
 }
 
-function lobbyCodexCommand(lobbyCwd: string): string {
+export function lobbyCodexCommand(lobbyCwd: string): string {
   const trustOverride =
     `projects.${JSON.stringify(lobbyCwd)}.trust_level="trusted"`;
   return workerCodexCommand({
     model: "terra",
     reasoningEffort: "low",
     fast: true,
-  }) + ` -c ${shellArgument(trustOverride)}`;
+  }) +
+    ` -c 'model_reasoning_summary="concise"'` +
+    ` -c 'model_verbosity="low"'` +
+    ` -c ${shellArgument(trustOverride)}`;
 }
 
 function modelForProfile(profile: "sol" | "luna" | "terra"): string {
@@ -2359,10 +2904,191 @@ function normalizeWorkerModel(
   return value === "luna" || value === "terra" ? value : "sol";
 }
 
+function profileModelFamily(
+  model: unknown,
+  assistantName: unknown,
+): "sol" | "luna" | "terra" {
+  const normalized = typeof model === "string" ? model.toLowerCase() : "";
+  if (normalized.includes("luna") || assistantName === "Luna") return "luna";
+  if (normalized.includes("terra") || assistantName === "Terra") return "terra";
+  return "sol";
+}
+
 function normalizeWorkerReasoningEffort(
   value: unknown,
-): "low" | "medium" | "high" {
-  return value === "low" || value === "medium" ? value : "high";
+): "low" | "medium" | "high" | "xhigh" {
+  return value === "low" || value === "medium" || value === "xhigh"
+    ? value
+    : "high";
+}
+
+function normalizeProfileEffort(
+  value: unknown,
+): "low" | "medium" | "high" | "xhigh" {
+  return value === "low" ||
+      value === "medium" ||
+      value === "xhigh"
+    ? value
+    : "high";
+}
+
+function transcriptPaneProfile(
+  record: Record<string, unknown>,
+  current: PaneProfile | null,
+): PaneProfile | null {
+  if (!isPlainRecord(record.payload)) return null;
+  const payload = record.payload;
+  let source: Record<string, unknown> | null = null;
+  if (record.type === "turn_context") {
+    source = payload;
+  } else if (
+    record.type === "event_msg" &&
+    payload.type === "thread_settings_applied" &&
+    isPlainRecord(payload.thread_settings)
+  ) {
+    source = payload.thread_settings;
+  }
+  if (!source) return null;
+  const model =
+    typeof source.model === "string" && source.model.trim()
+      ? source.model.trim().slice(0, 160)
+      : current?.model;
+  const effortValue = source.reasoning_effort ?? source.effort;
+  const reasoningEffort = effortValue === undefined
+    ? current?.reasoningEffort
+    : normalizeProfileEffort(effortValue);
+  const cwd =
+    typeof source.cwd === "string" && source.cwd.trim()
+      ? normalizeCwd(source.cwd.trim())
+      : current?.cwd;
+  if (!model || !reasoningEffort || !cwd) return null;
+  const serviceTier = typeof source.service_tier === "string"
+    ? source.service_tier
+    : null;
+  return {
+    model,
+    reasoningEffort,
+    fast: serviceTier === null ? current?.fast === true : serviceTier === "fast",
+    cwd,
+  };
+}
+
+function transcriptRecordTime(record: Record<string, unknown>): number | null {
+  if (typeof record.timestamp !== "string") return null;
+  const parsed = Date.parse(record.timestamp);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseNumberSet(value: string): Set<number> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed.filter(
+        (candidate): candidate is number =>
+          Number.isSafeInteger(candidate) && Number(candidate) > 0,
+      ).slice(0, 64),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function parseStringSet(value: string): Set<string> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed.filter(
+        (candidate): candidate is string =>
+          typeof candidate === "string" &&
+          /^[a-f0-9]{64}$/u.test(candidate),
+      ).slice(0, 500),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+export function reasoningSummaryKey(value: string): string {
+  const normalized = value
+    .trim()
+    .replace(/^\*{2}([\s\S]*?)\*{2}$/u, "$1")
+    .replace(/\s+/gu, " ")
+    .replace(/[.…]+$/u, "")
+    .toLocaleLowerCase("en-US");
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
+function parseNumberMap(value: string): Map<string, number> {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!isPlainRecord(parsed)) return new Map();
+    return new Map(
+      Object.entries(parsed)
+        .filter(
+          (entry): entry is [string, number] =>
+            entry[0].length <= 300 &&
+            Number.isSafeInteger(entry[1]) &&
+            Number(entry[1]) > 0,
+        )
+        .slice(0, 64),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+export function shellSessionFromToolInput(
+  payload: Record<string, unknown>,
+): number | null {
+  if (payload.name !== "write_stdin") return null;
+  let input = payload.input;
+  if (typeof input === "string") {
+    try {
+      input = JSON.parse(input) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  if (!isPlainRecord(input)) return null;
+  return Number.isSafeInteger(input.session_id) && Number(input.session_id) > 0
+    ? Number(input.session_id)
+    : null;
+}
+
+export function shellSessionFromToolOutput(
+  payload: Record<string, unknown>,
+): number | null {
+  const values = Array.isArray(payload.output)
+    ? payload.output
+    : [payload.output];
+  for (const value of values) {
+    const text = isPlainRecord(value) && typeof value.text === "string"
+      ? value.text
+      : typeof value === "string"
+        ? value
+        : "";
+    if (!text) continue;
+    const trimmed = text.trim();
+    if (trimmed.startsWith("{") && trimmed.length <= 20_000) {
+      try {
+        const parsed = JSON.parse(trimmed) as unknown;
+        if (
+          isPlainRecord(parsed) &&
+          Number.isSafeInteger(parsed.session_id) &&
+          Number(parsed.session_id) > 0
+        ) {
+          return Number(parsed.session_id);
+        }
+      } catch {
+        // Some legacy tool outputs are plain text rather than JSON.
+      }
+    }
+    const legacy = /(?:session id|session_id)\D{0,8}(\d{1,12})/iu.exec(text);
+    if (legacy) return Number(legacy[1]);
+  }
+  return null;
 }
 
 function stringField(
@@ -2389,6 +3115,7 @@ function isCodexEventKind(value: unknown): value is CodexEventKind {
   return (
     value === "assistant_final" ||
     value === "assistant_progress" ||
+    value === "agent_reasoning" ||
     value === "context_compacted" ||
     value === "image_viewed" ||
     value === "session_renamed" ||
@@ -2397,7 +3124,8 @@ function isCodexEventKind(value: unknown): value is CodexEventKind {
     value === "state_compacting" ||
     value === "state_working" ||
     value === "state_waiting_terminal" ||
-    value === "state_activity"
+    value === "state_activity" ||
+    value === "turn_aborted"
   );
 }
 
@@ -2413,6 +3141,23 @@ export function transcriptCompactionSignal(
     )
     ? "completed"
     : null;
+}
+
+export function transcriptTurnEndSignal(
+  record: unknown,
+): "completed" | "aborted" | null {
+  if (
+    !isPlainRecord(record) ||
+    record.type !== "event_msg" ||
+    !isPlainRecord(record.payload)
+  ) {
+    return null;
+  }
+  return record.payload.type === "task_complete"
+    ? "completed"
+    : record.payload.type === "turn_aborted"
+      ? "aborted"
+      : null;
 }
 
 export function isCompactedTranscriptPrefix(buffer: Buffer): boolean {
@@ -2941,6 +3686,129 @@ function transcriptMessageText(payload: Record<string, unknown>): string {
     .filter(isPlainRecord)
     .map((part) => typeof part.text === "string" ? part.text : "")
     .join("");
+}
+
+/** Read the newest account-wide Codex rate-limit snapshot from rollout JSONL. */
+export function parseCodexUsageFromTranscriptTail(
+  contents: string,
+): CodexUsage | null {
+  const lines = contents.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    let record: unknown;
+    try {
+      record = JSON.parse(lines[index]);
+    } catch {
+      continue;
+    }
+    if (
+      !isPlainRecord(record) ||
+      record.type !== "event_msg" ||
+      typeof record.timestamp !== "string" ||
+      !isPlainRecord(record.payload) ||
+      record.payload.type !== "token_count" ||
+      !isPlainRecord(record.payload.rate_limits)
+    ) {
+      continue;
+    }
+    const observedAt = Date.parse(record.timestamp);
+    if (!Number.isFinite(observedAt)) continue;
+    const rateLimits = record.payload.rate_limits;
+    const limits = [rateLimits.primary, rateLimits.secondary]
+      .map(parseCodexUsageLimit)
+      .filter((limit): limit is CodexUsageLimit => limit !== null);
+    if (limits.length === 0) continue;
+    const credits = isPlainRecord(rateLimits.credits)
+      ? rateLimits.credits.balance
+      : null;
+    return {
+      observedAt,
+      planType:
+        typeof rateLimits.plan_type === "string"
+          ? rateLimits.plan_type
+          : null,
+      creditsBalance:
+        typeof credits === "string" && credits.trim()
+          ? credits.trim().slice(0, 40)
+          : null,
+      limits,
+    };
+  }
+  return null;
+}
+
+/** Read current context occupancy from the newest complete token-count record. */
+export function parseCodexContextUsedPercentFromTranscriptTail(
+  contents: string,
+): number | null {
+  const lines = contents.split("\n");
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    let record: unknown;
+    try {
+      record = JSON.parse(lines[index]);
+    } catch {
+      continue;
+    }
+    if (
+      !isPlainRecord(record) ||
+      record.type !== "event_msg" ||
+      !isPlainRecord(record.payload) ||
+      record.payload.type !== "token_count" ||
+      !isPlainRecord(record.payload.info) ||
+      !isPlainRecord(record.payload.info.last_token_usage)
+    ) {
+      continue;
+    }
+    const tokens = Number(record.payload.info.last_token_usage.total_tokens);
+    const window = Number(record.payload.info.model_context_window);
+    if (
+      !Number.isSafeInteger(tokens) ||
+      tokens < 0 ||
+      !Number.isSafeInteger(window) ||
+      window <= 0
+    ) {
+      continue;
+    }
+    return Math.max(0, Math.min(100, Math.round((tokens / window) * 100)));
+  }
+  return null;
+}
+
+export function transcriptReasoningSummaries(record: unknown): string[] {
+  if (
+    !isPlainRecord(record) ||
+    record.type !== "response_item" ||
+    !isPlainRecord(record.payload) ||
+    record.payload.type !== "reasoning" ||
+    !Array.isArray(record.payload.summary)
+  ) {
+    return [];
+  }
+  return record.payload.summary
+    .filter(isPlainRecord)
+    .filter((item) => item.type === "summary_text")
+    .map((item) => typeof item.text === "string" ? item.text.trim() : "")
+    .filter(Boolean)
+    .map((text) => text.slice(0, 1_000))
+    .slice(0, 20);
+}
+
+function parseCodexUsageLimit(value: unknown): CodexUsageLimit | null {
+  if (!isPlainRecord(value)) return null;
+  const usedPercent = Number(value.used_percent);
+  const windowMinutes = Number(value.window_minutes);
+  const resetsAt = Number(value.resets_at);
+  if (
+    !Number.isFinite(usedPercent) ||
+    usedPercent < 0 ||
+    usedPercent > 100 ||
+    !Number.isSafeInteger(windowMinutes) ||
+    windowMinutes <= 0 ||
+    !Number.isSafeInteger(resetsAt) ||
+    resetsAt <= 0
+  ) {
+    return null;
+  }
+  return { usedPercent, windowMinutes, resetsAt };
 }
 
 async function recentTranscriptCandidates(

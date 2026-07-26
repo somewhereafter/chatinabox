@@ -1,0 +1,32 @@
+{
+  "version": 1,
+  "setupComplete": false,
+  "assistant": {
+    "name": "codex",
+    "mark": "⌁"
+  },
+  "overview": {
+    "name": "overview",
+    "emoji": "◉"
+  },
+  "manager": {
+    "name": "orchestrator",
+    "emoji": "🪄",
+    "role": "orchestrator",
+    "topicName": "🪄 orchestrator",
+    "topicIconEmoji": "🔮",
+    "cwd": "/var/lib/chatinabox-bridge/manager",
+    "model": "terra",
+    "reasoningEffort": "medium",
+    "fast": false
+  },
+  "sessions": {
+    "defaultModel": "sol",
+    "defaultReasoningEffort": "high",
+    "defaultFast": false,
+    "idleCloseMinutes": 30,
+    "workingIconEmoji": "🧪",
+    "doneIconEmoji": "✅",
+    "closedIconEmoji": "📁"
+  }
+}

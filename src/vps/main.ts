@@ -4,18 +4,37 @@ import {
   PRIVATE_BOT_RESPONSE,
   isTelegramUserAllowed,
 } from "../security";
-import { tgAnswerCallbackQuery, tgSend } from "../telegram";
+import {
+  escapeTelegramHtml,
+  tgAnswerCallbackQuery,
+  tgSend,
+} from "../telegram";
 import { parseTelegramCommand } from "../telegram-command";
 import type { TelegramMessage, TelegramUpdate } from "../telegram-types";
-import { codexHelpText, CodexTelegramController } from "./codex-telegram";
+import {
+  codexHelpText,
+  CodexTelegramController,
+  telegramMessageThreadId,
+} from "./codex-telegram";
 import { loadChatinaboxEnv, type ChatinaboxEnv } from "./env";
+import {
+  ExperienceProfileProvider,
+  type ExperienceProfile,
+} from "./experience-profile";
+import { OverviewController } from "./overview";
 import { runPoller } from "./poller";
 import { ChatinaboxStore } from "./store";
+import { TopicSessionController } from "./topic-sessions";
+import { ManagerController } from "./manager";
 
 interface App {
   readonly env: ChatinaboxEnv;
   readonly store: ChatinaboxStore;
   readonly codex: CodexTelegramController;
+  readonly overview: OverviewController;
+  readonly topics: TopicSessionController;
+  readonly manager: ManagerController;
+  readonly profile: () => ExperienceProfile;
 }
 
 const LOCAL_COMMANDS = new Set([
@@ -36,6 +55,12 @@ const LOCAL_COMMANDS = new Set([
   "key",
   "codex_key",
   "codex_help",
+  "nexus",
+  "overview",
+  "setup",
+  "wizard",
+  "manager",
+  "settings",
 ]);
 
 export async function handleUpdate(app: App, update: TelegramUpdate) {
@@ -56,6 +81,8 @@ export async function handleUpdate(app: App, update: TelegramUpdate) {
       }).catch(() => undefined);
       return;
     }
+    if (await app.overview.handleCallback(callback)) return;
+    if (await app.topics.handleCallback(callback)) return;
     await app.codex.handleCallback(callback);
     return;
   }
@@ -63,11 +90,18 @@ export async function handleUpdate(app: App, update: TelegramUpdate) {
   const message = update.message;
   if (!message) return;
   const ownerId = message.from?.id;
+  const managedGroup =
+    Number.isSafeInteger(message.chat.id) &&
+    (
+      app.overview.isOverviewChat(message.chat.id) ||
+      app.manager.isManagerChat(message.chat.id)
+    );
   if (
     !Number.isSafeInteger(message.chat.id) ||
     !Number.isSafeInteger(ownerId) ||
     !isTelegramUserAllowed(app.env.TG_ALLOWED_USER_IDS, ownerId!)
   ) {
+    if (managedGroup) return;
     if (Number.isSafeInteger(message.chat.id)) {
       await tgSend(app.env, message.chat.id, PRIVATE_BOT_RESPONSE)
         .catch(() => undefined);
@@ -75,11 +109,50 @@ export async function handleUpdate(app: App, update: TelegramUpdate) {
     return;
   }
 
+  const command =
+    message.text === undefined ? null : parseTelegramCommand(message.text);
+  if (await app.topics.handleMessage(message, command)) return;
+  if (command?.name === "nexus" || command?.name === "overview") {
+    await app.overview.handleCommand(message, command);
+    return;
+  }
+  if (command?.name === "wizard" || command?.name === "manager") {
+    await app.manager.handleCommand(message, command);
+    return;
+  }
+  // Overview and manager are isolated forum topics. Other group topics are inert.
+  if (app.overview.isOverviewMessage(message)) return;
+  const managerMessage = app.manager.isManagerMessage(message);
+  const topicAttachment = app.store.codexAttachment(
+    message.chat.id,
+    ownerId!,
+    telegramMessageThreadId(message),
+  );
+  if (managedGroup && !managerMessage && !topicAttachment) return;
+  if (managerMessage && !await app.manager.ensureAttached(message)) {
+    const manager = app.profile().manager;
+    await tgSend(
+      app.env,
+      message.chat.id,
+      `⚠️ ${escapeTelegramHtml(manager.name)} could not reconnect. ` +
+        "Send <code>/manager wake</code>.",
+      message.message_id,
+    );
+    return;
+  }
+
   if (message.photo?.length || message.document) {
-    if (!app.codex.isAttached(message.chat.id, ownerId!)) {
+    if (
+      !app.codex.isAttached(
+        message.chat.id,
+        ownerId!,
+        telegramMessageThreadId(message),
+      )
+    ) {
       const attached = await app.codex.ensureLobbyAttached(
         message.chat.id,
         ownerId!,
+        telegramMessageThreadId(message),
       );
       if (!attached) {
         await tgSend(
@@ -104,13 +177,17 @@ export async function handleUpdate(app: App, update: TelegramUpdate) {
   }
   if (message.text === undefined) return;
 
-  const command = parseTelegramCommand(message.text);
-  if (command?.name === "start") {
-    await welcome(app, message);
+  if (command?.name === "start" || command?.name === "settings") {
+    await welcome(app, message, command.name === "settings");
     return;
   }
   if (command?.name === "help") {
-    await tgSend(app.env, message.chat.id, codexHelpText(), message.message_id);
+    await tgSend(
+      app.env,
+      message.chat.id,
+      codexHelpText(app.profile()),
+      message.message_id,
+    );
     return;
   }
   if (command && await app.codex.handleCommand(message, command)) return;
@@ -121,10 +198,17 @@ export async function handleUpdate(app: App, update: TelegramUpdate) {
     command === null ||
     !LOCAL_COMMANDS.has(command.name)
   ) {
-    if (!app.codex.isAttached(message.chat.id, ownerId!)) {
+    if (
+      !app.codex.isAttached(
+        message.chat.id,
+        ownerId!,
+        telegramMessageThreadId(message),
+      )
+    ) {
       const attached = await app.codex.ensureLobbyAttached(
         message.chat.id,
         ownerId!,
+        telegramMessageThreadId(message),
       );
       if (!attached) {
         await tgSend(
@@ -140,7 +224,46 @@ export async function handleUpdate(app: App, update: TelegramUpdate) {
   }
 }
 
-async function welcome(app: App, message: TelegramMessage): Promise<void> {
+async function welcome(
+  app: App,
+  message: TelegramMessage,
+  revisitSettings = false,
+): Promise<void> {
+  const profile = app.profile();
+  if (!profile.setupComplete || revisitSettings) {
+    if (message.chat.id < 0) {
+      await tgSend(
+        app.env,
+        message.chat.id,
+        "⌁ Open the bot’s private chat and send " +
+          `<code>/${revisitSettings ? "settings" : "start"}</code> there. ` +
+          "Experience setup is kept outside worker topics.",
+        message.message_id,
+      );
+      return;
+    }
+    const attached = await app.codex.ensureLobbyAttached(
+      message.chat.id,
+      message.from!.id,
+      telegramMessageThreadId(message),
+      true,
+    );
+    await tgSend(
+      app.env,
+      message.chat.id,
+      (
+        revisitSettings && profile.setupComplete
+          ? formatSettingsWelcome(profile)
+          : formatFirstRunWelcome()
+      ) +
+        (!attached
+          ? "\n\n⚠️ The local session bridge is still starting. Send " +
+            "<code>/start</code> again in a moment."
+          : ""),
+      message.message_id,
+    );
+    return;
+  }
   await tgSend(
     app.env,
     message.chat.id,
@@ -154,12 +277,40 @@ async function welcome(app: App, message: TelegramMessage): Promise<void> {
   await app.codex.handleCommand(message, { name: "codex", argument: "" });
 }
 
+export function formatSettingsWelcome(profile: ExperienceProfile): string {
+  return (
+    "⌁ <b>Experience settings</b>\n\n" +
+    `Current voice · ${escapeTelegramHtml(profile.assistant.name)}\n` +
+    `Dashboard · ${escapeTelegramHtml(profile.overview.name)}\n` +
+    `Manager · ${escapeTelegramHtml(profile.manager.name)} · ` +
+    `${escapeTelegramHtml(profile.manager.role)}\n\n` +
+    "Tell the guide what you want to change. Plain language is enough; it will " +
+    "show you the result before treating the setup as settled.\n\n" +
+    "<footer>the private profile is preserved across upgrades</footer>"
+  );
+}
+
 async function main(): Promise<void> {
   const env = loadChatinaboxEnv();
+  const profileProvider = new ExperienceProfileProvider(
+    env.PROFILE_PATH ?? "/etc/chatinabox/profile.json",
+  );
+  const profile = () => profileProvider.current();
   mkdirSync(env.DATA_DIR, { recursive: true, mode: 0o700 });
   const store = new ChatinaboxStore(path.join(env.DATA_DIR, "chatinabox.sqlite"));
-  const codex = new CodexTelegramController({ env, store });
-  const app: App = { env, store, codex };
+  const codex = new CodexTelegramController({ env, store, profile });
+  const overview = new OverviewController({ env, store, profile });
+  const topics = new TopicSessionController({ env, store, profile });
+  const manager = new ManagerController({ env, store, profile });
+  const app: App = {
+    env,
+    store,
+    codex,
+    overview,
+    topics,
+    manager,
+    profile,
+  };
   const controller = new AbortController();
   const stop = () => controller.abort(new Error("shutting down"));
   process.once("SIGINT", stop);
@@ -170,10 +321,28 @@ async function main(): Promise<void> {
     await Promise.all([
       runPoller(env, store, (update) => handleUpdate(app, update), controller.signal),
       codex.run(controller.signal),
+      overview.run(controller.signal),
+      topics.run(controller.signal),
     ]);
   } finally {
     store.close();
   }
+}
+
+export function formatFirstRunWelcome(): string {
+  return (
+    "⌁ <b>Welcome to Chatinabox</b>\n\n" +
+    "This first conversation is setup. Talk to the guide normally—describe " +
+    "the names, tone, symbols, model defaults, workspace, and idle policy " +
+    "you want, or simply say <i>keep it simple</i>.\n\n" +
+    "The guide will shape a private profile without changing the source. " +
+    "It will then walk you through creating a Telegram forum with two control " +
+    "topics and your first working topic.\n\n" +
+    "<blockquote>When the forum is ready, pin the 🔮 manager/orchestrator " +
+    "topic and the overview/dashboard topic so they stay easy to reach." +
+    "</blockquote>\n\n" +
+    "<footer>you can return here later with /settings</footer>"
+  );
 }
 
 if (require.main === module) {

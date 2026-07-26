@@ -13,5 +13,9 @@ preserve exact pane identity checks (`tmux server PID + pane ID + pane PID`).
 New commands should work through both Telegram and the stable `chatinabox
 --json` control API where appropriate.
 
+Keep public experience defaults neutral. Names, marks, topic identities, model
+preferences, and idle policy belong in the private experience profile. Add
+tests for both the neutral default and any configurable presentation path.
+
 Do not commit bot tokens, Telegram IDs, Codex transcripts, generated terminal
-screens, SQLite state, or local `.env` files.
+screens, SQLite state, local `.env` files, or personal profile files.

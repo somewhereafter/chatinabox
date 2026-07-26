@@ -1,7 +1,7 @@
 export const TELEGRAM_CALLBACK_DATA_MAX_BYTES = 64;
 export const MAX_CALLBACK_PAYLOAD_BYTES = 8 * 1024;
 export const DEFAULT_CALLBACK_TTL_MS = 15 * 60 * 1000;
-export const MAX_CALLBACK_TTL_MS = 24 * 60 * 60 * 1000;
+export const MAX_CALLBACK_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const CALLBACK_DATA_PREFIX = "c1:";
 const CALLBACK_REFERENCE_BYTES = 12;
@@ -14,8 +14,17 @@ export const CALLBACK_ACTIONS = [
   "codex.resume",
   "codex.refresh",
   "codex.interrupt",
+  "codex.transient_interrupt",
   "codex.screen",
   "codex.key",
+  "nexus.refresh",
+  "topic_setup.model",
+  "topic_setup.effort",
+  "topic_setup.speed",
+  "topic_setup.name",
+  "topic_setup.cwd",
+  "topic_setup.start",
+  "topic_setup.restart",
 ] as const;
 
 export type CallbackAction = (typeof CALLBACK_ACTIONS)[number];
@@ -115,8 +124,8 @@ export interface InlineKeyboardButtonInput {
 const FAILURE_MESSAGES: Record<CallbackFailureReason, string> = {
   TOO_LONG: "This button is invalid.",
   MALFORMED: "This button is invalid.",
-  NOT_FOUND: "This menu expired. Send /codex to open a fresh one.",
-  EXPIRED: "This menu expired. Send /codex to open a fresh one.",
+  NOT_FOUND: "This button expired. Open a fresh menu.",
+  EXPIRED: "This button expired. Open a fresh menu.",
   CHAT_MISMATCH: "This button belongs to another chat.",
   USER_MISMATCH: "This button belongs to another user.",
   ACTION_NOT_ALLOWED: "This action is not available.",

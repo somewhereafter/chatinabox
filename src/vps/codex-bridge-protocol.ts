@@ -3,7 +3,6 @@ export const DEFAULT_CODEX_BRIDGE_SOCKET =
 export const CHATINABOX_LOBBY_NAME = "🪄 Lobby";
 export const DEFAULT_CHATINABOX_LOBBY_CWD =
   "/var/lib/chatinabox-bridge/lobby";
-
 export interface CodexPaneIdentity {
   readonly serverPid: number;
   readonly paneId: string;
@@ -32,6 +31,7 @@ export interface CodexPane extends CodexPaneIdentity {
 export type CodexEventKind =
   | "assistant_final"
   | "assistant_progress"
+  | "agent_reasoning"
   | "context_compacted"
   | "image_viewed"
   | "session_renamed"
@@ -40,7 +40,8 @@ export type CodexEventKind =
   | "state_compacting"
   | "state_working"
   | "state_waiting_terminal"
-  | "state_activity";
+  | "state_activity"
+  | "turn_aborted";
 
 export interface CodexEvent {
   readonly id: number;
@@ -51,12 +52,31 @@ export interface CodexEvent {
   readonly assistantName: CodexAssistantName;
   readonly message: string;
   readonly createdAt: number;
+  readonly turnStartedAt?: number;
+  readonly model?: string;
+  readonly reasoningEffort?: "low" | "medium" | "high" | "xhigh";
+  readonly fast?: boolean;
+  readonly cwd?: string;
+  readonly contextUsedPercent?: number;
 }
 
 export interface CodexRecentSession {
   readonly id: string;
   readonly name: string;
   readonly updatedAt: string;
+}
+
+export interface CodexUsageLimit {
+  readonly usedPercent: number;
+  readonly windowMinutes: number;
+  readonly resetsAt: number;
+}
+
+export interface CodexUsage {
+  readonly observedAt: number;
+  readonly planType: string | null;
+  readonly creditsBalance: string | null;
+  readonly limits: readonly CodexUsageLimit[];
 }
 
 export type CodexBridgeRequest =
@@ -74,13 +94,14 @@ export type CodexBridgeRequest =
       readonly keys: readonly string[];
     }
   | { readonly op: "screen"; readonly target: CodexPaneIdentity }
+  | { readonly op: "close"; readonly target: CodexPaneIdentity }
   | {
       readonly op: "new";
       readonly name?: string;
       readonly cwd?: string;
       readonly tmuxSession?: string;
       readonly model?: "sol" | "luna" | "terra";
-      readonly reasoningEffort?: "low" | "medium" | "high";
+      readonly reasoningEffort?: "low" | "medium" | "high" | "xhigh";
       readonly fast?: boolean;
     }
   | {
@@ -88,6 +109,10 @@ export type CodexBridgeRequest =
       readonly sessionId: string;
       readonly name?: string;
       readonly tmuxSession?: string;
+      readonly cwd?: string;
+      readonly model?: "sol" | "luna" | "terra";
+      readonly reasoningEffort?: "low" | "medium" | "high" | "xhigh";
+      readonly fast?: boolean;
     }
   | {
       readonly op: "rename";
@@ -125,6 +150,8 @@ export type CodexBridgeResponse =
       readonly ok: true;
       readonly panes: readonly CodexPane[];
       readonly recent: readonly CodexRecentSession[];
+      readonly totalSessions: number;
+      readonly usage: CodexUsage | null;
     }
   | { readonly ok: true; readonly pane: CodexPane }
   | {
@@ -134,6 +161,17 @@ export type CodexBridgeResponse =
     }
   | { readonly ok: true; readonly interrupted: true }
   | { readonly ok: true; readonly keysSent: true }
+  | {
+      readonly ok: true;
+      readonly closed: true;
+      readonly sessionId: string | null;
+      readonly profile: {
+        readonly model: "sol" | "luna" | "terra";
+        readonly reasoningEffort: "low" | "medium" | "high" | "xhigh";
+        readonly fast: boolean;
+        readonly cwd: string;
+      };
+    }
   | {
       readonly ok: true;
       readonly screen: {

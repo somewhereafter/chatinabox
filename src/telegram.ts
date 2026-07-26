@@ -37,6 +37,7 @@ export async function tgSend(
   text: string,
   replyToMsgId?: number,
   replyMarkup?: TelegramInlineKeyboardMarkup,
+  messageThreadId?: number,
 ) {
   return tgCall<{ message_id: number }>(env, "sendMessage", {
     chat_id: chatId,
@@ -44,6 +45,7 @@ export async function tgSend(
     parse_mode: "HTML",
     ...(replyToMsgId && { reply_to_message_id: replyToMsgId }),
     ...(replyMarkup && { reply_markup: replyMarkup }),
+    ...(messageThreadId && { message_thread_id: messageThreadId }),
   });
 }
 
@@ -53,6 +55,7 @@ export async function tgSendRichMarkdown(
   chatId: number,
   markdown: string,
   replyToMsgId?: number,
+  messageThreadId?: number,
 ) {
   return tgCall<{ message_id: number }>(env, "sendRichMessage", {
     chat_id: chatId,
@@ -63,6 +66,30 @@ export async function tgSendRichMarkdown(
         allow_sending_without_reply: true,
       },
     }),
+    ...(messageThreadId && { message_thread_id: messageThreadId }),
+  });
+}
+
+/** Send a Telegram Rich Message from HTML (Bot API 10.2+). */
+export async function tgSendRichHtml(
+  env: BotEnv,
+  chatId: number,
+  html: string,
+  replyToMsgId?: number,
+  replyMarkup?: TelegramInlineKeyboardMarkup,
+  messageThreadId?: number,
+) {
+  return tgCall<{ message_id: number }>(env, "sendRichMessage", {
+    chat_id: chatId,
+    rich_message: { html },
+    ...(replyToMsgId && {
+      reply_parameters: {
+        message_id: replyToMsgId,
+        allow_sending_without_reply: true,
+      },
+    }),
+    ...(replyMarkup && { reply_markup: replyMarkup }),
+    ...(messageThreadId && { message_thread_id: messageThreadId }),
   });
 }
 
@@ -79,6 +106,22 @@ export async function tgEditMessage(
     message_id: messageId,
     text,
     parse_mode: "HTML",
+    ...(replyMarkup && { reply_markup: replyMarkup }),
+  });
+}
+
+/** Edit an existing Telegram Rich Message from HTML (Bot API 10.2+). */
+export async function tgEditRichHtml(
+  env: BotEnv,
+  chatId: number,
+  messageId: number,
+  html: string,
+  replyMarkup?: TelegramInlineKeyboardMarkup,
+) {
+  return tgCall(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    rich_message: { html },
     ...(replyMarkup && { reply_markup: replyMarkup }),
   });
 }
@@ -145,6 +188,61 @@ export async function tgDeleteMessage(
   return tgCall(env, "deleteMessage", {
     chat_id: chatId,
     message_id: messageId,
+  });
+}
+
+/** Rename a forum topic. */
+export async function tgEditForumTopic(
+  env: BotEnv,
+  chatId: number,
+  messageThreadId: number,
+  name: string,
+) {
+  return tgCall<boolean>(env, "editForumTopic", {
+    chat_id: chatId,
+    message_thread_id: messageThreadId,
+    name,
+  });
+}
+
+/** Change the large custom-emoji icon on a forum topic. */
+export async function tgEditForumTopicIcon(
+  env: BotEnv,
+  chatId: number,
+  messageThreadId: number,
+  customEmojiId: string,
+) {
+  return tgCall<boolean>(env, "editForumTopic", {
+    chat_id: chatId,
+    message_thread_id: messageThreadId,
+    icon_custom_emoji_id: customEmojiId,
+  });
+}
+
+export interface TelegramForumTopicIconSticker {
+  emoji?: string;
+  custom_emoji_id?: string;
+}
+
+/** List the custom emoji Telegram permits as forum-topic icons. */
+export async function tgGetForumTopicIconStickers(env: BotEnv) {
+  return tgCall<TelegramForumTopicIconSticker[]>(
+    env,
+    "getForumTopicIconStickers",
+    {},
+  );
+}
+
+/** Pin a bot-sent message without generating a service notification. */
+export async function tgPinChatMessage(
+  env: BotEnv,
+  chatId: number,
+  messageId: number,
+) {
+  return tgCall<boolean>(env, "pinChatMessage", {
+    chat_id: chatId,
+    message_id: messageId,
+    disable_notification: true,
   });
 }
 
@@ -267,6 +365,7 @@ export async function tgSendPhoto(
   photo: Blob,
   caption?: string,
   replyMarkup?: TelegramInlineKeyboardMarkup,
+  messageThreadId?: number,
 ): Promise<TelegramResponse<{ message_id: number }>> {
   const fd = new FormData();
   fd.set("chat_id", String(chatId));
@@ -276,6 +375,9 @@ export async function tgSendPhoto(
     fd.set("parse_mode", "HTML");
   }
   if (replyMarkup) fd.set("reply_markup", JSON.stringify(replyMarkup));
+  if (messageThreadId) {
+    fd.set("message_thread_id", String(messageThreadId));
+  }
   const response = await fetch(`${API}/bot${env.TG_BOT_TOKEN}/sendPhoto`, {
     method: "POST",
     body: fd,

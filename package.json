@@ -1,7 +1,7 @@
 {
   "name": "chatinabox",
   "version": "0.1.0",
-  "description": "A direct, owner-only Telegram interface for Codex CLI sessions",
+  "description": "Real Codex CLI sessions in a private Telegram chat or forum",
   "license": "MIT",
   "author": "somewhereafter",
   "repository": {
@@ -17,6 +17,7 @@
     "telegram",
     "tmux",
     "remote-terminal",
+    "telegram-forum",
     "agent"
   ],
   "bin": {

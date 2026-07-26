@@ -12,7 +12,13 @@ export interface TelegramUpdate {
 
 export interface TelegramMessage {
   message_id: number;
-  chat: { id: number };
+  chat: {
+    id: number;
+    type?: "private" | "group" | "supergroup" | "channel";
+    title?: string;
+  };
+  message_thread_id?: number;
+  is_topic_message?: boolean;
   from?: {
     id: number;
     is_bot?: boolean;
@@ -25,6 +31,15 @@ export interface TelegramMessage {
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
   reply_to_message?: TelegramMessage;
+  forum_topic_created?: {
+    name: string;
+    icon_color: number;
+    icon_custom_emoji_id?: string;
+  };
+  forum_topic_edited?: {
+    name?: string;
+    icon_custom_emoji_id?: string;
+  };
   date: number;
 }
 
@@ -56,7 +71,7 @@ export interface TelegramCallbackQuery {
   from: { id: number };
   message?: Pick<
     TelegramMessage,
-    "message_id" | "chat" | "caption" | "photo"
+    "message_id" | "message_thread_id" | "chat" | "caption" | "photo"
   >;
   data?: string;
 }

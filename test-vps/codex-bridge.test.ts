@@ -6,10 +6,20 @@ import {
   CodexBridge,
   buildClarityTerminalHtml,
   consumeTranscriptLines,
+  fullAccessCodexCommand,
   isCompactedTranscriptPrefix,
   renderAnsiTerminalSvg,
+  parseCodexUsageFromTranscriptTail,
+  reasoningSummaryKey,
+  parseCodexContextUsedPercentFromTranscriptTail,
+  shellSessionFromToolInput,
+  shellSessionFromToolOutput,
   splitCompleteTranscriptChunk,
   transcriptCompactionSignal,
+  transcriptTurnEndSignal,
+  transcriptReasoningSummaries,
+  workerCodexCommand,
+  lobbyCodexCommand,
 } from "../src/vps/codex-bridge";
 import {
   assistantNameForModel,
@@ -24,6 +34,110 @@ function line(record: unknown): string {
 }
 
 describe("Codex bridge", () => {
+  it("reads the newest trustworthy Codex usage snapshot", () => {
+    const contents =
+      line({ type: "event_msg", payload: { type: "token_count" } }) +
+      line({
+        timestamp: "2026-07-26T18:36:29.692Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: {
+            primary: {
+              used_percent: 38,
+              window_minutes: 10080,
+              resets_at: 1785611896,
+            },
+            secondary: null,
+            credits: { balance: "5000" },
+            plan_type: "pro",
+          },
+        },
+      });
+
+    expect(parseCodexUsageFromTranscriptTail(contents)).toEqual({
+      observedAt: Date.parse("2026-07-26T18:36:29.692Z"),
+      planType: "pro",
+      creditsBalance: "5000",
+      limits: [{
+        usedPercent: 38,
+        windowMinutes: 10080,
+        resetsAt: 1785611896,
+      }],
+    });
+  });
+
+  it("reads current context occupancy from the latest token count", () => {
+    const contents = line({
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: {
+          last_token_usage: { total_tokens: 35_754 },
+          model_context_window: 258_400,
+        },
+      },
+    });
+    expect(parseCodexContextUsedPercentFromTranscriptTail(contents)).toBe(14);
+  });
+
+  it("extracts only safe reasoning summaries", () => {
+    expect(transcriptReasoningSummaries({
+      type: "response_item",
+      payload: {
+        type: "reasoning",
+        summary: [
+          { type: "summary_text", text: "**Inspecting queue state**" },
+          { type: "other", text: "hidden" },
+        ],
+        encrypted_content: "private",
+      },
+    })).toEqual(["**Inspecting queue state**"]);
+    expect(transcriptReasoningSummaries({
+      type: "response_item",
+      payload: {
+        type: "reasoning",
+        summary: [],
+        encrypted_content: "private",
+      },
+    })).toEqual([]);
+  });
+
+  it("deduplicates legacy and safe-summary spellings of the same reasoning", () => {
+    expect(reasoningSummaryKey("**Inspecting queue state**")).toBe(
+      reasoningSummaryKey("Inspecting queue state..."),
+    );
+    expect(reasoningSummaryKey("Inspecting queue state")).not.toBe(
+      reasoningSummaryKey("Checking shell state"),
+    );
+  });
+
+  it("pins the Telegram worker experience defaults in every launcher", () => {
+    const base = fullAccessCodexCommand();
+    expect(base).toContain(`model_reasoning_summary="detailed"`);
+    expect(base).toContain(`model_verbosity="medium"`);
+    expect(base).toContain(`personality="friendly"`);
+    expect(base).toContain(`web_search="live"`);
+    expect(base).toContain(`plan_mode_reasoning_effort="high"`);
+    expect(base).toContain(`hide_agent_reasoning=false`);
+    expect(base).toContain(`show_raw_agent_reasoning=false`);
+    expect(base).toContain("--enable hooks");
+
+    const worker = workerCodexCommand({
+      model: "sol",
+      reasoningEffort: "high",
+      fast: false,
+    });
+    expect(worker).toContain(`service_tier="default"`);
+    expect(worker).toContain("--disable fast_mode");
+    expect(lobbyCodexCommand("/tmp/lobby")).toContain(
+      `model_reasoning_summary="concise"`,
+    );
+    expect(lobbyCodexCommand("/tmp/lobby")).toContain(
+      `model_verbosity="low"`,
+    );
+  });
+
   it("rejects unknown worker profiles before touching tmux", async () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-bridge-"));
     const bridge = new CodexBridge({
@@ -118,6 +232,41 @@ describe("Codex bridge", () => {
     expect(transcriptCompactionSignal({
       type: "event_msg",
       payload: { type: "task_complete" },
+    })).toBeNull();
+  });
+
+  it("recognizes both completed and aborted turn terminal events", () => {
+    expect(transcriptTurnEndSignal({
+      type: "event_msg",
+      payload: { type: "task_complete" },
+    })).toBe("completed");
+    expect(transcriptTurnEndSignal({
+      type: "event_msg",
+      payload: { type: "turn_aborted", reason: "interrupted" },
+    })).toBe("aborted");
+    expect(transcriptTurnEndSignal({
+      type: "event_msg",
+      payload: { type: "task_started" },
+    })).toBeNull();
+  });
+
+  it("tracks active unified terminal sessions from tool input and output", () => {
+    expect(shellSessionFromToolOutput({
+      output: [{
+        type: "input_text",
+        text: JSON.stringify({
+          chunk_id: "abc",
+          session_id: 50_030,
+          output: "",
+        }),
+      }],
+    })).toBe(50_030);
+    expect(shellSessionFromToolInput({
+      name: "write_stdin",
+      input: JSON.stringify({ session_id: 50_030, chars: "" }),
+    })).toBe(50_030);
+    expect(shellSessionFromToolOutput({
+      output: [{ type: "input_text", text: "Process exited with code 0" }],
     })).toBeNull();
   });
 

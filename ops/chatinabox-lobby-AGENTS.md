@@ -64,16 +64,17 @@ show or target that container name. For every action, use the canonical
 names to the user; keep selectors as an internal implementation detail unless
 diagnosis requires them.
 
-New workers default to the configured Sol profile with high reasoning in Standard mode.
-Honor an explicit user preference with:
+New workers inherit the private Chatinabox profile. Read
+`chatinabox profile show --json` when defaults matter, and honor an explicit
+user preference with:
 
 - `--model sol|terra|luna`
 - `--effort low|medium|high`
-- `--fast`
+- `--fast` or `--standard`
 
 Cost order is Luna (low), Terra (medium), Sol (high). If the user gives no
-model or effort preference, use Sol with high reasoning. Do not add `--fast`
-unless the user asks for it or speed is clearly the priority.
+model, effort, or speed preference, omit those flags and let the configured
+profile apply.
 
 Handoffs are transactional: the API queues the switch, your final response is
 delivered to Telegram, and only then does Chatinabox change the attachment.
@@ -93,3 +94,29 @@ Lobby, and summarize useful recent threads; it must never substitute a tmux
 container name.
 
 Bot-control slash commands remain owned by Chatinabox and should not be imitated.
+
+## First-run setup
+
+At the start of a new conversation, run `chatinabox profile show --json`. When
+the profile reports `"setupComplete": false`, become a calm setup guide before
+doing ordinary Lobby work.
+
+Ask one or two useful questions at a time and infer taste from normal language.
+Help the user choose the assistant byline, overview/dashboard identity, manager
+identity and role, worker defaults, and inactivity window. Do not force them
+through every option. If they say “keep it simple,” retain the neutral defaults.
+
+Apply only approved choices with `chatinabox profile set ... --json`, then mark
+the profile complete with `chatinabox profile set --complete --json`. Explain
+how to create a Telegram supergroup with Topics enabled and set up:
+
+1. an overview/dashboard topic with `/overview setup`;
+2. a 🔮 manager topic with `/manager setup`;
+3. normal work topics with `/setup`.
+
+Remind them to pin the manager and overview/dashboard topics in the forum list.
+Do not pin bot messages.
+
+If an existing manager identity changes later, tell the user to send
+`/manager wake` in that topic; Chatinabox will resync its topic icon, topic
+name, and live session name.

@@ -127,6 +127,11 @@ codex_path="$(command -v codex)"
 tmux_path="$(command -v tmux)"
 convert_path="$(command -v convert)"
 env_file=/etc/chatinabox/chatinabox.env
+profile_path=/etc/chatinabox/profile.json
+if [[ ! -e "$profile_path" ]]; then
+  install -o root -g root -m 0644 \
+    "$repo_dir/ops/chatinabox-profile.json" "$profile_path"
+fi
 install -o root -g chatinabox -m 0640 /dev/null "$env_file"
 {
   printf 'TG_BOT_TOKEN=%s\n' "$bot_token"
@@ -136,6 +141,7 @@ install -o root -g chatinabox -m 0640 /dev/null "$env_file"
   printf 'CHATINABOX_BRIDGE_DB=/var/lib/chatinabox-bridge/bridge.sqlite\n'
   printf 'CHATINABOX_DEFAULT_CWD=/root\n'
   printf 'CHATINABOX_LOBBY_CWD=/var/lib/chatinabox-bridge/lobby\n'
+  printf 'CHATINABOX_PROFILE_PATH=%s\n' "$profile_path"
   printf 'CHATINABOX_CODEX_PATH=%s\n' "$codex_path"
   printf 'CHATINABOX_TMUX_PATH=%s\n' "$tmux_path"
   printf 'CHATINABOX_CONVERT_PATH=%s\n' "$convert_path"
@@ -163,9 +169,19 @@ node "$repo_dir/ops/install-chatinabox-instructions.mjs" \
   "$repo_dir/ops/chatinabox-global-AGENTS-block.md" \
   /root/.codex/AGENTS.md /root/AGENTS.md
 install -d -o root -g root -m 0700 /var/lib/chatinabox-bridge/lobby
+manager_cwd="$(
+  CHATINABOX_PROFILE_FILE="$profile_path" \
+    CHATINABOX_RELEASE_PROFILE_MODULE="$release_dir/dist/vps/experience-profile.js" \
+    node -e \
+    'const p=require(process.env.CHATINABOX_RELEASE_PROFILE_MODULE); process.stdout.write(p.readExperienceProfile(process.env.CHATINABOX_PROFILE_FILE).manager.cwd)'
+)"
+install -d -o root -g root -m 0700 "$manager_cwd"
 install -o root -g root -m 0600 \
   "$repo_dir/ops/chatinabox-lobby-AGENTS.md" \
   /var/lib/chatinabox-bridge/lobby/AGENTS.md
+install -o root -g root -m 0600 \
+  "$repo_dir/ops/chatinabox-manager-AGENTS.md" \
+  "$manager_cwd/AGENTS.md"
 
 printf '\n› Configuring Telegram\n'
 

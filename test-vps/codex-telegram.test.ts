@@ -1,18 +1,43 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  CodexTelegramController,
   buildCodexAttachmentPrompt,
   buildBundledTelegramPrompt,
   buildTelegramTextPrompt,
   codexHelpText,
   formatCodexActivityStatus,
+  formatAgentReasoningRichMarkdown,
   formatCodexEvent,
   formatCodexQueuedUntilToolStatus,
   formatCodexRichMarkdown,
+  formatCodexTransientRichHtml,
   parseArrowShortcut,
   sanitizeAttachmentFileName,
   selectTelegramMedia,
 } from "../src/vps/codex-telegram";
 import type { TelegramMessage } from "../src/telegram-types";
+import {
+  DEFAULT_EXPERIENCE_PROFILE,
+  patchExperienceProfile,
+} from "../src/vps/experience-profile";
+import { ChatinaboxStore } from "../src/vps/store";
+
+const temporaryRoots: string[] = [];
+const personalProfile = patchExperienceProfile(DEFAULT_EXPERIENCE_PROFILE, {
+  setupComplete: true,
+  assistant: { name: "mori", mark: "✦" },
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  for (const root of temporaryRoots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 function message(
   overrides: Partial<TelegramMessage>,
@@ -27,7 +52,7 @@ function message(
 }
 
 describe("Codex Telegram attachments", () => {
-  it("labels final answers with fin in standard and rich formatting", () => {
+  it("wraps final answers in the configured shell with compact details", () => {
     const event = {
       id: 1,
       kind: "assistant_final" as const,
@@ -38,19 +63,39 @@ describe("Codex Telegram attachments", () => {
       message: "Finished.",
       createdAt: 1,
     };
-    expect(formatCodexEvent(event)[0]).toContain(
-      "🪩 <b>Sol · fin</b>",
+    expect(formatCodexEvent(event, personalProfile)[0])
+      .toContain("<b>mori ✦</b>");
+    expect(formatCodexEvent(event, personalProfile)[0]).toContain("<i>fin</i>");
+    const rich = formatCodexRichMarkdown(event, {
+      model: "sol",
+      reasoningEffort: "high",
+      fast: true,
+      cwd: "/root/chatinabox",
+      turnElapsedMs: 134_000,
+      totalWorkMs: 2_160_000,
+      contextUsedPercent: 42,
+    }, personalProfile);
+    expect(rich).toContain("==mori ✦==");
+    expect(rich).toContain("<details><summary>details</summary>");
+    expect(rich).toContain("`sol · high · fast`");
+    expect(rich).toContain("`⌂ /root/chatinabox`");
+    expect(rich).toContain(
+      "`turn 2m 14s · total 36m · context rem. 58%`",
     );
-    expect(formatCodexRichMarkdown(event)).toContain(
-      "🪩 **Sol · fin**",
-    );
+    expect(rich).toContain("<footer>fin</footer>");
     const lobbyEvent = { ...event, assistantName: "Lobby" as const };
-    expect(formatCodexEvent(lobbyEvent)[0]).toContain(
-      "🪄 <b>Lobby · fin</b>",
-    );
-    expect(formatCodexRichMarkdown(lobbyEvent)).toContain(
-      "🪄 **Lobby · fin**",
-    );
+    expect(formatCodexEvent(lobbyEvent, personalProfile)[0])
+      .toContain("<b>mori ✦</b>");
+    expect(formatCodexRichMarkdown({
+      ...lobbyEvent,
+      kind: "assistant_progress",
+    }, undefined, personalProfile)).toContain("<footer>cont.</footer>");
+  });
+
+  it("renders agent reasoning as a permanent highlighted magic note", () => {
+    expect(formatAgentReasoningRichMarkdown(
+      "**Inspecting the queue state**",
+    )).toBe("==*Inspecting the queue state... 🪄*==");
   });
 
   it("selects the largest Telegram photo variant", () => {
@@ -141,30 +186,319 @@ describe("Codex Telegram attachments", () => {
 
   it("formats accumulating Codex activity with natural plurals", () => {
     expect(formatCodexActivityStatus("1\u001f1")).toContain(
-      "Ran <b>1</b> thing · ✏️ Edited <b>1</b> file",
+      "✨ ran <b>1</b> cmd · 📝 edited <b>1</b> file",
     );
-    expect(formatCodexActivityStatus("12\u001f3")).toContain(
-      "Ran <b>12</b> things · ✏️ Edited <b>3</b> files",
+    expect(formatCodexActivityStatus("12\u001f3\u001f5\u001f2")).toContain(
+      "✨ ran <b>12</b> cmds · 📝 edited <b>3</b> files",
+    );
+    expect(formatCodexActivityStatus("12\u001f3\u001f5\u001f2")).toContain(
+      "🔎 explored <b>5</b> things",
+    );
+    expect(formatCodexActivityStatus("12\u001f3\u001f5\u001f2")).toContain(
+      "🖥️ <b>2</b> active shells",
     );
     expect(formatCodexActivityStatus("not counters")).toBeNull();
-    expect(formatCodexActivityStatus("2\u001f0", "Sol")).toContain(
-      "🎱 <b>Sol is working…</b>",
+    expect(formatCodexActivityStatus("2\u001f0", "Sol", personalProfile)).toContain(
+      "<b>mori ✦ is working…</b>",
     );
-    expect(formatCodexActivityStatus("2\u001f0", "Lobby")).toContain(
-      "🪄 <b>Lobby is working…</b>",
+    expect(formatCodexActivityStatus("2\u001f0", "Sol", personalProfile))
+      .not.toContain(
+      "edited",
+    );
+    expect(formatCodexActivityStatus("2\u001f0", "Lobby", personalProfile))
+      .toContain(
+      "<b>mori ✦ is working…</b>",
     );
   });
 
   it("formats the busy-turn steering queue with natural plurals", () => {
-    expect(formatCodexQueuedUntilToolStatus(1)).toContain(
-      "🟠 <b>Message is queued · sending after Codex’s next tool call…</b>",
+    expect(formatCodexQueuedUntilToolStatus(1)).toBe(
+      "📥 <b>1</b> msg queued",
     );
-    expect(formatCodexQueuedUntilToolStatus(3)).toContain(
-      "🟠 <b>3 messages are queued · sending after Codex’s next tool call…</b>",
+    expect(formatCodexQueuedUntilToolStatus(3)).toBe(
+      "📥 <b>3</b> msgs queued",
     );
-    expect(formatCodexQueuedUntilToolStatus(1, "Luna")).toContain(
-      "sending after Luna’s next tool call",
+  });
+
+  it("keeps shell and queue counts together with terminal waiting last", () => {
+    const html = formatCodexTransientRichHtml({
+      statusKind: "state_waiting_terminal",
+      toolCalls: 4,
+      editedFiles: 2,
+      exploredThings: 3,
+      activeShells: 2,
+      queuedMessages: 2,
+      replyToMessageId: 100,
+      startedAt: 1,
+    }, 121_001, personalProfile);
+    expect(html).toContain(
+      "<mark>mori ✦ is working for 2m 1s…</mark>",
     );
+    expect(html).toContain(
+      "✨ ran <b>4</b> cmds · 📝 edited <b>2</b> files",
+    );
+    expect(html).toContain("🔎 explored <b>3</b> things");
+    expect(html).toContain(
+      "🖥️ <b>2</b> active shells · 📥 <b>2</b> msgs queued",
+    );
+    expect(html.indexOf("🔎 explored")).toBeLessThan(
+      html.indexOf("🖥️ <b>2</b>"),
+    );
+    expect(html).not.toContain("<mark>2");
+    expect(html).not.toContain("<footer>");
+    expect(html.endsWith("<i>⏳ waiting on a terminal…</i></p>")).toBe(true);
+  });
+
+  it("hides zero-value edited-file activity", () => {
+    const html = formatCodexTransientRichHtml({
+      statusKind: "state_working",
+      toolCalls: 2,
+      editedFiles: 0,
+      exploredThings: 0,
+      activeShells: 0,
+      queuedMessages: 0,
+      replyToMessageId: 100,
+      startedAt: 1,
+    });
+    expect(html).toContain("✨ ran <b>2</b> cmds");
+    expect(html).not.toContain("edited");
+  });
+
+  it("can force settings back to Lobby from an attached worker", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-lobby-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const worker = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "worker",
+      windowIndex: 0,
+      cwd: "/root/work",
+      active: true,
+      busy: false,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+    };
+    const lobby = {
+      ...worker,
+      paneId: "%5",
+      panePid: 201,
+      codexPid: 301,
+      windowName: "🪄 Lobby",
+      assistantName: "Lobby" as const,
+    };
+    store.attachCodex(42, 42, worker);
+    const bridge = {
+      request: vi.fn(async () => ({ ok: true, pane: lobby })),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    expect(await controller.ensureLobbyAttached(42, 42)).toBe(true);
+    expect(bridge.request).not.toHaveBeenCalled();
+    expect(await controller.ensureLobbyAttached(42, 42, 0, true)).toBe(true);
+    expect(bridge.request).toHaveBeenCalledWith({ op: "lobby" });
+    expect(store.codexAttachment(42, 42)?.assistant_name).toBe("Lobby");
+    store.close();
+  });
+
+  it("recreates the transient beneath the newest queued Telegram message", async () => {
+    vi.useFakeTimers();
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-telegram-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "chatinabox",
+      windowIndex: 0,
+      cwd: "/root/chatinabox",
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(42, 42, pane);
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    let nextMessageId = 1_000;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ method, body });
+      return {
+        json: async () => ({
+          ok: true,
+          result: method === "deleteMessage"
+            ? true
+            : { message_id: nextMessageId++ },
+        }),
+      };
+    }));
+    const bridge = {
+      request: vi.fn(async () => ({
+        ok: true,
+        sent: true,
+        queuedUntilNextToolCall: true,
+      })),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    await controller.routeAttachedMessage(message({
+      message_id: 100,
+      chat: { id: 42 },
+      from: { id: 42 },
+      text: "first",
+    }));
+    await controller.routeAttachedMessage(message({
+      message_id: 101,
+      chat: { id: 42 },
+      from: { id: 42 },
+      text: "second",
+    }));
+
+    const richSends = calls.filter((call) => call.method === "sendRichMessage");
+    expect(richSends).toHaveLength(2);
+    expect(richSends[0]?.body.reply_parameters).toMatchObject({
+      message_id: 100,
+    });
+    expect(richSends[0]?.body.reply_markup).toMatchObject({
+      inline_keyboard: [[{ text: "■ interrupt" }]],
+    });
+    expect(richSends[1]?.body.reply_parameters).toMatchObject({
+      message_id: 101,
+    });
+    expect(calls.some(
+      (call) =>
+        call.method === "deleteMessage" &&
+        call.body.message_id === 1_000,
+    )).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(701);
+    const latestEdit = calls
+      .filter((call) => call.method === "editMessageText")
+      .at(-1);
+    expect(JSON.stringify(latestEdit?.body)).toContain(
+      "📥 <b>2</b> msgs queued",
+    );
+    store.close();
+  });
+
+  it("deletes a superseded transient when concurrent updates race", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-telegram-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "chatinabox",
+      windowIndex: 0,
+      cwd: "/root/chatinabox",
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(42, 42, pane);
+    const deleted: number[] = [];
+    let richSendCount = 0;
+    let releaseFirstSend!: () => void;
+    const firstSendBlocked = new Promise<void>((resolve) => {
+      releaseFirstSend = resolve;
+    });
+    let firstSendStarted!: () => void;
+    const firstSendEntered = new Promise<void>((resolve) => {
+      firstSendStarted = resolve;
+    });
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      if (method === "sendRichMessage") {
+        richSendCount += 1;
+        if (richSendCount === 1) {
+          firstSendStarted();
+          await firstSendBlocked;
+          return {
+            json: async () => ({ ok: true, result: { message_id: 1_000 } }),
+          };
+        }
+        return {
+          json: async () => ({ ok: true, result: { message_id: 1_001 } }),
+        };
+      }
+      if (method === "deleteMessage") {
+        deleted.push(Number(body.message_id));
+        return { json: async () => ({ ok: true, result: true }) };
+      }
+      return {
+        json: async () => ({ ok: true, result: { message_id: 1_002 } }),
+      };
+    }));
+    const bridge = {
+      request: vi.fn(async () => ({
+        ok: true,
+        sent: true,
+        queuedUntilNextToolCall: true,
+      })),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    const first = controller.routeAttachedMessage(message({
+      message_id: 100,
+      chat: { id: 42 },
+      from: { id: 42 },
+      text: "first",
+    }));
+    await firstSendEntered;
+    const second = controller.routeAttachedMessage(message({
+      message_id: 101,
+      chat: { id: 42 },
+      from: { id: 42 },
+      text: "second",
+    }));
+    await second;
+    releaseFirstSend();
+    await first;
+
+    expect(store.codexStatus(42, 42, pane)?.telegram_message_id).toBe(1_001);
+    expect(deleted).toContain(1_000);
+    store.close();
   });
 
   it("documents every terminal key and stays within one Telegram message", () => {

@@ -4,6 +4,15 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+- Added forum-native work topics, a live overview, a 🔮 manager topic, topic
+  presence icons, and resumable inactivity shutdown.
+- Added conversational first-run setup plus a validated private experience
+  profile for names, symbols, manager identity, launch defaults, and idle
+  policy.
+- Kept `/nexus` and `/wizard` as compatibility aliases while giving new
+  installs neutral `/overview` and `/manager` surfaces.
+- Added topic-scoped routing, session/topic rename sync, transient interrupts,
+  durable reasoning summaries, activity detail, and safer multi-pane renames.
 - Expanded the product experience and documented manual Codex instruction
   installation.
 - Corrected global worker instructions to install under the Codex home

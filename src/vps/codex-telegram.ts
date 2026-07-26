@@ -25,9 +25,11 @@ import {
   tgEditPhotoMedia,
   tgEditMessage,
   tgEditMessageCaption,
+  tgEditRichHtml,
   tgGetFile,
   tgSend,
   tgSendPhoto,
+  tgSendRichHtml,
   tgSendRichMarkdown,
 } from "../telegram";
 import type {
@@ -51,12 +53,17 @@ import {
   type CodexEvent,
 } from "./codex-bridge-protocol";
 import type { ChatinaboxEnv } from "./env";
+import {
+  DEFAULT_EXPERIENCE_PROFILE,
+  type ExperienceProfile,
+} from "./experience-profile";
 import type {
   CodexAttachmentRow,
+  CodexStatusRow,
+  CodexStatusSnapshot,
   ChatinaboxStore,
 } from "./store";
 import {
-  hasMarkdownTable,
   renderTelegramMarkdownChunks,
 } from "./telegram-markdown";
 
@@ -73,6 +80,7 @@ interface CodexTelegramDependencies {
   readonly env: ChatinaboxEnv;
   readonly store: ChatinaboxStore;
   readonly bridge?: CodexBridgeClient;
+  readonly profile?: () => ExperienceProfile;
 }
 
 interface Menu {
@@ -113,22 +121,38 @@ interface ScreenReplacement {
   readonly isPhoto: boolean;
 }
 
+type TransientStatusKind =
+  | "state_compacting"
+  | "state_working"
+  | "state_waiting_terminal"
+  | "state_queued"
+  | "state_activity"
+  | "state_image_viewed";
+
 export class CodexTelegramController {
   private readonly bridge: CodexBridgeClient;
   private readonly mediaGroups = new Map<string, PendingMediaGroup>();
   private readonly textBurstTimers = new Map<string, NodeJS.Timeout>();
   private readonly flushingTextBursts = new Set<string>();
+  private readonly transientMutationVersions = new Map<string, number>();
+  private readonly profile: () => ExperienceProfile;
 
   constructor(private readonly dependencies: CodexTelegramDependencies) {
     this.bridge =
       dependencies.bridge ??
       new CodexBridgeClient(dependencies.env.CODEX_BRIDGE_SOCKET);
+    this.profile = dependencies.profile ?? (() => DEFAULT_EXPERIENCE_PROFILE);
   }
 
-  isAttached(chatId: number, ownerUserId: number): boolean {
+  isAttached(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId = 0,
+  ): boolean {
     return this.dependencies.store.codexAttachment(
       chatId,
       ownerUserId,
+      messageThreadId,
     ) !== null;
   }
 
@@ -136,9 +160,15 @@ export class CodexTelegramController {
   async ensureLobbyAttached(
     chatId: number,
     ownerUserId: number,
+    messageThreadId = 0,
+    force = false,
   ): Promise<boolean> {
-    if (this.isAttached(chatId, ownerUserId)) return true;
-    return (await this.attachLobby(chatId, ownerUserId)) !== null;
+    if (!force && this.isAttached(chatId, ownerUserId, messageThreadId)) {
+      return true;
+    }
+    return (
+      await this.attachLobby(chatId, ownerUserId, messageThreadId)
+    ) !== null;
   }
 
   async handleCommand(
@@ -150,6 +180,7 @@ export class CodexTelegramController {
     if (!isTelegramIdentity(chatId, false) || !isTelegramIdentity(ownerUserId, true)) {
       return true;
     }
+    const messageThreadId = telegramMessageThreadId(message);
     switch (command.name) {
       case "codex":
       case "codex_sessions":
@@ -162,6 +193,7 @@ export class CodexTelegramController {
               ownerUserId!,
               normalizeName(subargument),
               message.message_id,
+              messageThreadId,
             );
             return true;
           }
@@ -171,23 +203,46 @@ export class CodexTelegramController {
               ownerUserId!,
               subargument,
               message.message_id,
+              messageThreadId,
             );
             return true;
           }
           if (subcommand?.toLowerCase() === "detach") {
-            await this.detach(chatId, ownerUserId!, message.message_id);
+            await this.detach(
+              chatId,
+              ownerUserId!,
+              message.message_id,
+              messageThreadId,
+            );
             return true;
           }
           if (subcommand?.toLowerCase() === "off") {
-            await this.turnOff(chatId, ownerUserId!, message.message_id);
+            await this.turnOff(
+              chatId,
+              ownerUserId!,
+              message.message_id,
+              messageThreadId,
+            );
             return true;
           }
           if (subcommand?.toLowerCase() === "interrupt") {
-            await this.interrupt(chatId, ownerUserId!, message.message_id);
+            await this.interrupt(
+              chatId,
+              ownerUserId!,
+              message.message_id,
+              messageThreadId,
+            );
             return true;
           }
           if (subcommand?.toLowerCase() === "screen") {
-            await this.sendScreen(chatId, ownerUserId!, message.message_id);
+            await this.sendScreen(
+              chatId,
+              ownerUserId!,
+              message.message_id,
+              undefined,
+              0,
+              messageThreadId,
+            );
             return true;
           }
           if (subcommand?.toLowerCase() === "key") {
@@ -196,6 +251,7 @@ export class CodexTelegramController {
               ownerUserId!,
               subargument,
               message.message_id,
+              messageThreadId,
             );
             return true;
           }
@@ -203,13 +259,20 @@ export class CodexTelegramController {
             await tgSend(
               this.dependencies.env,
               chatId,
-              codexHelpText(),
+              codexHelpText(this.profile()),
               message.message_id,
+              undefined,
+              messageThreadId || undefined,
             );
             return true;
           }
         }
-        await this.sendMenu(chatId, ownerUserId!, message.message_id);
+        await this.sendMenu(
+          chatId,
+          ownerUserId!,
+          message.message_id,
+          messageThreadId,
+        );
         return true;
       case "attach":
       case "codex_attach":
@@ -218,12 +281,18 @@ export class CodexTelegramController {
           ownerUserId!,
           command.argument,
           message.message_id,
+          messageThreadId,
         );
         return true;
       case "detach":
       case "unattach":
       case "codex_detach":
-        await this.detach(chatId, ownerUserId!, message.message_id);
+        await this.detach(
+          chatId,
+          ownerUserId!,
+          message.message_id,
+          messageThreadId,
+        );
         return true;
       case "codex_new":
         await this.createAndAttach(
@@ -231,6 +300,7 @@ export class CodexTelegramController {
           ownerUserId!,
           normalizeName(command.argument),
           message.message_id,
+          messageThreadId,
         );
         return true;
       case "codex_rename":
@@ -239,14 +309,27 @@ export class CodexTelegramController {
           ownerUserId!,
           command.argument,
           message.message_id,
+          messageThreadId,
         );
         return true;
       case "codex_interrupt":
-        await this.interrupt(chatId, ownerUserId!, message.message_id);
+        await this.interrupt(
+          chatId,
+          ownerUserId!,
+          message.message_id,
+          messageThreadId,
+        );
         return true;
       case "screen":
       case "codex_screen":
-        await this.sendScreen(chatId, ownerUserId!, message.message_id);
+        await this.sendScreen(
+          chatId,
+          ownerUserId!,
+          message.message_id,
+          undefined,
+          0,
+          messageThreadId,
+        );
         return true;
       case "key":
       case "codex_key":
@@ -255,14 +338,17 @@ export class CodexTelegramController {
           ownerUserId!,
           command.argument,
           message.message_id,
+          messageThreadId,
         );
         return true;
       case "codex_help":
         await tgSend(
           this.dependencies.env,
           chatId,
-          codexHelpText(),
+          codexHelpText(this.profile()),
           message.message_id,
+          undefined,
+          messageThreadId || undefined,
         );
         return true;
       default:
@@ -273,6 +359,7 @@ export class CodexTelegramController {
   async handleCallback(callback: TelegramCallbackQuery): Promise<boolean> {
     const chatId = callback.message?.chat.id;
     const messageId = callback.message?.message_id;
+    const messageThreadId = telegramMessageThreadId(callback.message ?? {});
     const ownerUserId = callback.from.id;
     if (
       !isTelegramIdentity(chatId, false) ||
@@ -320,22 +407,28 @@ export class CodexTelegramController {
           );
           return true;
         }
-        this.dependencies.store.attachCodex(chatId!, ownerUserId, pane);
-        await this.editMenu(chatId!, ownerUserId, messageId!);
+        this.dependencies.store.attachCodex(
+          chatId!,
+          ownerUserId,
+          pane,
+          messageThreadId,
+        );
+        await this.editMenu(chatId!, ownerUserId, messageId!, messageThreadId);
         return true;
       }
       case "codex.detach":
-        await this.attachLobby(chatId!, ownerUserId);
-        await this.editMenu(chatId!, ownerUserId, messageId!);
+        await this.attachLobby(chatId!, ownerUserId, messageThreadId);
+        await this.editMenu(chatId!, ownerUserId, messageId!, messageThreadId);
         return true;
       case "codex.refresh":
-        await this.editMenu(chatId!, ownerUserId, messageId!);
+        await this.editMenu(chatId!, ownerUserId, messageId!, messageThreadId);
         return true;
       case "codex.new": {
         const result = await this.bridge.request({
           op: "new",
           name: nextFriendlyName(),
           cwd: this.dependencies.env.DEFAULT_CWD,
+          ...workerDefaults(this.profile()),
         }).catch(() => null);
         if (!result?.ok || !("pane" in result)) {
           await this.editError(
@@ -347,8 +440,13 @@ export class CodexTelegramController {
           );
           return true;
         }
-        this.dependencies.store.attachCodex(chatId!, ownerUserId, result.pane);
-        await this.editMenu(chatId!, ownerUserId, messageId!);
+        this.dependencies.store.attachCodex(
+          chatId!,
+          ownerUserId,
+          result.pane,
+          messageThreadId,
+        );
+        await this.editMenu(chatId!, ownerUserId, messageId!, messageThreadId);
         return true;
       }
       case "codex.resume": {
@@ -361,6 +459,7 @@ export class CodexTelegramController {
           op: "resume",
           sessionId: saved.id,
           name: saved.name,
+          ...workerDefaults(this.profile()),
         }).catch(() => null);
         if (!result?.ok || !("pane" in result)) {
           await this.editError(
@@ -372,24 +471,59 @@ export class CodexTelegramController {
           );
           return true;
         }
-        this.dependencies.store.attachCodex(chatId!, ownerUserId, result.pane);
-        await this.editMenu(chatId!, ownerUserId, messageId!);
+        this.dependencies.store.attachCodex(
+          chatId!,
+          ownerUserId,
+          result.pane,
+          messageThreadId,
+        );
+        await this.editMenu(chatId!, ownerUserId, messageId!, messageThreadId);
         return true;
       }
       case "codex.interrupt": {
         const attachment = this.dependencies.store.codexAttachment(
           chatId!,
           ownerUserId,
+          messageThreadId,
         );
         if (!attachment) {
-          await this.editMenu(chatId!, ownerUserId, messageId!);
+          await this.editMenu(chatId!, ownerUserId, messageId!, messageThreadId);
           return true;
         }
         await this.bridge.request({
           op: "interrupt",
           target: attachmentTarget(attachment),
         }).catch(() => null);
-        await this.editMenu(chatId!, ownerUserId, messageId!);
+        await this.editMenu(chatId!, ownerUserId, messageId!, messageThreadId);
+        return true;
+      }
+      case "codex.transient_interrupt": {
+        const attachment = this.dependencies.store.codexAttachment(
+          chatId!,
+          ownerUserId,
+          messageThreadId,
+        );
+        if (!attachment) return true;
+        await this.bridge.request({
+          op: "interrupt",
+          target: attachmentTarget(attachment),
+        }).catch(() => null);
+        const transient = this.dependencies.store.codexStatus(
+          chatId!,
+          ownerUserId,
+          attachmentTarget(attachment),
+        );
+        if (transient?.telegram_message_id === messageId) {
+          this.takeTransientStatus(
+            attachment,
+            attachmentTarget(attachment),
+          );
+        }
+        await tgDeleteMessage(
+          this.dependencies.env,
+          chatId!,
+          messageId!,
+        ).catch(() => undefined);
         return true;
       }
       case "codex.screen":
@@ -401,12 +535,20 @@ export class CodexTelegramController {
             messageId: messageId!,
             isPhoto: Boolean(callback.message?.photo?.length),
           },
+          0,
+          messageThreadId,
         );
         return true;
       case "codex.key": {
         const key = parseKeyPayload(parsed.value.payload);
         if (!key) return true;
-        await this.sendKeys(chatId!, ownerUserId, [key], messageId!);
+        await this.sendKeys(
+          chatId!,
+          ownerUserId,
+          [key],
+          messageId!,
+          messageThreadId,
+        );
         await this.sendScreen(
           chatId!,
           ownerUserId,
@@ -416,6 +558,7 @@ export class CodexTelegramController {
             isPhoto: Boolean(callback.message?.photo?.length),
           },
           250,
+          messageThreadId,
         );
         return true;
       }
@@ -437,6 +580,7 @@ export class CodexTelegramController {
     const attachment = this.dependencies.store.codexAttachment(
       chatId,
       ownerUserId!,
+      telegramMessageThreadId(message),
     );
     if (!attachment) return false;
     const target = attachmentTarget(attachment);
@@ -516,6 +660,7 @@ export class CodexTelegramController {
     const attachment = this.dependencies.store.codexAttachment(
       chatId,
       ownerUserId!,
+      telegramMessageThreadId(message),
     );
     if (!attachment) return false;
     const target = attachmentTarget(attachment);
@@ -575,11 +720,7 @@ export class CodexTelegramController {
       text,
     }).catch(() => null);
     if (!response?.ok) {
-      const transient = this.dependencies.store.clearCodexStatus(
-        attachment.chat_id,
-        attachment.owner_user_id,
-        target,
-      );
+      const transient = this.takeTransientStatus(attachment, target);
       if (transient) {
         await tgDeleteMessage(
           this.dependencies.env,
@@ -591,6 +732,7 @@ export class CodexTelegramController {
         await this.attachLobby(
           attachment.chat_id,
           attachment.owner_user_id,
+          attachment.message_thread_id,
         );
       }
       if (reportFailure) {
@@ -602,6 +744,8 @@ export class CodexTelegramController {
               "🪄 You’re back in Lobby; resend your message there."
             : "⚠️ The session bridge is unavailable. Your message was not sent.",
           replyToMessageId,
+          undefined,
+          attachment.message_thread_id || undefined,
         );
       }
       return false;
@@ -678,9 +822,10 @@ export class CodexTelegramController {
         parsed.target,
       );
       if (queued.length === 0) return;
-      const attachment = this.dependencies.store.codexAttachment(
+      const attachment = this.dependencies.store.codexAttachmentForTarget(
         parsed.chatId,
         parsed.ownerUserId,
+        parsed.target,
       );
       if (
         !attachment ||
@@ -695,7 +840,7 @@ export class CodexTelegramController {
         attachment,
         parsed.target,
         buildBundledTelegramPrompt(queued.map((row) => row.text)),
-        queued[0].telegram_message_id,
+        queued[queued.length - 1].telegram_message_id,
         false,
         queued.length,
       );
@@ -875,11 +1020,7 @@ export class CodexTelegramController {
     replyToMessageId: number,
     message: string,
   ): Promise<void> {
-    const transient = this.dependencies.store.clearCodexStatus(
-      attachment.chat_id,
-      attachment.owner_user_id,
-      target,
-    );
+    const transient = this.takeTransientStatus(attachment, target);
     if (transient) {
       await tgDeleteMessage(
         this.dependencies.env,
@@ -940,6 +1081,9 @@ export class CodexTelegramController {
           this.dependencies.env,
           attachment.chat_id,
           `🪄 <b>Session renamed</b> · ${escapeTelegramHtml(pane.windowName)}`,
+          undefined,
+          undefined,
+          attachment.message_thread_id || undefined,
         );
         if (!sent.ok) return false;
       }
@@ -958,8 +1102,11 @@ export class CodexTelegramController {
           const failed = await tgSend(
             this.dependencies.env,
             attachment.chat_id,
-            "⚠️ <b>Handoff could not complete.</b>\n" +
+              "⚠️ <b>Handoff could not complete.</b>\n" +
               "The destination session is no longer running; you remain here.",
+            undefined,
+            undefined,
+            attachment.message_thread_id || undefined,
           );
           if (!failed.ok) return false;
           continue;
@@ -968,6 +1115,7 @@ export class CodexTelegramController {
           attachment.chat_id,
           attachment.owner_user_id,
           pane,
+          attachment.message_thread_id,
         );
         const sent = await tgSend(
           this.dependencies.env,
@@ -978,6 +1126,9 @@ export class CodexTelegramController {
             : `🪄 <b>Handoff complete</b> · now talking to ` +
               `<b>${normalizeAssistantName(pane.assistantName)}</b> in ` +
               `<b>${escapeTelegramHtml(pane.windowName)}</b>.`,
+          undefined,
+          undefined,
+          attachment.message_thread_id || undefined,
         );
         if (!sent.ok) return false;
       }
@@ -988,6 +1139,24 @@ export class CodexTelegramController {
         event.target,
         event.assistantName,
       );
+      if (attachment.message_thread_id > 0) {
+        const model = responseModelLabel(event);
+        this.dependencies.store.updateTopicSetup(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          attachment.message_thread_id,
+          {
+            ...(model === "sol" || model === "luna" || model === "terra"
+              ? { model }
+              : {}),
+            ...(event.reasoningEffort
+              ? { reasoning_effort: event.reasoningEffort }
+              : {}),
+            ...(event.fast !== undefined ? { fast: event.fast ? 1 : 0 } : {}),
+            ...(event.cwd ? { cwd: event.cwd } : {}),
+          },
+        );
+      }
       if (
         event.kind === "state_compacting" ||
         event.kind === "state_working" ||
@@ -1013,6 +1182,18 @@ export class CodexTelegramController {
         );
         continue;
       }
+      if (event.kind === "turn_aborted") {
+        await this.clearQueuedFollowupStatus(attachment, event.target);
+        const transient = this.takeTransientStatus(attachment, event.target);
+        if (transient) {
+          await tgDeleteMessage(
+            this.dependencies.env,
+            attachment.chat_id,
+            transient.telegram_message_id,
+          ).catch(() => undefined);
+        }
+        continue;
+      }
       const finalHash = event.kind === "assistant_final"
         ? createHash("sha256").update(event.message).digest("hex")
         : null;
@@ -1028,26 +1209,25 @@ export class CodexTelegramController {
         continue;
       }
       if (event.kind === "context_compacted") {
-        const transient = this.dependencies.store.clearCodexStatus(
-          attachment.chat_id,
-          attachment.owner_user_id,
-          event.target,
-        );
+        const transient = this.takeTransientStatus(attachment, event.target);
         let delivered = false;
         if (transient) {
-          const edited = await tgEditMessage(
+          const edited = await tgEditRichHtml(
             this.dependencies.env,
             attachment.chat_id,
             transient.telegram_message_id,
-            "🧶 <b>Context compacted</b>",
+            formatPromotedContextCompaction(this.profile()),
           ).catch(() => null);
-          delivered = edited?.ok === true;
+          delivered = telegramEditSucceeded(edited);
         }
         if (!delivered) {
-          const sent = await tgSend(
+          const sent = await tgSendRichHtml(
             this.dependencies.env,
             attachment.chat_id,
-            "🧶 <b>Context compacted</b>",
+            formatPromotedContextCompaction(this.profile()),
+            undefined,
+            undefined,
+            attachment.message_thread_id || undefined,
           );
           if (!sent.ok) return false;
         }
@@ -1055,19 +1235,14 @@ export class CodexTelegramController {
       }
       if (event.kind === "image_viewed") {
         await this.clearQueuedFollowupStatus(attachment, event.target);
-        const sent = await tgSend(
-          this.dependencies.env,
-          attachment.chat_id,
-          "🖼️ <b>Viewed image</b>",
+        await this.setTransientStatus(
+          attachment,
+          event.target,
+          "state_image_viewed",
         );
-        if (!sent.ok) return false;
         continue;
       }
-      const transient = this.dependencies.store.clearCodexStatus(
-        attachment.chat_id,
-        attachment.owner_user_id,
-        event.target,
-      );
+      const transient = this.takeTransientStatus(attachment, event.target);
       if (transient) {
         await tgDeleteMessage(
           this.dependencies.env,
@@ -1083,28 +1258,72 @@ export class CodexTelegramController {
             event.createdAt,
           )
         : [];
-      const pending = pendingBatch[pendingBatch.length - 1];
+      const pending = event.kind === "assistant_final"
+        ? pendingBatch[pendingBatch.length - 1]
+        : (
+            event.kind === "assistant_progress" ||
+              event.kind === "agent_reasoning"
+          )
+          ? this.dependencies.store.nextCodexPrompt(
+              attachment.chat_id,
+              attachment.owner_user_id,
+              event.target,
+            )
+          : null;
+      const turnStartedAt =
+        event.turnStartedAt ||
+        transient?.started_at ||
+        pendingBatch[0]?.created_at ||
+        event.createdAt;
+      const turnElapsedMs = Math.max(0, event.createdAt - turnStartedAt);
+      const totalWorkMs = event.kind === "assistant_final"
+          ? this.dependencies.store.addCodexSessionWork(
+            event.sessionId,
+            event.turnId,
+            turnElapsedMs,
+          )
+        : 0;
+      const details = event.kind === "assistant_final"
+        ? {
+            model: responseModelLabel(event),
+            reasoningEffort: event.reasoningEffort,
+            fast: event.fast === true,
+            cwd: event.cwd ?? attachment.cwd,
+            turnElapsedMs,
+            totalWorkMs,
+            contextUsedPercent: event.contextUsedPercent,
+          }
+        : undefined;
       let deliveredAsRichMessage = false;
       if (
-        hasMarkdownTable(event.message) &&
+        (
+          event.kind === "assistant_final" ||
+          event.kind === "assistant_progress" ||
+          event.kind === "agent_reasoning"
+        ) &&
         event.message.length <= 30_000
       ) {
         const richResult = await tgSendRichMarkdown(
           this.dependencies.env,
           attachment.chat_id,
-          formatCodexRichMarkdown(event),
+          event.kind === "agent_reasoning"
+            ? formatAgentReasoningRichMarkdown(event.message)
+            : formatCodexRichMarkdown(event, details, this.profile()),
           pending?.telegram_message_id,
+          attachment.message_thread_id || undefined,
         ).catch(() => null);
         deliveredAsRichMessage = richResult?.ok === true;
       }
       if (!deliveredAsRichMessage) {
-        const chunks = formatCodexEvent(event);
+        const chunks = formatCodexEvent(event, this.profile());
         for (let index = 0; index < chunks.length; index += 1) {
           const result = await tgSend(
             this.dependencies.env,
             attachment.chat_id,
             chunks[index],
             index === 0 ? pending?.telegram_message_id : undefined,
+            undefined,
+            attachment.message_thread_id || undefined,
           );
           if (!result.ok) return false;
         }
@@ -1115,6 +1334,18 @@ export class CodexTelegramController {
           attachment.owner_user_id,
           event.target,
           finalHash!,
+        );
+      } else if (
+        (
+          event.kind === "assistant_progress" ||
+          event.kind === "agent_reasoning"
+        ) &&
+        transient
+      ) {
+        await this.restoreTransientStatus(
+          attachment,
+          event.target,
+          transient,
         );
       }
       if (pendingBatch.length > 0) {
@@ -1129,65 +1360,124 @@ export class CodexTelegramController {
   private async setTransientStatus(
     attachment: CodexAttachmentRow,
     target: CodexPaneIdentity,
-    kind:
-      | "state_compacting"
-      | "state_working"
-      | "state_waiting_terminal"
-      | "state_queued"
-      | "state_activity",
+    kind: TransientStatusKind,
     replyToMessageId?: number,
     queuedCount?: number,
     activityMessage?: string,
     preserveExisting = false,
-    assistantNameOverride?: CodexAssistantName,
+    _assistantNameOverride?: CodexAssistantName,
   ): Promise<void> {
-    const assistantName = normalizeAssistantName(
-      assistantNameOverride ?? attachment.assistant_name,
-    );
-    const activityText =
-      kind === "state_activity"
-        ? formatCodexActivityStatus(activityMessage ?? "", assistantName)
-        : null;
-    const text =
-      kind === "state_compacting"
-        ? "🧶 <b>Compacting context…</b>"
-        : kind === "state_waiting_terminal"
-        ? "⏳ <b>Waiting for terminal…</b>"
-        : kind === "state_queued"
-          ? `📥 <b>${queuedCount ?? 2} messages bundled for ${assistantName}…</b>`
-          : activityText ??
-            (
-              assistantName === "Lobby"
-                ? "🪄 <b>Lobby is thinking…</b>"
-                : `🎱 <b>${assistantName} is working…</b>`
-            );
+    const mutation = this.beginTransientMutation(attachment, target);
     const existing = this.dependencies.store.codexStatus(
       attachment.chat_id,
       attachment.owner_user_id,
       target,
     );
-    if (existing) {
-      if (preserveExisting) return;
-      await tgEditMessage(
+    const snapshot = mergeTransientStatus(
+      existing,
+      kind,
+      queuedCount,
+      activityMessage,
+      preserveExisting,
+      replyToMessageId,
+      Date.now(),
+    );
+    const html = formatCodexTransientRichHtml(snapshot, Date.now(), this.profile());
+    const keyboard = await this.transientInterruptKeyboard(
+      attachment,
+    ).catch(() => undefined);
+    if (!this.isCurrentTransientMutation(mutation)) return;
+    const shouldReanchor =
+      existing !== null &&
+      replyToMessageId !== undefined &&
+      existing.reply_to_message_id !== replyToMessageId;
+    if (existing && !shouldReanchor) {
+      const edited = await tgEditRichHtml(
         this.dependencies.env,
         attachment.chat_id,
         existing.telegram_message_id,
-        text,
-      ).catch(() => undefined);
-      return;
+        html,
+        keyboard,
+      ).catch(() => null);
+      if (telegramEditSucceeded(edited)) {
+        if (!this.isCurrentTransientMutation(mutation)) return;
+        this.dependencies.store.setCodexStatus(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          target,
+          existing.telegram_message_id,
+          snapshot,
+        );
+        return;
+      }
     }
-    const sent = await tgSend(
+    if (existing) {
+      const deleted = await tgDeleteMessage(
+        this.dependencies.env,
+        attachment.chat_id,
+        existing.telegram_message_id,
+      ).catch(() => null);
+      if (!this.isCurrentTransientMutation(mutation)) return;
+      if (!telegramDeleteSucceeded(deleted)) {
+        const edited = await tgEditRichHtml(
+          this.dependencies.env,
+          attachment.chat_id,
+          existing.telegram_message_id,
+          html,
+          keyboard,
+        ).catch(() => null);
+        if (
+          this.isCurrentTransientMutation(mutation) &&
+          telegramEditSucceeded(edited)
+        ) {
+          this.dependencies.store.setCodexStatus(
+            attachment.chat_id,
+            attachment.owner_user_id,
+            target,
+            existing.telegram_message_id,
+            {
+              ...snapshot,
+              replyToMessageId: existing.reply_to_message_id,
+            },
+          );
+        }
+        return;
+      }
+    }
+    if (!this.isCurrentTransientMutation(mutation)) return;
+    let sent = await tgSendRichHtml(
       this.dependencies.env,
       attachment.chat_id,
-      text,
-      replyToMessageId,
+      html,
+      snapshot.replyToMessageId ?? undefined,
+      keyboard,
+      attachment.message_thread_id || undefined,
     ).catch(() => null);
+    if (!sent?.ok) {
+      sent = await tgSend(
+        this.dependencies.env,
+        attachment.chat_id,
+        formatCodexTransientFallback(snapshot, this.profile()),
+        snapshot.replyToMessageId ?? undefined,
+        keyboard,
+        attachment.message_thread_id || undefined,
+      ).catch(() => null);
+    }
     if (sent?.ok) {
+      if (!this.isCurrentTransientMutation(mutation)) {
+        await tgDeleteMessage(
+          this.dependencies.env,
+          attachment.chat_id,
+          sent.result.message_id,
+        ).catch(() => undefined);
+        return;
+      }
       this.dependencies.store.setCodexStatus(
         attachment.chat_id,
         attachment.owner_user_id,
         target,
         sent.result.message_id,
+        snapshot,
       );
     }
   }
@@ -1198,47 +1488,121 @@ export class CodexTelegramController {
     replyToMessageId: number,
     addedCount: number,
   ): Promise<void> {
-    const existing = this.dependencies.store.codexQueueStatus(
+    const existing = this.dependencies.store.codexStatus(
       attachment.chat_id,
       attachment.owner_user_id,
       target,
     );
-    const totalCount = (existing?.message_count ?? 0) + Math.max(1, addedCount);
-    const text = formatCodexQueuedUntilToolStatus(
+    const totalCount =
+      (existing?.queued_messages ?? 0) + Math.max(1, addedCount);
+    await this.setTransientStatus(
+      attachment,
+      target,
+      "state_queued",
+      replyToMessageId,
       totalCount,
-      normalizeAssistantName(attachment.assistant_name),
+      undefined,
+      true,
     );
-    if (existing) {
-      await tgEditMessage(
-        this.dependencies.env,
-        attachment.chat_id,
-        existing.telegram_message_id,
-        text,
-      ).catch(() => undefined);
-      this.dependencies.store.setCodexQueueStatus(
-        attachment.chat_id,
-        attachment.owner_user_id,
-        target,
-        existing.telegram_message_id,
-        totalCount,
-      );
-      return;
-    }
-    const sent = await tgSend(
+  }
+
+  private async restoreTransientStatus(
+    attachment: CodexAttachmentRow,
+    target: CodexPaneIdentity,
+    previous: CodexStatusRow,
+  ): Promise<void> {
+    const mutation = this.beginTransientMutation(attachment, target);
+    const snapshot = statusSnapshotFromRow(previous, null);
+    const html = formatCodexTransientRichHtml(snapshot, Date.now(), this.profile());
+    const keyboard = await this.transientInterruptKeyboard(
+      attachment,
+    ).catch(() => undefined);
+    if (!this.isCurrentTransientMutation(mutation)) return;
+    let sent = await tgSendRichHtml(
       this.dependencies.env,
       attachment.chat_id,
-      text,
-      replyToMessageId,
+      html,
+      snapshot.replyToMessageId ?? undefined,
+      keyboard,
+      attachment.message_thread_id || undefined,
     ).catch(() => null);
+    if (!sent?.ok) {
+      sent = await tgSend(
+        this.dependencies.env,
+        attachment.chat_id,
+        formatCodexTransientFallback(snapshot, this.profile()),
+        snapshot.replyToMessageId ?? undefined,
+        keyboard,
+        attachment.message_thread_id || undefined,
+      ).catch(() => null);
+    }
     if (sent?.ok) {
-      this.dependencies.store.setCodexQueueStatus(
+      if (!this.isCurrentTransientMutation(mutation)) {
+        await tgDeleteMessage(
+          this.dependencies.env,
+          attachment.chat_id,
+          sent.result.message_id,
+        ).catch(() => undefined);
+        return;
+      }
+      this.dependencies.store.setCodexStatus(
         attachment.chat_id,
         attachment.owner_user_id,
         target,
         sent.result.message_id,
-        totalCount,
+        snapshot,
       );
     }
+  }
+
+  private beginTransientMutation(
+    attachment: CodexAttachmentRow,
+    target: CodexPaneIdentity,
+  ): { readonly key: string; readonly version: number } {
+    const key = codexOwnerTargetKey(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      target,
+    );
+    const version = (this.transientMutationVersions.get(key) ?? 0) + 1;
+    this.transientMutationVersions.set(key, version);
+    return { key, version };
+  }
+
+  private async transientInterruptKeyboard(
+    attachment: CodexAttachmentRow,
+  ): Promise<TelegramInlineKeyboardMarkup> {
+    const issued = await issueCallbackReference(
+      this.dependencies.store.callbackStore(),
+      {
+        action: "codex.transient_interrupt",
+        chatId: attachment.chat_id,
+        userId: attachment.owner_user_id,
+        payload: {},
+        ttlMs: CODEX_CALLBACK_TTL_MS,
+      },
+    );
+    return buildInlineKeyboard([
+      [{ label: "■  interrupt", callbackData: issued.callbackData }],
+    ]);
+  }
+
+  private isCurrentTransientMutation(
+    mutation: { readonly key: string; readonly version: number },
+  ): boolean {
+    return this.transientMutationVersions.get(mutation.key) === mutation.version;
+  }
+
+  private takeTransientStatus(
+    attachment: CodexAttachmentRow,
+    target: CodexPaneIdentity,
+  ): CodexStatusRow | null {
+    this.beginTransientMutation(attachment, target);
+    return this.dependencies.store.clearCodexStatus(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      target,
+    );
   }
 
   private async clearQueuedFollowupStatus(
@@ -1250,7 +1614,15 @@ export class CodexTelegramController {
       attachment.owner_user_id,
       target,
     );
-    if (queued) {
+    const transient = this.dependencies.store.codexStatus(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      target,
+    );
+    if (
+      queued &&
+      queued.telegram_message_id !== transient?.telegram_message_id
+    ) {
       await tgDeleteMessage(
         this.dependencies.env,
         attachment.chat_id,
@@ -1263,15 +1635,17 @@ export class CodexTelegramController {
     chatId: number,
     ownerUserId: number,
     replyToMessageId?: number,
+    messageThreadId = 0,
   ): Promise<void> {
     try {
-      const menu = await this.buildMenu(chatId, ownerUserId);
+      const menu = await this.buildMenu(chatId, ownerUserId, messageThreadId);
       await tgSend(
         this.dependencies.env,
         chatId,
         menu.text,
         replyToMessageId,
         menu.keyboard,
+        messageThreadId || undefined,
       );
     } catch {
       await tgSend(
@@ -1279,6 +1653,8 @@ export class CodexTelegramController {
         chatId,
         "⚠️ The session bridge is unavailable. Try <code>/codex</code> again shortly.",
         replyToMessageId,
+        undefined,
+        messageThreadId || undefined,
       );
     }
   }
@@ -1287,9 +1663,10 @@ export class CodexTelegramController {
     chatId: number,
     ownerUserId: number,
     messageId: number,
+    messageThreadId = 0,
   ): Promise<void> {
     try {
-      const menu = await this.buildMenu(chatId, ownerUserId);
+      const menu = await this.buildMenu(chatId, ownerUserId, messageThreadId);
       await tgEditMessage(
         this.dependencies.env,
         chatId,
@@ -1322,11 +1699,13 @@ export class CodexTelegramController {
   private async buildMenu(
     chatId: number,
     ownerUserId: number,
+    messageThreadId = 0,
   ): Promise<Menu> {
     const { panes, recent } = await this.listSessions();
     const attachment = this.dependencies.store.codexAttachment(
       chatId,
       ownerUserId,
+      messageThreadId,
     );
     let activePane = attachment
       ? panes.find((pane) =>
@@ -1334,7 +1713,11 @@ export class CodexTelegramController {
         )
       : undefined;
     if (attachment && !activePane) {
-      activePane = await this.attachLobby(chatId, ownerUserId) ?? undefined;
+      activePane = await this.attachLobby(
+        chatId,
+        ownerUserId,
+        messageThreadId,
+      ) ?? undefined;
     }
 
     const rows: InlineKeyboardButtonInput[][] = [];
@@ -1508,6 +1891,7 @@ export class CodexTelegramController {
     ownerUserId: number,
     argument: string,
     replyToMessageId: number,
+    messageThreadId = 0,
   ): Promise<void> {
     const panes = await this.listPanes().catch(() => []);
     const pane = resolvePaneArgument(panes, argument);
@@ -1519,21 +1903,35 @@ export class CodexTelegramController {
           chatId,
           `No unique session matched <code>${escapeTelegramHtml(selection)}</code>.`,
           replyToMessageId,
+          undefined,
+          messageThreadId || undefined,
         );
       }
-      await this.sendMenu(chatId, ownerUserId, replyToMessageId);
+      await this.sendMenu(
+        chatId,
+        ownerUserId,
+        replyToMessageId,
+        messageThreadId,
+      );
       return;
     }
-    this.dependencies.store.attachCodex(chatId, ownerUserId, pane);
+    this.dependencies.store.attachCodex(
+      chatId,
+      ownerUserId,
+      pane,
+      messageThreadId,
+    );
     const assistantName = normalizeAssistantName(pane.assistantName);
     await tgSend(
       this.dependencies.env,
       chatId,
       `✅ Connected to <b>${assistantName}</b> in ` +
         `<b>${escapeTelegramHtml(pane.windowName)}</b>.\n` +
-        `Send a normal message to talk to ${assistantName}. ` +
+      `Send a normal message to talk to ${assistantName}. ` +
         `Use <code>/detach</code> when finished.`,
       replyToMessageId,
+      undefined,
+      messageThreadId || undefined,
     );
   }
 
@@ -1541,8 +1939,13 @@ export class CodexTelegramController {
     chatId: number,
     ownerUserId: number,
     replyToMessageId: number,
+    messageThreadId = 0,
   ): Promise<void> {
-    const lobby = await this.attachLobby(chatId, ownerUserId);
+    const lobby = await this.attachLobby(
+      chatId,
+      ownerUserId,
+      messageThreadId,
+    );
     await tgSend(
       this.dependencies.env,
       chatId,
@@ -1551,16 +1954,24 @@ export class CodexTelegramController {
           "resume, rename, or start a Codex session."
         : "⚠️ Lobby could not start. Open <code>/codex</code> to reconnect.",
       replyToMessageId,
+      undefined,
+      messageThreadId || undefined,
     );
   }
 
   private async attachLobby(
     chatId: number,
     ownerUserId: number,
+    messageThreadId = 0,
   ): Promise<CodexPane | null> {
     const response = await this.bridge.request({ op: "lobby" }).catch(() => null);
     if (!response?.ok || !("pane" in response)) return null;
-    this.dependencies.store.attachCodex(chatId, ownerUserId, response.pane);
+    this.dependencies.store.attachCodex(
+      chatId,
+      ownerUserId,
+      response.pane,
+      messageThreadId,
+    );
     return response.pane;
   }
 
@@ -1568,8 +1979,13 @@ export class CodexTelegramController {
     chatId: number,
     ownerUserId: number,
     replyToMessageId: number,
+    messageThreadId = 0,
   ): Promise<void> {
-    const detached = this.dependencies.store.detachCodex(chatId, ownerUserId);
+    const detached = this.dependencies.store.detachCodex(
+      chatId,
+      ownerUserId,
+      messageThreadId,
+    );
     await tgSend(
       this.dependencies.env,
       chatId,
@@ -1577,6 +1993,8 @@ export class CodexTelegramController {
         ? "○ Chatinabox routing is off. Your next message will wake the Lobby."
         : "Chatinabox routing is already off.",
       replyToMessageId,
+      undefined,
+      messageThreadId || undefined,
     );
   }
 
@@ -1585,11 +2003,13 @@ export class CodexTelegramController {
     ownerUserId: number,
     name: string | undefined,
     replyToMessageId: number,
+    messageThreadId = 0,
   ): Promise<void> {
     const result = await this.bridge.request({
       op: "new",
       ...(name ? { name } : {}),
       cwd: this.dependencies.env.DEFAULT_CWD,
+      ...workerDefaults(this.profile()),
     }).catch(() => null);
     if (!result?.ok || !("pane" in result)) {
       await tgSend(
@@ -1599,10 +2019,17 @@ export class CodexTelegramController {
           ? `⚠️ ${escapeTelegramHtml(result.error)}`
           : "⚠️ The session bridge is unavailable.",
         replyToMessageId,
+        undefined,
+        messageThreadId || undefined,
       );
       return;
     }
-    this.dependencies.store.attachCodex(chatId, ownerUserId, result.pane);
+    this.dependencies.store.attachCodex(
+      chatId,
+      ownerUserId,
+      result.pane,
+      messageThreadId,
+    );
     const assistantName = normalizeAssistantName(result.pane.assistantName);
     await tgSend(
       this.dependencies.env,
@@ -1611,6 +2038,8 @@ export class CodexTelegramController {
         `<b>${escapeTelegramHtml(result.pane.windowName)}</b>.\n` +
         "Send your first message whenever you're ready.",
       replyToMessageId,
+      undefined,
+      messageThreadId || undefined,
     );
   }
 
@@ -1619,10 +2048,12 @@ export class CodexTelegramController {
     ownerUserId: number,
     rawName: string,
     replyToMessageId: number,
+    messageThreadId = 0,
   ): Promise<void> {
     const attachment = this.dependencies.store.codexAttachment(
       chatId,
       ownerUserId,
+      messageThreadId,
     );
     const name = normalizeName(rawName);
     if (!attachment || !name) {
@@ -1633,6 +2064,8 @@ export class CodexTelegramController {
           ? "Use <code>/codex rename descriptive name</code>."
           : "Attach a session with <code>/codex</code> first.",
         replyToMessageId,
+        undefined,
+        messageThreadId || undefined,
       );
       return;
     }
@@ -1649,6 +2082,8 @@ export class CodexTelegramController {
           ? `⚠️ ${escapeTelegramHtml(result.error)}`
           : "⚠️ The session bridge is unavailable.",
         replyToMessageId,
+        undefined,
+        messageThreadId || undefined,
       );
       return;
     }
@@ -1661,6 +2096,8 @@ export class CodexTelegramController {
       chatId,
       `✅ Renamed this session to <b>${escapeTelegramHtml(result.pane.windowName)}</b>.`,
       replyToMessageId,
+      undefined,
+      messageThreadId || undefined,
     );
   }
 
@@ -1668,10 +2105,12 @@ export class CodexTelegramController {
     chatId: number,
     ownerUserId: number,
     replyToMessageId: number,
+    messageThreadId = 0,
   ): Promise<void> {
     const attachment = this.dependencies.store.codexAttachment(
       chatId,
       ownerUserId,
+      messageThreadId,
     );
     if (!attachment) {
       await tgSend(
@@ -1679,6 +2118,8 @@ export class CodexTelegramController {
         chatId,
         "Attach a session with <code>/codex</code> first.",
         replyToMessageId,
+        undefined,
+        messageThreadId || undefined,
       );
       return;
     }
@@ -1693,6 +2134,8 @@ export class CodexTelegramController {
         ? `■ Interrupt sent to ${normalizeAssistantName(attachment.assistant_name)}.`
         : `⚠️ That ${normalizeAssistantName(attachment.assistant_name)} session could not be interrupted.`,
       replyToMessageId,
+      undefined,
+      messageThreadId || undefined,
     );
   }
 
@@ -1702,10 +2145,12 @@ export class CodexTelegramController {
     replyToMessageId?: number,
     replacement?: ScreenReplacement,
     captureDelayMs = 0,
+    messageThreadId = 0,
   ): Promise<void> {
     const attachment = this.dependencies.store.codexAttachment(
       chatId,
       ownerUserId,
+      messageThreadId,
     );
     if (!attachment) {
       await tgSend(
@@ -1713,6 +2158,8 @@ export class CodexTelegramController {
         chatId,
         "Attach a session with <code>/codex</code> first.",
         replyToMessageId,
+        undefined,
+        messageThreadId || undefined,
       );
       return;
     }
@@ -1750,6 +2197,8 @@ export class CodexTelegramController {
           chatId,
           errorText,
           replyToMessageId,
+          undefined,
+          messageThreadId || undefined,
         );
       }
       return;
@@ -1779,6 +2228,7 @@ export class CodexTelegramController {
           image,
           caption,
           keyboard,
+          messageThreadId || undefined,
         );
     if (!sent.ok && replacement) {
       sent = await tgSendPhoto(
@@ -1787,6 +2237,7 @@ export class CodexTelegramController {
         image,
         caption,
         keyboard,
+        messageThreadId || undefined,
       );
       if (sent.ok) {
         await tgDeleteMessage(
@@ -1802,6 +2253,8 @@ export class CodexTelegramController {
         chatId,
         "⚠️ Telegram could not display the terminal screenshot.",
         replyToMessageId,
+        undefined,
+        messageThreadId || undefined,
       );
     }
   }
@@ -1835,6 +2288,7 @@ export class CodexTelegramController {
     ownerUserId: number,
     argument: string,
     replyToMessageId: number,
+    messageThreadId = 0,
   ): Promise<void> {
     const keys = parseKeyCommand(argument);
     if (!keys) {
@@ -1844,6 +2298,8 @@ export class CodexTelegramController {
         "Unknown key. Use <code>/help</code> for the complete key list " +
           "and multi-key examples.",
         replyToMessageId,
+        undefined,
+        messageThreadId || undefined,
       );
       return;
     }
@@ -1852,10 +2308,18 @@ export class CodexTelegramController {
       ownerUserId,
       keys,
       replyToMessageId,
+      messageThreadId,
     );
     if (sent) {
       await new Promise((resolve) => setTimeout(resolve, 250));
-      await this.sendScreen(chatId, ownerUserId);
+      await this.sendScreen(
+        chatId,
+        ownerUserId,
+        undefined,
+        undefined,
+        0,
+        messageThreadId,
+      );
     }
   }
 
@@ -1864,10 +2328,12 @@ export class CodexTelegramController {
     ownerUserId: number,
     keys: readonly string[],
     replyToMessageId?: number,
+    messageThreadId = 0,
   ): Promise<boolean> {
     const attachment = this.dependencies.store.codexAttachment(
       chatId,
       ownerUserId,
+      messageThreadId,
     );
     if (!attachment) {
       await tgSend(
@@ -1875,6 +2341,8 @@ export class CodexTelegramController {
         chatId,
         "Attach a session with <code>/codex</code> first.",
         replyToMessageId,
+        undefined,
+        messageThreadId || undefined,
       );
       return false;
     }
@@ -1891,6 +2359,8 @@ export class CodexTelegramController {
           ? `⚠️ ${escapeTelegramHtml(result.error)}`
           : "⚠️ Could not send that terminal key.",
         replyToMessageId,
+        undefined,
+        messageThreadId || undefined,
       );
       return false;
     }
@@ -1967,6 +2437,15 @@ function codexOwnerTargetKey(
   ].join("\u001f");
 }
 
+export function telegramMessageThreadId(
+  message: Pick<TelegramMessage, "message_thread_id">,
+): number {
+  return Number.isSafeInteger(message.message_thread_id) &&
+      message.message_thread_id! > 0
+    ? message.message_thread_id!
+    : 0;
+}
+
 function parseCodexOwnerTargetKey(value: string): {
   readonly chatId: number;
   readonly ownerUserId: number;
@@ -2027,31 +2506,204 @@ export function buildTelegramTextPrompt(message: TelegramMessage): string {
   ].join("\n");
 }
 
+function mergeTransientStatus(
+  existing: CodexStatusRow | null,
+  kind: TransientStatusKind,
+  queuedCount: number | undefined,
+  activityMessage: string | undefined,
+  preserveExisting: boolean,
+  replyToMessageId: number | undefined,
+  now: number,
+): CodexStatusSnapshot {
+  let statusKind = existing?.status_kind ?? "state_working";
+  let toolCalls = existing?.tool_calls ?? 0;
+  let editedFiles = existing?.edited_files ?? 0;
+  let exploredThings = existing?.explored_things ?? 0;
+  let activeShells = existing?.active_shells ?? 0;
+  let queuedMessages = existing?.queued_messages ?? 0;
+  let startedAt = existing?.started_at || now;
+
+  if (kind === "state_queued") {
+    queuedMessages = safeStatusCount(queuedCount ?? 1);
+  } else if (!(preserveExisting && existing)) {
+    statusKind = kind;
+    if (kind === "state_working") {
+      toolCalls = 0;
+      editedFiles = 0;
+      exploredThings = 0;
+      activeShells = 0;
+      startedAt = now;
+    }
+    if (
+      kind === "state_working" ||
+      kind === "state_activity" ||
+      kind === "state_waiting_terminal" ||
+      kind === "state_image_viewed"
+    ) {
+      queuedMessages = 0;
+    }
+  }
+
+  if (kind === "state_activity") {
+    const counters = parseActivityCounters(activityMessage ?? "");
+    if (counters) {
+      toolCalls = counters.toolCalls;
+      editedFiles = counters.editedFiles;
+      exploredThings = counters.exploredThings;
+      activeShells = counters.activeShells;
+    }
+  }
+
+  return {
+    statusKind,
+    toolCalls,
+    editedFiles,
+    exploredThings,
+    activeShells,
+    queuedMessages,
+    replyToMessageId:
+      replyToMessageId ?? existing?.reply_to_message_id ?? null,
+    startedAt,
+  };
+}
+
+function parseActivityCounters(value: string): {
+  readonly toolCalls: number;
+  readonly editedFiles: number;
+  readonly exploredThings: number;
+  readonly activeShells: number;
+} | null {
+  const match =
+    /^(\d{1,6})\u001f(\d{1,4})(?:\u001f(\d{1,6}))?(?:\u001f(\d{1,3}))?$/u.exec(
+    value,
+  );
+  if (!match) return null;
+  return {
+    toolCalls: Number(match[1]),
+    editedFiles: Number(match[2]),
+    exploredThings: match[4] === undefined ? 0 : Number(match[3] ?? 0),
+    activeShells: Number(match[4] ?? match[3] ?? 0),
+  };
+}
+
+function safeStatusCount(value: number): number {
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
+export function formatCodexTransientRichHtml(
+  snapshot: CodexStatusSnapshot,
+  now: number = Date.now(),
+  profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
+): string {
+  const lines: string[] = [];
+  const work: string[] = [];
+  if (snapshot.toolCalls > 0) {
+    work.push(
+      `✨ ran <b>${snapshot.toolCalls}</b> ` +
+        `${snapshot.toolCalls === 1 ? "cmd" : "cmds"}`,
+    );
+  }
+  if (snapshot.editedFiles > 0) {
+    work.push(
+      `📝 edited <b>${snapshot.editedFiles}</b> ` +
+        `${snapshot.editedFiles === 1 ? "file" : "files"}`,
+    );
+  }
+  if (work.length > 0) lines.push(work.join(" · "));
+  if (snapshot.exploredThings > 0) {
+    lines.push(
+      `🔎 explored <b>${snapshot.exploredThings}</b> ` +
+        `${snapshot.exploredThings === 1 ? "thing" : "things"}`,
+    );
+  }
+  const secondary: string[] = [];
+  if (snapshot.activeShells > 0) {
+    secondary.push(
+      `🖥️ <b>${snapshot.activeShells}</b> active ` +
+        `${snapshot.activeShells === 1 ? "shell" : "shells"}`,
+    );
+  }
+  if (snapshot.queuedMessages > 0) {
+    secondary.push(
+      `📥 <b>${snapshot.queuedMessages}</b> ` +
+        `${snapshot.queuedMessages === 1 ? "msg" : "msgs"} queued`,
+    );
+  }
+  if (secondary.length > 0) lines.push(secondary.join(" · "));
+  if (snapshot.statusKind === "state_image_viewed") {
+    lines.push("🖼️ viewed an image");
+  }
+  if (snapshot.statusKind === "state_compacting") {
+    lines.push("🧶 compacting context…");
+  }
+  if (snapshot.statusKind === "state_waiting_terminal") {
+    lines.push("<i>⏳ waiting on a terminal…</i>");
+  }
+  return (
+    `<p><mark>${escapeTelegramHtml(assistantIdentity(profile))} is working for ${
+      formatCompactDuration(Math.max(0, now - snapshot.startedAt))
+    }…</mark></p>` +
+    (lines.length > 0 ? `<p>${lines.join("<br/>")}</p>` : "")
+  );
+}
+
+function formatCodexTransientFallback(
+  snapshot: CodexStatusSnapshot,
+  profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
+): string {
+  return formatCodexTransientRichHtml(snapshot, Date.now(), profile)
+    .replaceAll("<mark>", "<b>")
+    .replaceAll("</mark>", "</b>")
+    .replaceAll("<p>", "")
+    .replaceAll("</p>", "\n")
+    .replaceAll("<br/>", "\n")
+    .trim();
+}
+
 export function formatCodexActivityStatus(
   value: string,
-  assistantName: CodexAssistantName = "Codex",
+  _assistantName: CodexAssistantName = "Codex",
+  profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
 ): string | null {
-  const match = /^(\d{1,6})\u001f(\d{1,4})$/u.exec(value);
+  const match =
+    /^(\d{1,6})\u001f(\d{1,4})(?:\u001f(\d{1,6}))?(?:\u001f(\d{1,3}))?$/u.exec(
+    value,
+  );
   if (!match) return null;
   const things = Number(match[1]);
   const files = Number(match[2]);
-  const workingIcon = assistantName === "Lobby" ? "🪄" : "🎱";
+  const explored = match[4] === undefined ? 0 : Number(match[3] ?? 0);
+  const shells = Number(match[4] ?? match[3] ?? 0);
+  const work: string[] = [];
+  if (things > 0) {
+    work.push(
+      `✨ ran <b>${things}</b> ${things === 1 ? "cmd" : "cmds"}`,
+    );
+  }
+  if (files > 0) {
+    work.push(
+      `📝 edited <b>${files}</b> ${files === 1 ? "file" : "files"}`,
+    );
+  }
   return (
-    `${workingIcon} <b>${assistantName} is working…</b>\n` +
-    `⚙️ Ran <b>${things}</b> ${things === 1 ? "thing" : "things"} · ` +
-    `✏️ Edited <b>${files}</b> ${files === 1 ? "file" : "files"}`
+    `<b>${escapeTelegramHtml(assistantIdentity(profile))} is working…</b>\n` +
+    (work.length > 0 ? `${work.join(" · ")}` : "") +
+    (explored > 0
+      ? `\n🔎 explored <b>${explored}</b> ` +
+        `${explored === 1 ? "thing" : "things"}`
+      : "") +
+    (shells > 0
+      ? `\n🖥️ <b>${shells}</b> active ${shells === 1 ? "shell" : "shells"}`
+      : "")
   );
 }
 
 export function formatCodexQueuedUntilToolStatus(
   count: number,
-  assistantName: CodexAssistantName = "Codex",
+  _assistantName: CodexAssistantName = "Codex",
 ): string {
   const safeCount = Number.isSafeInteger(count) && count > 0 ? count : 1;
-  const subject = safeCount === 1
-    ? "Message is"
-    : `${safeCount} messages are`;
-  return `🟠 <b>${subject} queued · sending after ${assistantName}’s next tool call…</b>`;
+  return `📥 <b>${safeCount}</b> ${safeCount === 1 ? "msg" : "msgs"} queued`;
 }
 
 export function selectTelegramMedia(
@@ -2229,7 +2881,7 @@ function normalizeName(value: string): string | undefined {
     .replace(/[\u0000-\u001f\u007f]/gu, " ")
     .replace(/\s+/gu, " ")
     .trim()
-    .slice(0, 60);
+    .slice(0, 128);
   return normalized || undefined;
 }
 
@@ -2274,13 +2926,18 @@ function callbackAnswer(action: string): string {
     "codex.new": "Starting Codex…",
     "codex.refresh": "Refreshing…",
     "codex.interrupt": "Interrupting…",
+    "codex.transient_interrupt": "Interrupting…",
     "codex.screen": "Capturing terminal…",
     "codex.key": "Sending key…",
   };
   return labels[action] ?? "Working…";
 }
 
-export function codexHelpText(): string {
+export function codexHelpText(
+  profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
+): string {
+  const manager = profile.manager;
+  const overview = profile.overview;
   return (
     "🪄 <b>Chatinabox controls</b>\n\n" +
     "<b>Sessions</b>\n" +
@@ -2290,6 +2947,15 @@ export function codexHelpText(): string {
     "<code>/codex detach</code> — return to the persistent 🪄 Lobby\n" +
     "<code>/codex off</code> — pause routing; your next message wakes Lobby\n" +
     "<code>/codex interrupt</code> — interrupt the current run with Ctrl-C\n\n" +
+    "<b>Forum topics</b>\n" +
+    "<code>/setup</code> — configure and start a chat in a new topic\n" +
+    `<code>/overview setup</code> — create the ` +
+    `${escapeTelegramHtml(overview.name)} dashboard\n` +
+    `<code>/manager setup</code> — connect the 🔮 ` +
+    `${escapeTelegramHtml(manager.role)} topic\n` +
+    "Renaming a connected topic also renames its live Codex session.\n\n" +
+    "<b>Experience</b>\n" +
+    "<code>/settings</code> — revisit names, symbols, and defaults with the guide\n\n" +
     "<b>Terminal</b>\n" +
     "<code>/screen</code> — fresh terminal view with tap controls\n" +
     "<code>/key KEY [KEY…]</code> — send 1–8 keys, separated by spaces or commas\n" +
@@ -2315,44 +2981,210 @@ export function codexHelpText(): string {
     "Chatinabox commands are handled locally; every other slash command is sent " +
     "straight to the attached Codex terminal.\n\n" +
     "<b>Status guide</b>\n" +
-    "🎱 working · ⚙️ tool/file activity · ⏳ waiting for terminal\n" +
-    "🟠 your follow-up is queued for the next tool boundary\n" +
-    "🧶 context is compacting · 🖼️ an image was viewed\n\n" +
+    "✨ commands · 📝 edited files · 🔎 explored items\n" +
+    "🖥️ active shells · 📥 queued messages · ⏳ waiting on a terminal\n" +
+    "🧶 context compaction · 🖼️ image viewing\n\n" +
     "Aliases such as <code>/codex_new</code> and <code>/codex_screen</code> " +
     "remain available for Telegram command menus."
   );
 }
 
-export function formatCodexEvent(event: CodexEvent): string[] {
+export function formatCodexEvent(
+  event: CodexEvent,
+  profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
+): string[] {
+  if (event.kind === "agent_reasoning") {
+    return [
+      `<b>${escapeTelegramHtml(agentReasoningText(event.message))}... 🪄</b>`,
+    ];
+  }
   const bodyChunks = renderTelegramMarkdownChunks(
     event.message,
     TELEGRAM_SAFE_TEXT_CHARS,
   );
-  const assistantIcon = event.assistantName === "Lobby" ? "🪄" : "🪩";
   const heading =
     event.kind === "user_local"
       ? "✍🏻 <b>You · VPS</b>\n\n"
-      : event.kind === "assistant_progress"
-        ? `${assistantIcon} <b>${event.assistantName} · update</b>\n\n`
-        : `${assistantIcon} <b>${event.assistantName} · fin</b>\n\n`;
+      : `<b>${escapeTelegramHtml(assistantIdentity(profile))}</b>\n\n`;
+  const footer = event.kind === "assistant_progress"
+    ? "\n\n<i>cont.</i>"
+    : event.kind === "assistant_final"
+      ? "\n\n<i>fin</i>"
+      : "";
   return bodyChunks.map(
     (chunk, index) =>
-      `${index === 0 ? heading : ""}${chunk}`,
+      `${index === 0 ? heading : ""}${chunk}` +
+      `${index === bodyChunks.length - 1 ? footer : ""}`,
   );
 }
 
-export function formatCodexRichMarkdown(event: CodexEvent): string {
-  const assistantIcon = event.assistantName === "Lobby" ? "🪄" : "🪩";
-  const heading =
-    event.kind === "user_local"
-      ? "✍🏻 **You · VPS**"
-      : event.kind === "assistant_progress"
-        ? `${assistantIcon} **${event.assistantName} · update**`
-        : `${assistantIcon} **${event.assistantName} · fin**`;
+export function formatAgentReasoningRichMarkdown(message: string): string {
+  const text = agentReasoningText(message)
+    .replaceAll("==", "＝")
+    .replaceAll("*", "✱");
+  return `==*${text}... 🪄*==`;
+}
+
+function agentReasoningText(message: string): string {
+  return message
+    .replace(/\u0000/gu, "�")
+    .trim()
+    .replace(/^\*{2}([\s\S]*?)\*{2}$/u, "$1")
+    .replace(/\s+/gu, " ")
+    .replace(/[.…]+$/u, "")
+    .slice(0, 1_000) || "thinking";
+}
+
+function assistantIdentity(profile: ExperienceProfile): string {
+  return [profile.assistant.name, profile.assistant.mark]
+    .filter((value) => value.length > 0)
+    .join(" ");
+}
+
+function workerDefaults(profile: ExperienceProfile): {
+  readonly model: "sol" | "luna" | "terra";
+  readonly reasoningEffort: "low" | "medium" | "high" | "xhigh";
+  readonly fast: boolean;
+} {
+  return {
+    model: profile.sessions.defaultModel,
+    reasoningEffort: profile.sessions.defaultReasoningEffort,
+    fast: profile.sessions.defaultFast,
+  };
+}
+
+function safeHighlightText(value: string): string {
+  return value
+    .replaceAll("==", "＝")
+    .replaceAll("*", "✱")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
+export interface CodexResponseDetails {
+  readonly model: string;
+  readonly reasoningEffort?: "low" | "medium" | "high" | "xhigh";
+  readonly fast: boolean;
+  readonly cwd: string;
+  readonly turnElapsedMs: number;
+  readonly totalWorkMs: number;
+  readonly contextUsedPercent?: number;
+}
+
+export function formatCodexRichMarkdown(
+  event: CodexEvent,
+  details?: CodexResponseDetails,
+  profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
+): string {
+  const heading = event.kind === "user_local"
+    ? "✍🏻 **you · vps**"
+    : `==${safeHighlightText(assistantIdentity(profile))}==`;
   const body = event.message
     .replace(/\u0000/gu, "�")
     .trim() || "(Codex finished without a text response.)";
-  return `${heading}\n\n${body}`;
+  if (event.kind === "user_local") return `${heading}\n\n${body}`;
+  const detailsBlock =
+    event.kind === "assistant_final" && details
+      ? `\n\n${formatCodexResponseDetails(details)}`
+      : "";
+  const footer = event.kind === "assistant_progress" ? "cont." : "fin";
+  return `${heading}\n\n${body}${detailsBlock}\n\n<footer>${footer}</footer>`;
+}
+
+function formatCodexResponseDetails(details: CodexResponseDetails): string {
+  const profile = [
+    details.model,
+    details.reasoningEffort,
+    details.fast ? "fast" : null,
+  ].filter((value): value is string => Boolean(value)).join(" · ");
+  const cwd = details.cwd
+    .replaceAll("`", "′")
+    .replace(/\s+/gu, " ")
+    .slice(0, 4_096);
+  const timing = [
+    `turn ${formatCompactDuration(details.turnElapsedMs)}`,
+    `total ${formatCompactDuration(details.totalWorkMs)}`,
+    details.contextUsedPercent === undefined
+      ? null
+      : `context rem. ${Math.max(0, 100 - details.contextUsedPercent)}%`,
+  ].filter((value): value is string => value !== null).join(" · ");
+  return (
+    "<details><summary>details</summary>\n\n" +
+    `\`${profile}\`\n\n` +
+    `\`⌂ ${cwd}\`\n\n` +
+    `\`${timing}\`\n\n` +
+    "</details>"
+  );
+}
+
+function responseModelLabel(event: CodexEvent): string {
+  const model = event.model?.toLowerCase() ?? "";
+  if (model.includes("luna")) return "luna";
+  if (model.includes("terra")) return "terra";
+  if (model.includes("sol")) return "sol";
+  const assistant = event.assistantName.toLowerCase();
+  return assistant === "codex" || assistant === "lobby"
+    ? "sol"
+    : assistant;
+}
+
+function formatCompactDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.round(milliseconds / 1_000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (totalMinutes < 60) {
+    return seconds > 0 ? `${totalMinutes}m ${seconds}s` : `${totalMinutes}m`;
+  }
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+function statusSnapshotFromRow(
+  row: CodexStatusRow,
+  replyToMessageId: number | null,
+): CodexStatusSnapshot {
+  return {
+    statusKind: row.status_kind,
+    toolCalls: row.tool_calls,
+    editedFiles: row.edited_files,
+    exploredThings: row.explored_things,
+    activeShells: row.active_shells,
+    queuedMessages: row.queued_messages,
+    replyToMessageId,
+    startedAt: row.started_at,
+  };
+}
+
+function formatPromotedContextCompaction(
+  profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
+): string {
+  return (
+    `<p><mark>${escapeTelegramHtml(assistantIdentity(profile))}</mark></p>` +
+    "<p>🧶 context compacted</p>" +
+    "<footer>cont.</footer>"
+  );
+}
+
+function telegramEditSucceeded(
+  result:
+    | { readonly ok: boolean; readonly description?: string }
+    | null
+    | undefined,
+): boolean {
+  return result?.ok === true ||
+    /not modified/iu.test(result?.description ?? "");
+}
+
+function telegramDeleteSucceeded(
+  result:
+    | { readonly ok: boolean; readonly description?: string }
+    | null
+    | undefined,
+): boolean {
+  return result?.ok === true ||
+    /message to delete not found/iu.test(result?.description ?? "");
 }
 
 function parseResumePayload(

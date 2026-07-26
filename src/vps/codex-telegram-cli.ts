@@ -19,6 +19,15 @@ import type {
   CodexPaneIdentity,
 } from "./codex-bridge-protocol";
 import { buildChatinaboxCatalog } from "./chatinabox-catalog";
+import {
+  DEFAULT_EXPERIENCE_PROFILE,
+  patchExperienceProfile,
+  readExperienceProfile,
+  writeExperienceProfile,
+  type ExperienceProfilePatch,
+  type ReasoningEffort,
+  type WorkerModel,
+} from "./experience-profile";
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
@@ -27,6 +36,9 @@ async function main(): Promise<number> {
   const bridge = new CodexBridgeClient();
 
   try {
+    if (command === "profile") {
+      return profileCommand(args, json);
+    }
     if (command === "catalog") {
       return outputCatalog(await bridge.request({ op: "list" }), json);
     }
@@ -34,21 +46,23 @@ async function main(): Promise<number> {
       return output(await bridge.request({ op: "list" }), json);
     }
     if (command === "new") {
+      const defaults = configuredWorkerDefaults();
       const cwd = takeOption(args, "--cwd");
-      const model = parseWorkerModel(takeOption(args, "--model"));
-      const reasoningEffort = parseReasoningEffort(
-        takeOption(args, "--effort"),
-      );
-      const fast = removeFlag(args, "--fast");
+      const model =
+        parseWorkerModel(takeOption(args, "--model")) ?? defaults.model;
+      const reasoningEffort =
+        parseReasoningEffort(takeOption(args, "--effort")) ??
+        defaults.reasoningEffort;
+      const fast = configuredFast(args, defaults.fast);
       const name = args.join(" ").trim() || undefined;
       return output(
         await bridge.request({
           op: "new",
           ...(name ? { name } : {}),
           ...(cwd ? { cwd } : {}),
-          ...(model ? { model } : {}),
-          ...(reasoningEffort ? { reasoningEffort } : {}),
-          ...(fast ? { fast: true } : {}),
+          model,
+          reasoningEffort,
+          fast,
         }),
         json,
       );
@@ -111,12 +125,14 @@ async function main(): Promise<number> {
       );
     }
     if (command === "new-and-handoff") {
+      const defaults = configuredWorkerDefaults();
       const cwd = takeOption(args, "--cwd");
-      const model = parseWorkerModel(takeOption(args, "--model"));
-      const reasoningEffort = parseReasoningEffort(
-        takeOption(args, "--effort"),
-      );
-      const fast = removeFlag(args, "--fast");
+      const model =
+        parseWorkerModel(takeOption(args, "--model")) ?? defaults.model;
+      const reasoningEffort =
+        parseReasoningEffort(takeOption(args, "--effort")) ??
+        defaults.reasoningEffort;
+      const fast = configuredFast(args, defaults.fast);
       const name = args.join(" ").trim() || undefined;
       const source = await resolveCurrentTarget(bridge);
       if (!source) {
@@ -126,9 +142,9 @@ async function main(): Promise<number> {
         op: "new",
         ...(name ? { name } : {}),
         ...(cwd ? { cwd } : {}),
-        ...(model ? { model } : {}),
-        ...(reasoningEffort ? { reasoningEffort } : {}),
-        ...(fast ? { fast: true } : {}),
+        model,
+        reasoningEffort,
+        fast,
       });
       if (!created.ok || !("pane" in created)) return output(created, json);
       return output(
@@ -245,6 +261,227 @@ async function main(): Promise<number> {
     }
     return 1;
   }
+}
+
+function profileCommand(args: string[], json: boolean): number {
+  const action = args.shift() ?? "show";
+  const profilePath =
+    process.env.CHATINABOX_PROFILE_PATH?.trim() ||
+    "/etc/chatinabox/profile.json";
+  if (action === "show") {
+    if (args.length > 0) return usage("profile show does not take arguments");
+    return outputProfile(
+      { ok: true, profile: readExperienceProfile(profilePath), profilePath },
+      json,
+    );
+  }
+  if (action === "defaults") {
+    if (args.length > 0) {
+      return usage("profile defaults does not take arguments");
+    }
+    const profile = writeExperienceProfile(
+      profilePath,
+      DEFAULT_EXPERIENCE_PROFILE,
+    );
+    return outputProfile({ ok: true, profile, profilePath }, json);
+  }
+  if (action !== "set") {
+    return usage("profile requires show, set, or defaults");
+  }
+
+  const assistantName = takeOption(args, "--assistant-name");
+  const assistantMark = takeOption(args, "--assistant-mark");
+  const overviewName = takeOption(args, "--overview-name");
+  const overviewEmoji = takeOption(args, "--overview-emoji");
+  const managerName = takeOption(args, "--manager-name");
+  const managerEmoji = takeOption(args, "--manager-emoji");
+  const managerRole = takeOption(args, "--manager-role");
+  const managerTopic = takeOption(args, "--manager-topic");
+  const managerIcon = takeOption(args, "--manager-icon");
+  const managerCwd = takeOption(args, "--manager-cwd");
+  const managerModel = optionalModel(takeOption(args, "--manager-model"));
+  const managerEffort = optionalEffort(
+    takeOption(args, "--manager-effort"),
+  );
+  const defaultModel = optionalModel(takeOption(args, "--default-model"));
+  const defaultEffort = optionalEffort(
+    takeOption(args, "--default-effort"),
+  );
+  const idleMinutesRaw = takeOption(args, "--idle-minutes");
+  const complete = removeFlag(args, "--complete");
+  const reopen = removeFlag(args, "--reopen");
+  const managerFast = removeFlag(args, "--manager-fast");
+  const managerStandard = removeFlag(args, "--manager-standard");
+  const defaultFast = removeFlag(args, "--default-fast");
+  const defaultStandard = removeFlag(args, "--default-standard");
+  if (complete && reopen) {
+    return usage("profile set cannot combine --complete and --reopen");
+  }
+  if (managerFast && managerStandard) {
+    return usage(
+      "profile set cannot combine --manager-fast and --manager-standard",
+    );
+  }
+  if (defaultFast && defaultStandard) {
+    return usage(
+      "profile set cannot combine --default-fast and --default-standard",
+    );
+  }
+  if (args.length > 0) {
+    return usage(`unknown profile option: ${args[0]}`);
+  }
+  let idleCloseMinutes: number | undefined;
+  if (idleMinutesRaw !== undefined) {
+    idleCloseMinutes = Number(idleMinutesRaw);
+    if (
+      !Number.isSafeInteger(idleCloseMinutes) ||
+      idleCloseMinutes < 0 ||
+      idleCloseMinutes > 10_080
+    ) {
+      return usage("--idle-minutes must be an integer from 0 to 10080");
+    }
+  }
+
+  const patch: ExperienceProfilePatch = {
+    ...(complete || reopen ? { setupComplete: complete } : {}),
+    ...(
+      assistantName !== undefined || assistantMark !== undefined
+        ? {
+            assistant: {
+              ...(assistantName !== undefined ? { name: assistantName } : {}),
+              ...(assistantMark !== undefined ? { mark: assistantMark } : {}),
+            },
+          }
+        : {}
+    ),
+    ...(
+      overviewName !== undefined || overviewEmoji !== undefined
+        ? {
+            overview: {
+              ...(overviewName !== undefined ? { name: overviewName } : {}),
+              ...(overviewEmoji !== undefined ? { emoji: overviewEmoji } : {}),
+            },
+          }
+        : {}
+    ),
+    ...(
+      managerName !== undefined ||
+        managerEmoji !== undefined ||
+        managerRole !== undefined ||
+        managerTopic !== undefined ||
+        managerIcon !== undefined ||
+        managerCwd !== undefined ||
+        managerModel !== undefined ||
+        managerEffort !== undefined ||
+        managerFast ||
+        managerStandard
+        ? {
+            manager: {
+              ...(managerName !== undefined ? { name: managerName } : {}),
+              ...(managerEmoji !== undefined ? { emoji: managerEmoji } : {}),
+              ...(managerRole !== undefined ? { role: managerRole } : {}),
+              ...(managerTopic !== undefined
+                ? { topicName: managerTopic }
+                : {}),
+              ...(managerIcon !== undefined
+                ? { topicIconEmoji: managerIcon }
+                : {}),
+              ...(managerCwd !== undefined ? { cwd: managerCwd } : {}),
+              ...(managerModel !== undefined ? { model: managerModel } : {}),
+              ...(managerEffort !== undefined
+                ? { reasoningEffort: managerEffort }
+                : {}),
+              ...(managerFast || managerStandard
+                ? { fast: managerFast }
+                : {}),
+            },
+          }
+        : {}
+    ),
+    ...(
+      defaultModel !== undefined ||
+        defaultEffort !== undefined ||
+        idleCloseMinutes !== undefined ||
+        defaultFast ||
+        defaultStandard
+        ? {
+            sessions: {
+              ...(defaultModel !== undefined
+                ? { defaultModel }
+                : {}),
+              ...(defaultEffort !== undefined
+                ? { defaultReasoningEffort: defaultEffort }
+                : {}),
+              ...(idleCloseMinutes !== undefined ? { idleCloseMinutes } : {}),
+              ...(defaultFast || defaultStandard
+                ? { defaultFast }
+                : {}),
+            },
+          }
+        : {}
+    ),
+  };
+  const profile = writeExperienceProfile(
+    profilePath,
+    patchExperienceProfile(readExperienceProfile(profilePath), patch),
+  );
+  return outputProfile({ ok: true, profile, profilePath }, json);
+}
+
+function configuredWorkerDefaults(): {
+  readonly model: WorkerModel;
+  readonly reasoningEffort: ReasoningEffort;
+  readonly fast: boolean;
+} {
+  const profilePath =
+    process.env.CHATINABOX_PROFILE_PATH?.trim() ||
+    "/etc/chatinabox/profile.json";
+  const sessions = readExperienceProfile(profilePath).sessions;
+  return {
+    model: sessions.defaultModel,
+    reasoningEffort: sessions.defaultReasoningEffort,
+    fast: sessions.defaultFast,
+  };
+}
+
+function configuredFast(args: string[], fallback: boolean): boolean {
+  const fast = removeFlag(args, "--fast");
+  const standard = removeFlag(args, "--standard");
+  if (fast && standard) {
+    throw new Error("--fast and --standard cannot be combined");
+  }
+  return fast ? true : standard ? false : fallback;
+}
+
+function outputProfile(
+  result: {
+    readonly ok: true;
+    readonly profile: ReturnType<typeof readExperienceProfile>;
+    readonly profilePath: string;
+  },
+  json: boolean,
+): number {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  } else {
+    process.stdout.write(
+      `${JSON.stringify(result.profile, null, 2)}\n\n${result.profilePath}\n`,
+    );
+  }
+  return 0;
+}
+
+function optionalModel(value: string | undefined): WorkerModel | undefined {
+  if (value === undefined) return undefined;
+  const model = parseWorkerModel(value);
+  if (!model) throw new Error("invalid model");
+  return model;
+}
+
+function optionalEffort(
+  value: string | undefined,
+): ReasoningEffort | undefined {
+  return parseReasoningEffort(value);
 }
 
 async function resolveTarget(
@@ -581,7 +818,10 @@ function takeOption(args: string[], option: string): string | undefined {
   const index = args.indexOf(option);
   if (index < 0) return undefined;
   const value = args[index + 1];
-  args.splice(index, value === undefined ? 1 : 2);
+  if (value === undefined || value.startsWith("--")) {
+    throw new Error(`${option} requires a value`);
+  }
+  args.splice(index, 2);
   return value;
 }
 
@@ -598,13 +838,18 @@ function parseWorkerModel(
 
 function parseReasoningEffort(
   value: string | undefined,
-): "low" | "medium" | "high" | undefined {
+): "low" | "medium" | "high" | "xhigh" | undefined {
   if (value === undefined) return undefined;
   const normalized = value.toLowerCase();
-  if (normalized === "low" || normalized === "medium" || normalized === "high") {
+  if (
+    normalized === "low" ||
+    normalized === "medium" ||
+    normalized === "high" ||
+    normalized === "xhigh"
+  ) {
     return normalized;
   }
-  throw new Error("--effort must be low, medium, or high");
+  throw new Error("--effort must be low, medium, high, or xhigh");
 }
 
 function usage(error: string): number {
@@ -633,11 +878,21 @@ Commands:
   screen TARGET --output FILE  Capture the current terminal as PNG
   send-image FILE [CAPTION]    Send an inline image to your Telegram chat
   send-file FILE [CAPTION]     Send a local file to your Telegram chat
+  profile show                 Show the private experience profile
+  profile set [OPTIONS]        Update names, symbols, defaults, or setup state
+  profile defaults             Reset to the neutral first-run profile
 
 TARGET can be the 1-based list number, tmux pane id (%4), or unique name.
 New-session options: --cwd PATH, --model sol|luna|terra,
-  --effort low|medium|high, --fast. Defaults: Sol, high, Standard.
+  --effort low|medium|high|xhigh, --fast, --standard.
+  Omitted options use the private profile defaults.
 Media commands use the sole allowed user as the default chat; override with --chat ID.
+Profile options include --assistant-name, --assistant-mark, --overview-name,
+  --overview-emoji, --manager-name, --manager-emoji, --manager-role,
+  --manager-topic, --manager-icon, --manager-cwd, --manager-model,
+  --manager-effort, --manager-fast|--manager-standard, --default-model,
+  --default-effort, --default-fast|--default-standard, --idle-minutes,
+  --complete, and --reopen.
 Use --json for a stable machine-readable interface.
 `;
 }
