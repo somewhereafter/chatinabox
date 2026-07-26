@@ -15,15 +15,13 @@ if (!isRecord(source.hooks) || !isRecord(target.hooks)) {
   throw new Error("Hook files must contain a hooks object");
 }
 
-const bridgeCommand =
-  "/usr/bin/node /opt/catinabox/current/dist/vps/codex-hook.js";
 for (const [event, sourceGroups] of Object.entries(source.hooks)) {
   if (!Array.isArray(sourceGroups)) continue;
   const existing = Array.isArray(target.hooks[event])
     ? target.hooks[event]
     : [];
   const withoutOldBridgeEntries = existing.filter(
-    (group) => !containsCommand(group, bridgeCommand),
+    (group) => !containsCatinaboxHook(group),
   );
   target.hooks[event] = [...withoutOldBridgeEntries, ...sourceGroups];
 }
@@ -38,10 +36,15 @@ writeFileSync(temporaryPath, `${JSON.stringify(target, null, 2)}\n`, {
 chmodSync(temporaryPath, 0o600);
 renameSync(temporaryPath, targetPath);
 
-function containsCommand(value, command) {
+function containsCatinaboxHook(value) {
   if (!isRecord(value) || !Array.isArray(value.hooks)) return false;
   return value.hooks.some(
-    (hook) => isRecord(hook) && hook.command === command,
+    (hook) =>
+      isRecord(hook) &&
+      typeof hook.command === "string" &&
+      hook.command.endsWith(
+        " /opt/catinabox/current/dist/vps/codex-hook.js",
+      ),
   );
 }
 
