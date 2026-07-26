@@ -1,6 +1,6 @@
 # Security model
 
-Catinabox intentionally launches Codex with:
+Chatinabox intentionally launches Codex with:
 
 ```text
 --dangerously-bypass-approvals-and-sandbox
@@ -11,7 +11,7 @@ That is the product choice, not an optional mode. A person who controls the
 allowed Telegram account can direct a root Codex process and therefore control
 the host.
 
-Use Catinabox only on a dedicated, disposable, sandboxed VPS with no unrelated
+Use Chatinabox only on a dedicated, disposable, sandboxed VPS with no unrelated
 secrets, workloads, credentials, or trusted network access. Do not install it
 on a personal workstation or a shared production server.
 

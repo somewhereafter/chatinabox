@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title description">
+  <title id="title">Chatinabox</title>
+  <desc id="description">Your Codex terminal, carried through Telegram.</desc>
+  <defs>
+    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
+      <path d="M24 0H0V24" fill="none" stroke="#223035" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="signal" x1="0" x2="1">
+      <stop offset="0" stop-color="#39758d"/>
+      <stop offset="1" stop-color="#58a7c4"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="320" fill="#070909"/>
+  <rect width="1200" height="320" fill="url(#grid)" opacity=".16"/>
+  <rect x=".5" y=".5" width="1199" height="319" fill="none" stroke="#263536"/>
+
+  <g fill="#98a3a1" font-family="Consolas, ui-monospace, monospace" font-size="11" letter-spacing="2">
+    <text x="64" y="48">REMOTE INSTRUMENT / 01</text>
+    <text x="1042" y="48">REV. 0.1.0</text>
+  </g>
+
+  <text x="59" y="143" fill="#d8ceba" font-family="Georgia, 'Times New Roman', serif" font-size="72" font-style="italic">chatinabox</text>
+  <text x="66" y="183" fill="#aeb8b6" font-family="Consolas, ui-monospace, monospace" font-size="14" letter-spacing="2">YOUR CODEX SESSION / IN YOUR POCKET</text>
+
+  <g fill="#96a19f" font-family="Consolas, ui-monospace, monospace" font-size="10" letter-spacing="1.5">
+    <text x="67" y="260">DISCOVER</text>
+    <text x="181" y="260">ATTACH</text>
+    <text x="283" y="260">CONTINUE</text>
+  </g>
+  <path d="M67 236H131M181 236H242M283 236H354" stroke="#39758d" stroke-width="2"/>
+  <circle cx="131" cy="236" r="2.5" fill="#58a7c4"/>
+  <circle cx="242" cy="236" r="2.5" fill="#58a7c4"/>
+  <rect x="351" y="233" width="6" height="6" fill="#58a7c4"/>
+
+  <g fill="none" stroke-linecap="square">
+    <rect x="690" y="111" width="146" height="94" rx="3" stroke="#425456"/>
+    <path d="M714 205L704 221L731 205" stroke="#425456"/>
+    <path d="M733 142H793M733 158H809M733 174H778" stroke="#39758d" stroke-width="2"/>
+
+    <path d="M836 158H920" stroke="url(#signal)" stroke-width="2"/>
+    <path d="M850 146L862 158L850 170M906 146L894 158L906 170" stroke="#58a7c4"/>
+
+    <path d="M934 111L958 91L978 111M1042 111L1062 91L1086 111" stroke="#425456"/>
+    <rect x="920" y="111" width="180" height="112" rx="3" stroke="#538788" stroke-width="2"/>
+    <path d="M920 135H1100" stroke="#334244"/>
+    <circle cx="938" cy="123" r="2.5" fill="#538788"/>
+    <circle cx="950" cy="123" r="2.5" fill="#425456"/>
+    <path d="M947 167L961 179L947 191M974 191H1002" stroke="#d8ceba" stroke-width="2"/>
+  </g>
+
+  <g fill="#96a19f" font-family="Consolas, ui-monospace, monospace" font-size="10" letter-spacing="1.5">
+    <text x="690" y="92">TELEGRAM</text>
+    <text x="853" y="137">RELAY</text>
+    <text x="920" y="74">YOUR SERVER</text>
+    <text x="1026" y="247">CODEX / TMUX</text>
+    <text x="690" y="277">MESSAGES / FILES / SCREEN / KEYS / SESSION STATE</text>
+  </g>
+</svg>

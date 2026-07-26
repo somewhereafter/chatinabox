@@ -17,7 +17,7 @@ import {
   normalizeAssistantName,
   samePaneIdentity,
 } from "../src/vps/codex-bridge-protocol";
-import { buildCatinaboxCatalog } from "../src/vps/catinabox-catalog";
+import { buildChatinaboxCatalog } from "../src/vps/chatinabox-catalog";
 
 function line(record: unknown): string {
   return `${JSON.stringify(record)}\n`;
@@ -25,7 +25,7 @@ function line(record: unknown): string {
 
 describe("Codex bridge", () => {
   it("rejects unknown worker profiles before touching tmux", async () => {
-    const directory = mkdtempSync(path.join(os.tmpdir(), "catinabox-bridge-"));
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-bridge-"));
     const bridge = new CodexBridge({
       socketPath: path.join(directory, "bridge.sock"),
       databasePath: path.join(directory, "bridge.sqlite"),
@@ -154,7 +154,7 @@ describe("Codex bridge", () => {
       paneId: "%4",
       panePid: 40,
       sessionName: "webterm",
-      windowName: "Catinabox Development",
+      windowName: "Chatinabox Development",
       windowIndex: 0,
       cwd: "/root",
       active: true,
@@ -168,23 +168,23 @@ describe("Codex bridge", () => {
       paneId: "%7",
       panePid: 70,
       windowName: "🪄 Lobby",
-      cwd: "/var/lib/catinabox-bridge/lobby",
+      cwd: "/var/lib/chatinabox-bridge/lobby",
       codexPid: 700,
       assistantName: "Lobby" as const,
       sessionId: "lobby-thread",
     };
 
-    const catalog = buildCatinaboxCatalog(
+    const catalog = buildChatinaboxCatalog(
       [worker, lobby],
       [
         {
           id: "worker-thread",
-          name: "Catinabox Development",
+          name: "Chatinabox Development",
           updatedAt: "2026-07-26T10:00:00Z",
         },
         {
           id: "older-thread",
-          name: "Catinabox",
+          name: "Chatinabox",
           updatedAt: "2026-07-25T10:00:00Z",
         },
       ],
@@ -193,15 +193,15 @@ describe("Codex bridge", () => {
 
     expect(catalog.attached).toMatchObject({
       selector: "%4",
-      name: "Catinabox Development",
+      name: "Chatinabox Development",
       role: "worker",
     });
-    expect(catalog.workers[0]?.name).toBe("Catinabox Development");
+    expect(catalog.workers[0]?.name).toBe("Chatinabox Development");
     expect(catalog.lobby?.name).toBe("🪄 Lobby");
     expect(catalog.recent).toEqual([
       {
         sessionId: "older-thread",
-        name: "Catinabox",
+        name: "Chatinabox",
         updatedAt: "2026-07-25T10:00:00Z",
       },
     ]);

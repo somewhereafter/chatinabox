@@ -1,8 +1,8 @@
 export const DEFAULT_CODEX_BRIDGE_SOCKET =
-  "/run/catinabox/bridge.sock";
-export const CATINABOX_LOBBY_NAME = "🪄 Lobby";
-export const DEFAULT_CATINABOX_LOBBY_CWD =
-  "/var/lib/catinabox-bridge/lobby";
+  "/run/chatinabox/bridge.sock";
+export const CHATINABOX_LOBBY_NAME = "🪄 Lobby";
+export const DEFAULT_CHATINABOX_LOBBY_CWD =
+  "/var/lib/chatinabox-bridge/lobby";
 
 export interface CodexPaneIdentity {
   readonly serverPid: number;

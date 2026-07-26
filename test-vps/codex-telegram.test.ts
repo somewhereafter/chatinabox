@@ -88,14 +88,14 @@ describe("Codex Telegram attachments", () => {
   it("builds one Codex turn for multiple attachments and a caption", () => {
     const prompt = buildCodexAttachmentPrompt([
       {
-        path: "/var/lib/catinabox/codex-attachments/id/01-photo.jpg",
+        path: "/var/lib/chatinabox/codex-attachments/id/01-photo.jpg",
         fileName: "01-photo.jpg",
         mimeType: "image/jpeg",
         bytes: 123,
         kind: "image",
       },
       {
-        path: "/var/lib/catinabox/codex-attachments/id/02-notes.pdf",
+        path: "/var/lib/chatinabox/codex-attachments/id/02-notes.pdf",
         fileName: "02-notes.pdf",
         mimeType: "application/pdf",
         bytes: 456,
@@ -103,8 +103,8 @@ describe("Codex Telegram attachments", () => {
       },
     ], "Compare these and explain the difference.");
 
-    expect(prompt).toContain("1. /var/lib/catinabox/");
-    expect(prompt).toContain("2. /var/lib/catinabox/");
+    expect(prompt).toContain("1. /var/lib/chatinabox/");
+    expect(prompt).toContain("2. /var/lib/chatinabox/");
     expect(prompt).toContain("Sent from Telegram");
     expect(prompt).not.toContain("Telegram user");
     expect(prompt).toContain("use the image viewer for images");

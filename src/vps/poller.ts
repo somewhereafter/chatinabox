@@ -1,6 +1,6 @@
 import type { TelegramResponse, TelegramUpdate } from "../telegram-types";
-import type { CatinaboxEnv } from "./env";
-import type { CatinaboxStore } from "./store";
+import type { ChatinaboxEnv } from "./env";
+import type { ChatinaboxStore } from "./store";
 import { abortableSleep } from "./sleep";
 
 const OFFSET_KEY = "tg_update_offset";
@@ -34,8 +34,8 @@ class PollCycleError extends Error {
  * Cloudflare production webhook is registered, getUpdates returns 409.
  */
 export async function runPoller(
-  env: CatinaboxEnv,
-  store: CatinaboxStore,
+  env: ChatinaboxEnv,
+  store: ChatinaboxStore,
   onUpdate: (update: TelegramUpdate) => Promise<void>,
   signal: AbortSignal,
   options: PollerOptions = {},

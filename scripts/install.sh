@@ -41,7 +41,7 @@ if (( node_major < 22 )); then
   exit 1
 fi
 
-chrome_path="${CATINABOX_CHROME_PATH:-}"
+chrome_path="${CHATINABOX_CHROME_PATH:-}"
 if [[ -z "$chrome_path" ]]; then
   for candidate in \
     /usr/bin/google-chrome \
@@ -58,7 +58,7 @@ if [[ -z "$chrome_path" || ! -x "$chrome_path" ]]; then
   exit 1
 fi
 
-echo "Building and testing Catinabox…"
+echo "Building and testing Chatinabox…"
 (
   cd "$repo_dir"
   npm ci
@@ -71,8 +71,8 @@ if $dry_run; then
   exit 0
 fi
 
-bot_token="${CATINABOX_TG_BOT_TOKEN:-${TG_BOT_TOKEN:-}}"
-owner_ids="${CATINABOX_TG_USER_ID:-${TG_ALLOWED_USER_IDS:-}}"
+bot_token="${CHATINABOX_TG_BOT_TOKEN:-${TG_BOT_TOKEN:-}}"
+owner_ids="${CHATINABOX_TG_USER_ID:-${TG_ALLOWED_USER_IDS:-}}"
 if [[ -z "$bot_token" ]]; then
   read -r -s -p "Telegram bot token from @BotFather: " bot_token
   echo
@@ -89,92 +89,92 @@ if [[ ! "$owner_ids" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]; then
   exit 1
 fi
 
-if ! getent group catinabox >/dev/null; then
-  groupadd --system catinabox
+if ! getent group chatinabox >/dev/null; then
+  groupadd --system chatinabox
 fi
-if ! id catinabox >/dev/null 2>&1; then
-  useradd --system --gid catinabox --home-dir /var/lib/catinabox \
-    --shell /usr/sbin/nologin catinabox
+if ! id chatinabox >/dev/null 2>&1; then
+  useradd --system --gid chatinabox --home-dir /var/lib/chatinabox \
+    --shell /usr/sbin/nologin chatinabox
 fi
 
-install -d -m 0755 /opt/catinabox/releases
-install -d -o catinabox -g catinabox -m 0700 /var/lib/catinabox
-install -d -o root -g root -m 0700 /var/lib/catinabox-bridge
-install -d -o root -g catinabox -m 0770 /run/catinabox
-install -d -m 0755 /etc/catinabox
+install -d -m 0755 /opt/chatinabox/releases
+install -d -o chatinabox -g chatinabox -m 0700 /var/lib/chatinabox
+install -d -o root -g root -m 0700 /var/lib/chatinabox-bridge
+install -d -o root -g chatinabox -m 0770 /run/chatinabox
+install -d -m 0755 /etc/chatinabox
 
 release_id="$(date -u +%Y%m%dT%H%M%S%NZ)-$(git -C "$repo_dir" rev-parse --short HEAD 2>/dev/null || echo local)"
-release_dir="/opt/catinabox/releases/$release_id"
+release_dir="/opt/chatinabox/releases/$release_id"
 install -d -m 0755 "$release_dir"
 cp -a "$repo_dir/dist" "$repo_dir/bin" "$repo_dir/ops" \
   "$repo_dir/package.json" "$repo_dir/package-lock.json" "$release_dir/"
-chmod +x "$release_dir/bin/catinabox" "$release_dir/ops/catinabox-command"
+chmod +x "$release_dir/bin/chatinabox" "$release_dir/ops/chatinabox-command"
 (
   cd "$release_dir"
   npm ci --omit=dev
 )
-ln -sfn "$release_dir" /opt/catinabox/current
+ln -sfn "$release_dir" /opt/chatinabox/current
 
 node_path="$(command -v node)"
 codex_path="$(command -v codex)"
 tmux_path="$(command -v tmux)"
 convert_path="$(command -v convert)"
-env_file=/etc/catinabox/catinabox.env
-install -o root -g catinabox -m 0640 /dev/null "$env_file"
+env_file=/etc/chatinabox/chatinabox.env
+install -o root -g chatinabox -m 0640 /dev/null "$env_file"
 {
   printf 'TG_BOT_TOKEN=%s\n' "$bot_token"
   printf 'TG_ALLOWED_USER_IDS=%s\n' "$owner_ids"
-  printf 'CATINABOX_DATA_DIR=/var/lib/catinabox\n'
-  printf 'CATINABOX_BRIDGE_SOCKET=/run/catinabox/bridge.sock\n'
-  printf 'CATINABOX_BRIDGE_DB=/var/lib/catinabox-bridge/bridge.sqlite\n'
-  printf 'CATINABOX_DEFAULT_CWD=/root\n'
-  printf 'CATINABOX_LOBBY_CWD=/var/lib/catinabox-bridge/lobby\n'
-  printf 'CATINABOX_CODEX_PATH=%s\n' "$codex_path"
-  printf 'CATINABOX_TMUX_PATH=%s\n' "$tmux_path"
-  printf 'CATINABOX_CONVERT_PATH=%s\n' "$convert_path"
-  printf 'CATINABOX_CHROME_PATH=%s\n' "$chrome_path"
+  printf 'CHATINABOX_DATA_DIR=/var/lib/chatinabox\n'
+  printf 'CHATINABOX_BRIDGE_SOCKET=/run/chatinabox/bridge.sock\n'
+  printf 'CHATINABOX_BRIDGE_DB=/var/lib/chatinabox-bridge/bridge.sqlite\n'
+  printf 'CHATINABOX_DEFAULT_CWD=/root\n'
+  printf 'CHATINABOX_LOBBY_CWD=/var/lib/chatinabox-bridge/lobby\n'
+  printf 'CHATINABOX_CODEX_PATH=%s\n' "$codex_path"
+  printf 'CHATINABOX_TMUX_PATH=%s\n' "$tmux_path"
+  printf 'CHATINABOX_CONVERT_PATH=%s\n' "$convert_path"
+  printf 'CHATINABOX_CHROME_PATH=%s\n' "$chrome_path"
 } > "$env_file"
-chown root:catinabox "$env_file"
+chown root:chatinabox "$env_file"
 chmod 0640 "$env_file"
 
-install -m 0644 "$repo_dir/ops/systemd/catinabox-bridge.service" \
-  /etc/systemd/system/catinabox-bridge.service
-install -m 0644 "$repo_dir/ops/systemd/catinabox.service" \
-  /etc/systemd/system/catinabox.service
+install -m 0644 "$repo_dir/ops/systemd/chatinabox-bridge.service" \
+  /etc/systemd/system/chatinabox-bridge.service
+install -m 0644 "$repo_dir/ops/systemd/chatinabox.service" \
+  /etc/systemd/system/chatinabox.service
 if [[ "$node_path" != /usr/bin/node ]]; then
   sed -i "s|/usr/bin/node|$node_path|g" \
-    /etc/systemd/system/catinabox-bridge.service \
-    /etc/systemd/system/catinabox.service \
+    /etc/systemd/system/chatinabox-bridge.service \
+    /etc/systemd/system/chatinabox.service \
     "$release_dir/ops/codex-hooks.json"
 fi
-install -m 0755 "$repo_dir/ops/catinabox-command" /usr/local/bin/catinabox
+install -m 0755 "$repo_dir/ops/chatinabox-command" /usr/local/bin/chatinabox
 
 install -d -m 0700 /root/.codex
 node "$repo_dir/ops/install-codex-hooks.mjs" \
   "$release_dir/ops/codex-hooks.json" /root/.codex/hooks.json
-node "$repo_dir/ops/install-catinabox-instructions.mjs" \
-  "$repo_dir/ops/catinabox-global-AGENTS-block.md" /root/AGENTS.md
-install -d -o root -g root -m 0700 /var/lib/catinabox-bridge/lobby
+node "$repo_dir/ops/install-chatinabox-instructions.mjs" \
+  "$repo_dir/ops/chatinabox-global-AGENTS-block.md" /root/AGENTS.md
+install -d -o root -g root -m 0700 /var/lib/chatinabox-bridge/lobby
 install -o root -g root -m 0600 \
-  "$repo_dir/ops/catinabox-lobby-AGENTS.md" \
-  /var/lib/catinabox-bridge/lobby/AGENTS.md
+  "$repo_dir/ops/chatinabox-lobby-AGENTS.md" \
+  /var/lib/chatinabox-bridge/lobby/AGENTS.md
 
-# Polling and webhooks are mutually exclusive. Installing Catinabox claims
+# Polling and webhooks are mutually exclusive. Installing Chatinabox claims
 # this bot's update stream.
 TG_BOT_TOKEN="$bot_token" node -e \
   'fetch(`https://api.telegram.org/bot${process.env.TG_BOT_TOKEN}/deleteWebhook`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({drop_pending_updates:false})}).then(r=>r.json()).then(v=>{if(!v.ok)process.exit(1)})'
 
 systemctl daemon-reload
-systemctl enable catinabox-bridge.service catinabox.service >/dev/null
+systemctl enable chatinabox-bridge.service chatinabox.service >/dev/null
 if ! $no_start; then
-  systemctl restart catinabox-bridge.service
-  systemctl restart catinabox.service
+  systemctl restart chatinabox-bridge.service
+  systemctl restart chatinabox.service
   sleep 2
-  /usr/local/bin/catinabox doctor
+  /usr/local/bin/chatinabox doctor
 fi
 
 echo
-echo "Catinabox installed. Open your bot in Telegram and send /start."
+echo "Chatinabox installed. Open your bot in Telegram and send /start."
 if $no_start; then
-  echo "Services were installed but not started; run: systemctl start catinabox-bridge catinabox"
+  echo "Services were installed but not started; run: systemctl start chatinabox-bridge chatinabox"
 fi

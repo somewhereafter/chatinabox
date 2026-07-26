@@ -1,16 +1,16 @@
 {
-  "name": "catinabox",
+  "name": "chatinabox",
   "version": "0.1.0",
   "description": "A direct, owner-only Telegram interface for Codex CLI sessions",
   "license": "MIT",
   "author": "somewhereafter",
   "repository": {
     "type": "git",
-    "url": "https://github.com/somewhereafter/catinabox.git"
+    "url": "https://github.com/somewhereafter/chatinabox.git"
   },
-  "homepage": "https://github.com/somewhereafter/catinabox#readme",
+  "homepage": "https://github.com/somewhereafter/chatinabox#readme",
   "bugs": {
-    "url": "https://github.com/somewhereafter/catinabox/issues"
+    "url": "https://github.com/somewhereafter/chatinabox/issues"
   },
   "keywords": [
     "codex",
@@ -20,7 +20,7 @@
     "agent"
   ],
   "bin": {
-    "catinabox": "./bin/catinabox"
+    "chatinabox": "./bin/chatinabox"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

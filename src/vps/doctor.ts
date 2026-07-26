@@ -9,23 +9,23 @@ interface Check {
 
 async function main(): Promise<void> {
   const environmentPath =
-    process.env.CATINABOX_ENV || "/etc/catinabox/catinabox.env";
+    process.env.CHATINABOX_ENV || "/etc/chatinabox/chatinabox.env";
   if (existsSync(environmentPath)) process.loadEnvFile(environmentPath);
 
   const checks: Check[] = [];
-  checks.push(fileCheck("tmux", process.env.CATINABOX_TMUX_PATH, [
+  checks.push(fileCheck("tmux", process.env.CHATINABOX_TMUX_PATH, [
     "/usr/bin/tmux",
     "/usr/local/bin/tmux",
   ]));
-  checks.push(fileCheck("Codex CLI", process.env.CATINABOX_CODEX_PATH, [
+  checks.push(fileCheck("Codex CLI", process.env.CHATINABOX_CODEX_PATH, [
     "/usr/local/bin/codex",
     "/usr/bin/codex",
   ]));
-  checks.push(fileCheck("ImageMagick", process.env.CATINABOX_CONVERT_PATH, [
+  checks.push(fileCheck("ImageMagick", process.env.CHATINABOX_CONVERT_PATH, [
     "/usr/bin/convert",
     "/usr/local/bin/convert",
   ]));
-  checks.push(fileCheck("Chrome/Chromium", process.env.CATINABOX_CHROME_PATH, [
+  checks.push(fileCheck("Chrome/Chromium", process.env.CHATINABOX_CHROME_PATH, [
     "/usr/bin/google-chrome",
     "/opt/google/chrome/chrome",
     "/usr/bin/chromium",
@@ -48,7 +48,7 @@ async function main(): Promise<void> {
   });
 
   const socket =
-    process.env.CATINABOX_BRIDGE_SOCKET || "/run/catinabox/bridge.sock";
+    process.env.CHATINABOX_BRIDGE_SOCKET || "/run/chatinabox/bridge.sock";
   const bridge = await new CodexBridgeClient(socket, 2_000)
     .request({ op: "ping" })
     .catch(() => null);
@@ -81,7 +81,7 @@ async function main(): Promise<void> {
   const failed = checks.filter((check) => !check.ok).length;
   process.stdout.write(
     failed === 0
-      ? "\nCatinabox is ready.\n"
+      ? "\nChatinabox is ready.\n"
       : `\n${failed} check(s) need attention.\n`,
   );
   process.exitCode = failed === 0 ? 0 : 1;

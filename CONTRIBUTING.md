@@ -10,7 +10,7 @@ sudo ./scripts/install.sh --dry-run
 
 Keep Telegram ownership checks fail-closed, keep callback payloads opaque, and
 preserve exact pane identity checks (`tmux server PID + pane ID + pane PID`).
-New commands should work through both Telegram and the stable `catinabox
+New commands should work through both Telegram and the stable `chatinabox
 --json` control API where appropriate.
 
 Do not commit bot tokens, Telegram IDs, Codex transcripts, generated terminal

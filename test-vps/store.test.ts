@@ -6,7 +6,7 @@ import {
   issueCallbackReference,
   parseCallbackReference,
 } from "../src/telegram-callback";
-import { CatinaboxStore } from "../src/vps/store";
+import { ChatinaboxStore } from "../src/vps/store";
 
 const roots: string[] = [];
 
@@ -17,17 +17,17 @@ afterEach(async () => {
 });
 
 async function temporaryRoot(): Promise<string> {
-  const root = await mkdtemp(path.join(os.tmpdir(), "catinabox-store-"));
+  const root = await mkdtemp(path.join(os.tmpdir(), "chatinabox-store-"));
   roots.push(root);
   return root;
 }
 
-describe("CatinaboxStore", () => {
+describe("ChatinaboxStore", () => {
   it("keeps update claims and owner-bound callbacks durable and private", async () => {
     const root = await temporaryRoot();
     const databasePath = path.join(root, "state.sqlite");
     let now = 1_800_000_000_000;
-    const store = new CatinaboxStore(databasePath, () => now);
+    const store = new ChatinaboxStore(databasePath, () => now);
 
     expect((await stat(databasePath)).mode & 0o777).toBe(0o600);
     expect(store.claimTelegramUpdate(10)).toBe(true);
@@ -61,15 +61,15 @@ describe("CatinaboxStore", () => {
   it("persists session routing, queued prompts, statuses, and final dedupe", async () => {
     const root = await temporaryRoot();
     let now = 1_800_000_000_000;
-    const store = new CatinaboxStore(path.join(root, "state.sqlite"), () => now);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"), () => now);
     const pane = {
       serverPid: 100,
       paneId: "%4",
       panePid: 200,
       sessionName: "codex",
-      windowName: "catinabox",
+      windowName: "chatinabox",
       windowIndex: 2,
-      cwd: "/root/catinabox",
+      cwd: "/root/chatinabox",
       active: true,
       busy: false,
       codexPid: 300,

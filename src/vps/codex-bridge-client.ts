@@ -12,7 +12,7 @@ const SCREEN_REQUEST_TIMEOUT_MS = 20_000;
 export class CodexBridgeClient {
   constructor(
     readonly socketPath =
-      process.env.CATINABOX_BRIDGE_SOCKET ??
+      process.env.CHATINABOX_BRIDGE_SOCKET ??
       DEFAULT_CODEX_BRIDGE_SOCKET,
     private readonly timeoutMs = REQUEST_TIMEOUT_MS,
   ) {}

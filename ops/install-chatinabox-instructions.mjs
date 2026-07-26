@@ -10,14 +10,14 @@ import path from "node:path";
 const blockPath = process.argv[2];
 const targetPath = process.argv[3];
 if (!blockPath || !targetPath) {
-  throw new Error("Usage: install-catinabox-instructions.mjs BLOCK TARGET");
+  throw new Error("Usage: install-chatinabox-instructions.mjs BLOCK TARGET");
 }
 
-const start = "<!-- catinabox:begin -->";
-const end = "<!-- catinabox:end -->";
+const start = "<!-- chatinabox:begin -->";
+const end = "<!-- chatinabox:end -->";
 const block = readFileSync(blockPath, "utf8").trim();
 if (!block.startsWith(start) || !block.endsWith(end)) {
-  throw new Error("Catinabox instruction block is missing managed markers");
+  throw new Error("Chatinabox instruction block is missing managed markers");
 }
 
 const existing = existsSync(targetPath)
@@ -38,7 +38,7 @@ if (startIndex >= 0 && endIndex >= startIndex) {
 
 const temporaryPath = path.join(
   path.dirname(targetPath),
-  `.AGENTS.md.catinabox-${process.pid}.tmp`,
+  `.AGENTS.md.chatinabox-${process.pid}.tmp`,
 );
 writeFileSync(temporaryPath, next, { mode: 0o600 });
 chmodSync(temporaryPath, 0o600);

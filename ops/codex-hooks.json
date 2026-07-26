@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/node /opt/catinabox/current/dist/vps/codex-hook.js",
+            "command": "/usr/bin/node /opt/chatinabox/current/dist/vps/codex-hook.js",
             "timeout": 3
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/node /opt/catinabox/current/dist/vps/codex-hook.js",
+            "command": "/usr/bin/node /opt/chatinabox/current/dist/vps/codex-hook.js",
             "timeout": 3
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/node /opt/catinabox/current/dist/vps/codex-hook.js",
+            "command": "/usr/bin/node /opt/chatinabox/current/dist/vps/codex-hook.js",
             "timeout": 3
           }
         ]
@@ -39,7 +39,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/usr/bin/node /opt/catinabox/current/dist/vps/codex-hook.js",
+            "command": "/usr/bin/node /opt/chatinabox/current/dist/vps/codex-hook.js",
             "timeout": 3
           }
         ]

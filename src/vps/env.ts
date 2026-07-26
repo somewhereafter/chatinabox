@@ -1,6 +1,6 @@
 import path from "node:path";
 
-export interface CatinaboxEnv {
+export interface ChatinaboxEnv {
   readonly TG_BOT_TOKEN: string;
   readonly TG_ALLOWED_USER_IDS: string;
   readonly DATA_DIR: string;
@@ -8,9 +8,9 @@ export interface CatinaboxEnv {
   readonly DEFAULT_CWD: string;
 }
 
-export function loadCatinaboxEnv(
+export function loadChatinaboxEnv(
   source: NodeJS.ProcessEnv = process.env,
-): CatinaboxEnv {
+): ChatinaboxEnv {
   const token = source.TG_BOT_TOKEN?.trim();
   if (!token) throw new Error("TG_BOT_TOKEN is required");
 
@@ -22,17 +22,17 @@ export function loadCatinaboxEnv(
   }
 
   const dataDir = path.resolve(
-    source.CATINABOX_DATA_DIR?.trim() || "/var/lib/catinabox",
+    source.CHATINABOX_DATA_DIR?.trim() || "/var/lib/chatinabox",
   );
   return {
     TG_BOT_TOKEN: token,
     TG_ALLOWED_USER_IDS: allowed,
     DATA_DIR: dataDir,
     CODEX_BRIDGE_SOCKET:
-      source.CATINABOX_BRIDGE_SOCKET?.trim() ||
-      "/run/catinabox/bridge.sock",
+      source.CHATINABOX_BRIDGE_SOCKET?.trim() ||
+      "/run/chatinabox/bridge.sock",
     DEFAULT_CWD: path.resolve(
-      source.CATINABOX_DEFAULT_CWD?.trim() || process.cwd(),
+      source.CHATINABOX_DEFAULT_CWD?.trim() || process.cwd(),
     ),
   };
 }

@@ -5,7 +5,7 @@ import type {
 } from "./codex-bridge-protocol";
 import { samePaneIdentity } from "./codex-bridge-protocol";
 
-export interface CatinaboxCatalogPane {
+export interface ChatinaboxCatalogPane {
   readonly selector: string;
   readonly name: string;
   readonly role?: "lobby" | "worker";
@@ -14,11 +14,11 @@ export interface CatinaboxCatalogPane {
   readonly cwd?: string;
 }
 
-export interface CatinaboxCatalog {
+export interface ChatinaboxCatalog {
   readonly ok: true;
-  readonly attached: CatinaboxCatalogPane | null;
-  readonly workers: readonly CatinaboxCatalogPane[];
-  readonly lobby: CatinaboxCatalogPane | null;
+  readonly attached: ChatinaboxCatalogPane | null;
+  readonly workers: readonly ChatinaboxCatalogPane[];
+  readonly lobby: ChatinaboxCatalogPane | null;
   readonly recent: readonly {
     readonly sessionId: string;
     readonly name: string;
@@ -26,11 +26,11 @@ export interface CatinaboxCatalog {
   }[];
 }
 
-export function buildCatinaboxCatalog(
+export function buildChatinaboxCatalog(
   panes: readonly CodexPane[],
   recent: readonly CodexRecentSession[],
   attachedTarget: CodexPaneIdentity | null,
-): CatinaboxCatalog {
+): ChatinaboxCatalog {
   const attached = attachedTarget
     ? panes.find((pane) => samePaneIdentity(pane, attachedTarget))
     : undefined;

@@ -74,7 +74,7 @@ const TELEGRAM_UPDATE_RETENTION_MS = 48 * 60 * 60 * 1_000;
  * Single-file state store for Telegram ownership, session routing, queued
  * prompts, status messages, callback references, and update deduplication.
  */
-export class CatinaboxStore {
+export class ChatinaboxStore {
   private readonly db: DatabaseSync;
 
   constructor(databasePath: string, private readonly now: () => number = Date.now) {

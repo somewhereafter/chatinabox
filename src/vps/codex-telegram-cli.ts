@@ -18,7 +18,7 @@ import type {
   CodexPane,
   CodexPaneIdentity,
 } from "./codex-bridge-protocol";
-import { buildCatinaboxCatalog } from "./catinabox-catalog";
+import { buildChatinaboxCatalog } from "./chatinabox-catalog";
 
 async function main(): Promise<number> {
   const args = process.argv.slice(2);
@@ -361,7 +361,7 @@ function outputCatalog(
   json: boolean,
 ): number {
   if (!response.ok || !("panes" in response)) return output(response, json);
-  const catalog = buildCatinaboxCatalog(
+  const catalog = buildChatinaboxCatalog(
     response.panes,
     response.recent,
     mostRecentAttachedTarget(),
@@ -370,7 +370,7 @@ function outputCatalog(
     process.stdout.write(`${JSON.stringify(catalog)}\n`);
     return 0;
   }
-  const lines = ["🪄 Catinabox catalog"];
+  const lines = ["🪄 Chatinabox catalog"];
   lines.push(
     catalog.attached
       ? `Attached: ${catalog.attached.name} (${catalog.attached.role})`
@@ -474,14 +474,14 @@ function loadTelegramDeliveryTarget(
   chatOption: string | undefined,
 ): { readonly env: BotEnv; readonly chatId: number } {
   const secretsPath =
-    process.env.CATINABOX_ENV ?? "/etc/catinabox/catinabox.env";
+    process.env.CHATINABOX_ENV ?? "/etc/chatinabox/chatinabox.env";
   if (existsSync(secretsPath)) process.loadEnvFile(secretsPath);
   const token = process.env.TG_BOT_TOKEN?.trim();
   if (!token) throw new Error("TG_BOT_TOKEN is unavailable");
 
   const rawChat =
     chatOption ??
-    process.env.CATINABOX_TELEGRAM_CHAT_ID ??
+    process.env.CHATINABOX_TELEGRAM_CHAT_ID ??
     process.env.TG_ALLOWED_USER_IDS?.split(",")
       .map((value) => value.trim())
       .find((value) => /^\d+$/u.test(value)) ??
@@ -500,8 +500,8 @@ function loadTelegramDeliveryTarget(
 
 function mostRecentAttachedChat(): string | undefined {
   const dataDir =
-    process.env.CATINABOX_DATA_DIR ?? "/var/lib/catinabox";
-  const databasePath = path.join(dataDir, "catinabox.sqlite");
+    process.env.CHATINABOX_DATA_DIR ?? "/var/lib/chatinabox";
+  const databasePath = path.join(dataDir, "chatinabox.sqlite");
   if (!existsSync(databasePath)) return undefined;
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
@@ -522,8 +522,8 @@ function mostRecentAttachedChat(): string | undefined {
 
 function mostRecentAttachedTarget(): CodexPaneIdentity | null {
   const dataDir =
-    process.env.CATINABOX_DATA_DIR ?? "/var/lib/catinabox";
-  const databasePath = path.join(dataDir, "catinabox.sqlite");
+    process.env.CHATINABOX_DATA_DIR ?? "/var/lib/chatinabox";
+  const databasePath = path.join(dataDir, "chatinabox.sqlite");
   if (!existsSync(databasePath)) return null;
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
@@ -608,12 +608,12 @@ function parseReasoningEffort(
 }
 
 function usage(error: string): number {
-  process.stderr.write(`catinabox: ${error}\n\n${help()}`);
+  process.stderr.write(`chatinabox: ${error}\n\n${help()}`);
   return 2;
 }
 
 function help(): string {
-  return `Usage: catinabox COMMAND [ARGS] [--json]
+  return `Usage: chatinabox COMMAND [ARGS] [--json]
 
 Commands:
   catalog                      Canonical attached/running/recent session view

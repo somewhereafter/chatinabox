@@ -24,7 +24,7 @@ async function main(): Promise<void> {
     return;
   }
   const client = new CodexBridgeClient(
-    process.env.CATINABOX_BRIDGE_SOCKET,
+    process.env.CHATINABOX_BRIDGE_SOCKET,
     1_500,
   );
   await client

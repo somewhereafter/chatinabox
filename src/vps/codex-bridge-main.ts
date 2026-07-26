@@ -5,14 +5,14 @@ import { DEFAULT_CODEX_BRIDGE_SOCKET } from "./codex-bridge-protocol";
 
 const bridge = new CodexBridge({
   socketPath:
-    process.env.CATINABOX_BRIDGE_SOCKET ?? DEFAULT_CODEX_BRIDGE_SOCKET,
+    process.env.CHATINABOX_BRIDGE_SOCKET ?? DEFAULT_CODEX_BRIDGE_SOCKET,
   databasePath:
-    process.env.CATINABOX_BRIDGE_DB ??
-    "/var/lib/catinabox-bridge/bridge.sqlite",
-  defaultCwd: process.env.CATINABOX_DEFAULT_CWD ?? process.cwd(),
+    process.env.CHATINABOX_BRIDGE_DB ??
+    "/var/lib/chatinabox-bridge/bridge.sqlite",
+  defaultCwd: process.env.CHATINABOX_DEFAULT_CWD ?? process.cwd(),
   lobbyCwd:
-    process.env.CATINABOX_LOBBY_CWD ??
-    "/var/lib/catinabox-bridge/lobby",
+    process.env.CHATINABOX_LOBBY_CWD ??
+    "/var/lib/chatinabox-bridge/lobby",
 });
 
 let stopping = false;

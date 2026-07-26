@@ -20,8 +20,8 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import puppeteer from "rebrowser-puppeteer-core";
 import {
-  CATINABOX_LOBBY_NAME,
-  DEFAULT_CATINABOX_LOBBY_CWD,
+  CHATINABOX_LOBBY_NAME,
+  DEFAULT_CHATINABOX_LOBBY_CWD,
   isPaneIdentity,
   isPlainRecord,
   samePaneIdentity,
@@ -44,20 +44,20 @@ const TRANSCRIPT_DISCOVERY_TAIL_BYTES = 1024 * 1024;
 const MODEL_DISCOVERY_TAIL_BYTES = 8 * 1024 * 1024;
 const TRANSCRIPT_DISCOVERY_TIMEOUT_MS = 15_000;
 const TRANSCRIPT_COMPLETION_TIMEOUT_MS = 6 * 60 * 60 * 1_000;
-const TMUX = resolveExecutable("CATINABOX_TMUX_PATH", [
+const TMUX = resolveExecutable("CHATINABOX_TMUX_PATH", [
   "/usr/bin/tmux",
   "/usr/local/bin/tmux",
 ]);
-const PS = resolveExecutable("CATINABOX_PS_PATH", ["/usr/bin/ps", "/bin/ps"]);
-const CODEX = resolveExecutable("CATINABOX_CODEX_PATH", [
+const PS = resolveExecutable("CHATINABOX_PS_PATH", ["/usr/bin/ps", "/bin/ps"]);
+const CODEX = resolveExecutable("CHATINABOX_CODEX_PATH", [
   "/usr/local/bin/codex",
   "/usr/bin/codex",
 ]);
-const CONVERT = resolveExecutable("CATINABOX_CONVERT_PATH", [
+const CONVERT = resolveExecutable("CHATINABOX_CONVERT_PATH", [
   "/usr/bin/convert",
   "/usr/local/bin/convert",
 ]);
-const CHROME = resolveExecutable("CATINABOX_CHROME_PATH", [
+const CHROME = resolveExecutable("CHATINABOX_CHROME_PATH", [
   "/usr/bin/google-chrome",
   "/opt/google/chrome/chrome",
   "/usr/bin/chromium",
@@ -666,21 +666,21 @@ export class CodexBridge {
     const running = existing.find(
       (pane) =>
         pane.assistantName === "Lobby" ||
-        pane.windowName === CATINABOX_LOBBY_NAME,
+        pane.windowName === CHATINABOX_LOBBY_NAME,
     );
     if (running) {
       this.saveAssistantName(running, "Lobby");
       return { ok: true, pane: running };
     }
 
-    const lobbyCwd = this.options.lobbyCwd ?? DEFAULT_CATINABOX_LOBBY_CWD;
+    const lobbyCwd = this.options.lobbyCwd ?? DEFAULT_CHATINABOX_LOBBY_CWD;
     mkdirSync(lobbyCwd, { recursive: true, mode: 0o700 });
     const tmuxSession = existing[0]?.sessionName ?? "codex";
     const previousSessionId = this.latestLobbySessionId();
     let response = await this.startTmuxCodex({
       existing,
       tmuxSession,
-      name: CATINABOX_LOBBY_NAME,
+      name: CHATINABOX_LOBBY_NAME,
       cwd: lobbyCwd,
       command: previousSessionId
         ? `${lobbyCodexCommand(lobbyCwd)} resume ${previousSessionId}`
@@ -693,7 +693,7 @@ export class CodexBridge {
       response = await this.startTmuxCodex({
         existing: await this.listCodexPanes(),
         tmuxSession,
-        name: CATINABOX_LOBBY_NAME,
+        name: CHATINABOX_LOBBY_NAME,
         cwd: lobbyCwd,
         command: lobbyCodexCommand(lobbyCwd),
       });
@@ -2344,7 +2344,7 @@ function lobbyCodexCommand(lobbyCwd: string): string {
 }
 
 function modelForProfile(profile: "sol" | "luna" | "terra"): string {
-  const key = `CATINABOX_${profile.toUpperCase()}_MODEL`;
+  const key = `CHATINABOX_${profile.toUpperCase()}_MODEL`;
   return process.env[key]?.trim() || `gpt-5.6-${profile}`;
 }
 

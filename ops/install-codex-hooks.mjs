@@ -21,7 +21,7 @@ for (const [event, sourceGroups] of Object.entries(source.hooks)) {
     ? target.hooks[event]
     : [];
   const withoutOldBridgeEntries = existing.filter(
-    (group) => !containsCatinaboxHook(group),
+    (group) => !containsChatinaboxHook(group),
   );
   target.hooks[event] = [...withoutOldBridgeEntries, ...sourceGroups];
 }
@@ -36,14 +36,14 @@ writeFileSync(temporaryPath, `${JSON.stringify(target, null, 2)}\n`, {
 chmodSync(temporaryPath, 0o600);
 renameSync(temporaryPath, targetPath);
 
-function containsCatinaboxHook(value) {
+function containsChatinaboxHook(value) {
   if (!isRecord(value) || !Array.isArray(value.hooks)) return false;
   return value.hooks.some(
     (hook) =>
       isRecord(hook) &&
       typeof hook.command === "string" &&
       hook.command.endsWith(
-        " /opt/catinabox/current/dist/vps/codex-hook.js",
+        " /opt/chatinabox/current/dist/vps/codex-hook.js",
       ),
   );
 }

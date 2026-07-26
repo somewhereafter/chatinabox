@@ -8,13 +8,13 @@ import { tgAnswerCallbackQuery, tgSend } from "../telegram";
 import { parseTelegramCommand } from "../telegram-command";
 import type { TelegramMessage, TelegramUpdate } from "../telegram-types";
 import { codexHelpText, CodexTelegramController } from "./codex-telegram";
-import { loadCatinaboxEnv, type CatinaboxEnv } from "./env";
+import { loadChatinaboxEnv, type ChatinaboxEnv } from "./env";
 import { runPoller } from "./poller";
-import { CatinaboxStore } from "./store";
+import { ChatinaboxStore } from "./store";
 
 interface App {
-  readonly env: CatinaboxEnv;
-  readonly store: CatinaboxStore;
+  readonly env: ChatinaboxEnv;
+  readonly store: ChatinaboxStore;
   readonly codex: CodexTelegramController;
 }
 
@@ -124,7 +124,7 @@ async function welcome(app: App, message: TelegramMessage): Promise<void> {
   await tgSend(
     app.env,
     message.chat.id,
-    "🪄 <b>Catinabox is awake.</b>\n\n" +
+    "🪄 <b>Chatinabox is awake.</b>\n\n" +
       "Just talk: detached messages wake the Lobby automatically. " +
       "Use <code>/codex</code> to discover, start, resume, rename, or switch " +
       "sessions; <code>/screen</code> to see and control the terminal; " +
@@ -135,9 +135,9 @@ async function welcome(app: App, message: TelegramMessage): Promise<void> {
 }
 
 async function main(): Promise<void> {
-  const env = loadCatinaboxEnv();
+  const env = loadChatinaboxEnv();
   mkdirSync(env.DATA_DIR, { recursive: true, mode: 0o700 });
-  const store = new CatinaboxStore(path.join(env.DATA_DIR, "catinabox.sqlite"));
+  const store = new ChatinaboxStore(path.join(env.DATA_DIR, "chatinabox.sqlite"));
   const codex = new CodexTelegramController({ env, store });
   const app: App = { env, store, codex };
   const controller = new AbortController();
@@ -145,7 +145,7 @@ async function main(): Promise<void> {
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
 
-  console.log("[Catinabox] Telegram listener ready.");
+  console.log("[Chatinabox] Telegram listener ready.");
   try {
     await Promise.all([
       runPoller(env, store, (update) => handleUpdate(app, update), controller.signal),
@@ -159,7 +159,7 @@ async function main(): Promise<void> {
 if (require.main === module) {
   main().catch((error: unknown) => {
     console.error(
-      `[Catinabox] Fatal: ${error instanceof Error ? error.message : "unknown error"}`,
+      `[Chatinabox] Fatal: ${error instanceof Error ? error.message : "unknown error"}`,
     );
     process.exitCode = 1;
   });

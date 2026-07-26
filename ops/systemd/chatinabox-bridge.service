@@ -1,0 +1,22 @@
+[Unit]
+Description=Chatinabox root tmux and Codex session bridge
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=chatinabox
+WorkingDirectory=/opt/chatinabox/current
+EnvironmentFile=/etc/chatinabox/chatinabox.env
+ExecStart=/usr/bin/node --experimental-sqlite /opt/chatinabox/current/dist/vps/codex-bridge-main.js
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=15s
+UMask=0007
+RuntimeDirectory=chatinabox
+RuntimeDirectoryMode=0770
+StateDirectory=chatinabox-bridge
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

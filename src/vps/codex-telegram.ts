@@ -39,7 +39,7 @@ import type {
 import { abortableSleep } from "./sleep";
 import { CodexBridgeClient } from "./codex-bridge-client";
 import {
-  CATINABOX_LOBBY_NAME,
+  CHATINABOX_LOBBY_NAME,
   isPaneIdentity,
   normalizeAssistantName,
   samePaneIdentity,
@@ -50,10 +50,10 @@ import {
   type CodexRecentSession,
   type CodexEvent,
 } from "./codex-bridge-protocol";
-import type { CatinaboxEnv } from "./env";
+import type { ChatinaboxEnv } from "./env";
 import type {
   CodexAttachmentRow,
-  CatinaboxStore,
+  ChatinaboxStore,
 } from "./store";
 import {
   hasMarkdownTable,
@@ -70,8 +70,8 @@ const TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS = 900;
 const TELEGRAM_TEXT_BURST_DEBOUNCE_MS = 700;
 
 interface CodexTelegramDependencies {
-  readonly env: CatinaboxEnv;
-  readonly store: CatinaboxStore;
+  readonly env: ChatinaboxEnv;
+  readonly store: ChatinaboxStore;
   readonly bridge?: CodexBridgeClient;
 }
 
@@ -1420,7 +1420,7 @@ export class CodexTelegramController {
     const lines = ["🪩 <b>Codex sessions</b>", ""];
     if (activePane && isLobbyPane(activePane)) {
       lines.push(
-        "You’re talking to <b>🪄 Lobby</b> — Catinabox’s persistent control layer.",
+        "You’re talking to <b>🪄 Lobby</b> — Chatinabox’s persistent control layer.",
         "",
         "Ask it to find, resume, rename, or start a Codex worker. " +
           "New workers default to <b>Sol · high</b> unless you specify otherwise.",
@@ -1555,8 +1555,8 @@ export class CodexTelegramController {
       this.dependencies.env,
       chatId,
       detached
-        ? "○ Catinabox routing is off. Your next message will wake the Lobby."
-        : "Catinabox routing is already off.",
+        ? "○ Chatinabox routing is off. Your next message will wake the Lobby."
+        : "Chatinabox routing is already off.",
       replyToMessageId,
     );
   }
@@ -2154,7 +2154,7 @@ function parseHandoffDestination(
 
 function isLobbyPane(pane: Pick<CodexPane, "windowName" | "assistantName">): boolean {
   return pane.assistantName === "Lobby" ||
-    pane.windowName === CATINABOX_LOBBY_NAME;
+    pane.windowName === CHATINABOX_LOBBY_NAME;
 }
 
 function displayName(row: CodexAttachmentRow): string {
@@ -2250,7 +2250,7 @@ export function codexHelpText(): string {
     "are bundled in order. Photos, files, albums, and captions are supported.\n" +
     "Codex slash commands such as <code>/model</code> are forwarded too. If one " +
     "opens a picker, use <code>/screen</code> and the buttons or <code>/key</code>.\n" +
-    "Catinabox commands are handled locally; every other slash command is sent " +
+    "Chatinabox commands are handled locally; every other slash command is sent " +
     "straight to the attached Codex terminal.\n\n" +
     "<b>Status guide</b>\n" +
     "🎱 working · ⚙️ tool/file activity · ⏳ waiting for terminal\n" +
