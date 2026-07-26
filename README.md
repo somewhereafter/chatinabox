@@ -200,6 +200,7 @@ Uninstall removes the managed Codex hooks and instruction block. Without
 ## Project notes
 
 - [Changelog](CHANGELOG.md)
+- [Acknowledgements](ACKNOWLEDGEMENTS.md)
 - [Architecture](docs/ARCHITECTURE.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security](SECURITY.md)

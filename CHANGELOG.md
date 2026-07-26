@@ -4,6 +4,7 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+- Added project acknowledgements and provenance.
 - Refined the session picker, first-run copy, terminal captions, and canonical
   command guidance.
 - Added concise Telegram bot metadata and a native command menu during install.
