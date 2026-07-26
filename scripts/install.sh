@@ -157,7 +157,8 @@ install -d -m 0700 /root/.codex
 node "$repo_dir/ops/install-codex-hooks.mjs" \
   "$release_dir/ops/codex-hooks.json" /root/.codex/hooks.json
 node "$repo_dir/ops/install-chatinabox-instructions.mjs" \
-  "$repo_dir/ops/chatinabox-global-AGENTS-block.md" /root/AGENTS.md
+  "$repo_dir/ops/chatinabox-global-AGENTS-block.md" \
+  /root/.codex/AGENTS.md /root/AGENTS.md
 install -d -o root -g root -m 0700 /var/lib/chatinabox-bridge/lobby
 install -o root -g root -m 0600 \
   "$repo_dir/ops/chatinabox-lobby-AGENTS.md" \

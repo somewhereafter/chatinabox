@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -15,6 +15,45 @@ afterEach(async () => {
 });
 
 describe("managed Chatinabox configuration", () => {
+  it("merges worker instructions and removes the legacy managed block", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "chatinabox-config-"));
+    roots.push(root);
+    const block = path.join(root, "managed.md");
+    const agents = path.join(root, "codex", "AGENTS.md");
+    const legacyAgents = path.join(root, "AGENTS.md");
+    await writeFile(
+      block,
+      "<!-- chatinabox:begin -->\nnew managed block\n<!-- chatinabox:end -->\n",
+    );
+    await mkdir(path.dirname(agents), { recursive: true });
+    await writeFile(agents, "# Existing global guidance\n");
+    await writeFile(
+      legacyAgents,
+      "# Keep me\n\n" +
+        "<!-- chatinabox:begin -->\nold managed block\n<!-- chatinabox:end -->\n",
+    );
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await execFileAsync(
+        process.execPath,
+        [
+          "ops/install-chatinabox-instructions.mjs",
+          block,
+          agents,
+          legacyAgents,
+        ],
+        { cwd: path.resolve(".") },
+      );
+    }
+
+    const agentsAfter = await readFile(agents, "utf8");
+    expect(agentsAfter).toContain("# Existing global guidance");
+    expect(agentsAfter).toContain("new managed block");
+    expect(agentsAfter.match(/chatinabox:begin/gu)).toHaveLength(1);
+    const legacyAfter = await readFile(legacyAgents, "utf8");
+    expect(legacyAfter).toBe("# Keep me\n");
+  });
+
   it("removes only Chatinabox hooks and its marked instruction block", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "chatinabox-config-"));
     roots.push(root);

@@ -23,21 +23,33 @@ Chatinabox is an independent open-source project. It is not an OpenAI product.
 
 ## The experience
 
-- Talk normally and receive progress, tool activity, terminal-waiting state,
-  and the final answer in Telegram.
-- Start, find, resume, rename, interrupt, and switch real Codex sessions with
-  tap controls.
-- Send photos, albums, captions, and files directly into the attached session.
-- Open a tall, readable terminal image with `/screen`, then send Esc, arrows,
-  Enter, Tab, Page Up, or Page Down from the image itself.
-- Use Codex slash commands such as `/model` unchanged. Unknown bot commands go
-  to the Codex TUI.
-- Send several follow-ups while Codex is working. Chatinabox preserves their
-  order and flushes them together at the next tool boundary.
-- See messages typed locally in tmux, transient activity, context compaction,
-  image views, rich links, and final turns from the same thread.
-- Reply to a Telegram message and pass Codex a short attributed snippet for
-  context, without copying the entire quoted turn.
+Walk away from the VPS and continue the exact same Codex process from Telegram.
+When you return to tmux, the thread, model, working directory, terminal UI, and
+interactive state are still there. Chatinabox does not create a parallel API
+conversation or hide Codex behind another assistant.
+
+- Discover running sessions and recent saved threads automatically. Start,
+  resume, rename, interrupt, or switch between them with tap controls—and let a
+  Codex session rename or hand off itself through the local control API.
+- Keep one conversation across phone and terminal. Prompts typed locally are
+  mirrored to Telegram, and Telegram messages enter the live Codex TUI rather
+  than a separate backend.
+- Know what is happening without watching a terminal: working, accumulating
+  tool and file activity, waiting for input, queued follow-ups, compaction, and
+  image views appear as clean transient or durable events.
+- Send several thoughts while Codex is busy. They remain ordered and are
+  delivered together at the next safe tool boundary instead of starting
+  competing turns or disappearing.
+- Open a tall, readable, color-preserving terminal view with `/screen`. Use its
+  buttons—or `/key`—for Esc, arrows, Enter, Tab, paging, control keys, and
+  interactive pickers such as `/model`.
+- Send photos, albums, captions, and files with a prompt. Codex can send
+  generated images and local files back through the same connection.
+- Read answers as Telegram-native messages with headings, emphasis, links,
+  lists, quotes, code blocks, and rich tables instead of raw terminal text.
+  Long responses are split without breaking formatting.
+- Reply to a specific Telegram message to pass Codex a short attributed snippet
+  as context without copying the entire quoted turn.
 
 When no worker is attached, **🪄 Lobby** stays available as a small persistent
 control intelligence. Talk to it normally; it can orient you, recover recent
@@ -91,6 +103,27 @@ Validate a host without changing it:
 ```sh
 sudo ./scripts/install.sh --dry-run
 ```
+
+### Codex instructions
+
+The normal installer safely merges Chatinabox's managed worker block into
+`/root/.codex/AGENTS.md` without replacing existing personal instructions. It
+also installs the Lobby's more specialized `AGENTS.md` in the Lobby workspace.
+
+To install or repair only the global worker instructions manually:
+
+```sh
+sudo install -d -m 0700 /root/.codex
+sudo node ops/install-chatinabox-instructions.mjs \
+  ops/chatinabox-global-AGENTS-block.md \
+  /root/.codex/AGENTS.md
+```
+
+Alternatively, copy the complete marked block from
+[`ops/chatinabox-global-AGENTS-block.md`](ops/chatinabox-global-AGENTS-block.md)
+into `/root/.codex/AGENTS.md`. Keep its `chatinabox:begin` and
+`chatinabox:end` comments so upgrades and uninstall can update only that block.
+Start a new Codex session afterward so the instructions are loaded.
 
 ### First conversation
 

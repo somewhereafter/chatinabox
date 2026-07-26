@@ -4,6 +4,10 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+- Expanded the product experience and documented manual Codex instruction
+  installation.
+- Corrected global worker instructions to install under the Codex home
+  directory while cleaning up the legacy target.
 - Added project acknowledgements and provenance.
 - Refined the session picker, first-run copy, terminal captions, and canonical
   command guidance.

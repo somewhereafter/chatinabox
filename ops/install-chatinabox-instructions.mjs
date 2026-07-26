@@ -3,14 +3,18 @@ import {
   existsSync,
   readFileSync,
   renameSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
 
 const blockPath = process.argv[2];
 const targetPath = process.argv[3];
+const legacyPaths = process.argv.slice(4);
 if (!blockPath || !targetPath) {
-  throw new Error("Usage: install-chatinabox-instructions.mjs BLOCK TARGET");
+  throw new Error(
+    "Usage: install-chatinabox-instructions.mjs BLOCK TARGET [LEGACY_TARGET...]",
+  );
 }
 
 const start = "<!-- chatinabox:begin -->";
@@ -43,3 +47,28 @@ const temporaryPath = path.join(
 writeFileSync(temporaryPath, next, { mode: 0o600 });
 chmodSync(temporaryPath, 0o600);
 renameSync(temporaryPath, targetPath);
+
+for (const legacyPath of legacyPaths) {
+  if (path.resolve(legacyPath) === path.resolve(targetPath)) continue;
+  removeManagedBlock(legacyPath);
+}
+
+function removeManagedBlock(filePath) {
+  if (!existsSync(filePath)) return;
+  const existing = readFileSync(filePath, "utf8");
+  const startIndex = existing.indexOf(start);
+  const endIndex = existing.indexOf(end, startIndex + start.length);
+  if (startIndex < 0 || endIndex < 0) return;
+  const cleaned =
+    `${existing.slice(0, startIndex).trimEnd()}\n\n` +
+    existing.slice(endIndex + end.length).trimStart();
+  const contents = cleaned.trim() ? `${cleaned.trimEnd()}\n` : "";
+  const legacyTemporaryPath = path.join(
+    path.dirname(filePath),
+    `.${path.basename(filePath)}.chatinabox-${process.pid}.tmp`,
+  );
+  const mode = statSync(filePath).mode & 0o777;
+  writeFileSync(legacyTemporaryPath, contents, { mode });
+  chmodSync(legacyTemporaryPath, mode);
+  renameSync(legacyTemporaryPath, filePath);
+}

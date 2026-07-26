@@ -10,11 +10,14 @@ import path from "node:path";
 
 const hooksPath =
   process.env.CHATINABOX_CODEX_HOOKS || "/root/.codex/hooks.json";
-const agentsPath =
-  process.env.CHATINABOX_GLOBAL_AGENTS || "/root/AGENTS.md";
+const agentsPaths = process.env.CHATINABOX_GLOBAL_AGENTS
+  ? [process.env.CHATINABOX_GLOBAL_AGENTS]
+  : ["/root/.codex/AGENTS.md", "/root/AGENTS.md"];
 
 removeHooks(hooksPath);
-removeInstructionBlock(agentsPath);
+for (const agentsPath of agentsPaths) {
+  removeInstructionBlock(agentsPath);
+}
 
 function removeHooks(filePath) {
   if (!existsSync(filePath)) return;

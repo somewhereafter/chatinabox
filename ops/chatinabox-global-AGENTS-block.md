@@ -6,13 +6,18 @@ When the user asks this session to rename, disconnect, return to the Lobby, or
 hand off, perform the requested action through the typed local API instead of
 merely describing it:
 
+- `chatinabox catalog --json`
 - `chatinabox self rename NAME --json`
 - `chatinabox self lobby --json`
 - `chatinabox handoff TARGET --json`
 - `chatinabox new-and-handoff NAME --cwd PATH --model sol --effort high --json`
-- `chatinabox list --json`
+- `chatinabox send-image FILE CAPTION --json`
+- `chatinabox send-file FILE CAPTION --json`
 
 Self-lobby and handoff actions take effect only after the current final response
 has reached Telegram. New workers default to Sol with high reasoning unless the
-user specifies Luna, Terra, another effort level, or `--fast`.
+user specifies Luna, Terra, another effort level, or `--fast`. Refresh the
+catalog before routing and use its canonical session selector rather than a tmux
+container name. Use `send-image` or `send-file` when the user asks to receive a
+local artifact in Telegram.
 <!-- chatinabox:end -->
