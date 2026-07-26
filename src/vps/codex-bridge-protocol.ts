@@ -2,7 +2,7 @@ export const DEFAULT_CODEX_BRIDGE_SOCKET =
   "/run/catinabox/bridge.sock";
 export const CATINABOX_LOBBY_NAME = "🪄 Lobby";
 export const DEFAULT_CATINABOX_LOBBY_CWD =
-  "/var/lib/catinabox/lobby";
+  "/var/lib/catinabox-bridge/lobby";
 
 export interface CodexPaneIdentity {
   readonly serverPid: number;

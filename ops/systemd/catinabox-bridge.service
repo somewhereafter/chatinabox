@@ -15,8 +15,8 @@ TimeoutStopSec=15s
 UMask=0007
 RuntimeDirectory=catinabox
 RuntimeDirectoryMode=0770
-StateDirectory=catinabox
-StateDirectoryMode=0770
+StateDirectory=catinabox-bridge
+StateDirectoryMode=0700
 
 [Install]
 WantedBy=multi-user.target

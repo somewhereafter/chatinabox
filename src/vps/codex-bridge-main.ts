@@ -8,11 +8,11 @@ const bridge = new CodexBridge({
     process.env.CATINABOX_BRIDGE_SOCKET ?? DEFAULT_CODEX_BRIDGE_SOCKET,
   databasePath:
     process.env.CATINABOX_BRIDGE_DB ??
-    "/var/lib/catinabox/bridge.sqlite",
+    "/var/lib/catinabox-bridge/bridge.sqlite",
   defaultCwd: process.env.CATINABOX_DEFAULT_CWD ?? process.cwd(),
   lobbyCwd:
     process.env.CATINABOX_LOBBY_CWD ??
-    "/var/lib/catinabox/lobby",
+    "/var/lib/catinabox-bridge/lobby",
 });
 
 let stopping = false;

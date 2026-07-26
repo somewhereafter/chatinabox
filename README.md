@@ -128,7 +128,8 @@ display name. The bridge also reads Codex's session index/transcripts for
 recent-session discovery and reliable event delivery. Telegram never needs
 public ingress; the bot uses long polling.
 
-State lives in `/var/lib/catinabox`, secrets in
+Bot state lives in `/var/lib/catinabox`; root-only bridge and Lobby state lives
+in `/var/lib/catinabox-bridge`. Secrets are in
 `/etc/catinabox/catinabox.env`, and releases in `/opt/catinabox/releases`.
 `/opt/catinabox/current` is the active release symlink.
 

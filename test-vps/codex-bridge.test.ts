@@ -168,7 +168,7 @@ describe("Codex bridge", () => {
       paneId: "%7",
       panePid: 70,
       windowName: "🪄 Lobby",
-      cwd: "/var/lib/catinabox/lobby",
+      cwd: "/var/lib/catinabox-bridge/lobby",
       codexPid: 700,
       assistantName: "Lobby" as const,
       sessionId: "lobby-thread",

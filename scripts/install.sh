@@ -98,11 +98,12 @@ if ! id catinabox >/dev/null 2>&1; then
 fi
 
 install -d -m 0755 /opt/catinabox/releases
-install -d -o root -g catinabox -m 0770 /var/lib/catinabox
+install -d -o catinabox -g catinabox -m 0700 /var/lib/catinabox
+install -d -o root -g root -m 0700 /var/lib/catinabox-bridge
 install -d -o root -g catinabox -m 0770 /run/catinabox
 install -d -m 0755 /etc/catinabox
 
-release_id="$(date -u +%Y%m%dT%H%M%SZ)-$(git -C "$repo_dir" rev-parse --short HEAD 2>/dev/null || echo local)"
+release_id="$(date -u +%Y%m%dT%H%M%S%NZ)-$(git -C "$repo_dir" rev-parse --short HEAD 2>/dev/null || echo local)"
 release_dir="/opt/catinabox/releases/$release_id"
 install -d -m 0755 "$release_dir"
 cp -a "$repo_dir/dist" "$repo_dir/bin" "$repo_dir/ops" \
@@ -119,22 +120,22 @@ codex_path="$(command -v codex)"
 tmux_path="$(command -v tmux)"
 convert_path="$(command -v convert)"
 env_file=/etc/catinabox/catinabox.env
-install -o catinabox -g catinabox -m 0600 /dev/null "$env_file"
+install -o root -g catinabox -m 0640 /dev/null "$env_file"
 {
   printf 'TG_BOT_TOKEN=%s\n' "$bot_token"
   printf 'TG_ALLOWED_USER_IDS=%s\n' "$owner_ids"
   printf 'CATINABOX_DATA_DIR=/var/lib/catinabox\n'
   printf 'CATINABOX_BRIDGE_SOCKET=/run/catinabox/bridge.sock\n'
-  printf 'CATINABOX_BRIDGE_DB=/var/lib/catinabox/bridge.sqlite\n'
+  printf 'CATINABOX_BRIDGE_DB=/var/lib/catinabox-bridge/bridge.sqlite\n'
   printf 'CATINABOX_DEFAULT_CWD=/root\n'
-  printf 'CATINABOX_LOBBY_CWD=/var/lib/catinabox/lobby\n'
+  printf 'CATINABOX_LOBBY_CWD=/var/lib/catinabox-bridge/lobby\n'
   printf 'CATINABOX_CODEX_PATH=%s\n' "$codex_path"
   printf 'CATINABOX_TMUX_PATH=%s\n' "$tmux_path"
   printf 'CATINABOX_CONVERT_PATH=%s\n' "$convert_path"
   printf 'CATINABOX_CHROME_PATH=%s\n' "$chrome_path"
 } > "$env_file"
-chown catinabox:catinabox "$env_file"
-chmod 0600 "$env_file"
+chown root:catinabox "$env_file"
+chmod 0640 "$env_file"
 
 install -m 0644 "$repo_dir/ops/systemd/catinabox-bridge.service" \
   /etc/systemd/system/catinabox-bridge.service
@@ -153,10 +154,10 @@ node "$repo_dir/ops/install-codex-hooks.mjs" \
   "$release_dir/ops/codex-hooks.json" /root/.codex/hooks.json
 node "$repo_dir/ops/install-catinabox-instructions.mjs" \
   "$repo_dir/ops/catinabox-global-AGENTS-block.md" /root/AGENTS.md
-install -d -o root -g catinabox -m 0770 /var/lib/catinabox/lobby
-install -o root -g catinabox -m 0640 \
+install -d -o root -g root -m 0700 /var/lib/catinabox-bridge/lobby
+install -o root -g root -m 0600 \
   "$repo_dir/ops/catinabox-lobby-AGENTS.md" \
-  /var/lib/catinabox/lobby/AGENTS.md
+  /var/lib/catinabox-bridge/lobby/AGENTS.md
 
 # Polling and webhooks are mutually exclusive. Installing Catinabox claims
 # this bot's update stream.
