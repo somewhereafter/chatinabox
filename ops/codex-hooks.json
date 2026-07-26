@@ -1,0 +1,49 @@
+{
+  "description": "Deliver exact Codex lifecycle results to the local Telegram bridge.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/node /opt/catinabox/current/dist/vps/codex-hook.js",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/node /opt/catinabox/current/dist/vps/codex-hook.js",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/node /opt/catinabox/current/dist/vps/codex-hook.js",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/node /opt/catinabox/current/dist/vps/codex-hook.js",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

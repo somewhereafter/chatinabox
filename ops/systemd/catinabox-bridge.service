@@ -1,0 +1,22 @@
+[Unit]
+Description=Catinabox root tmux and Codex session bridge
+After=local-fs.target
+
+[Service]
+Type=simple
+User=root
+Group=catinabox
+WorkingDirectory=/opt/catinabox/current
+EnvironmentFile=/etc/catinabox/catinabox.env
+ExecStart=/usr/bin/node --experimental-sqlite /opt/catinabox/current/dist/vps/codex-bridge-main.js
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=15s
+UMask=0007
+RuntimeDirectory=catinabox
+RuntimeDirectoryMode=0770
+StateDirectory=catinabox
+StateDirectoryMode=0770
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,46 @@
+{
+  "name": "catinabox",
+  "version": "0.1.0",
+  "description": "A direct, owner-only Telegram interface for Codex CLI sessions",
+  "license": "MIT",
+  "author": "somewhereafter",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/somewhereafter/catinabox.git"
+  },
+  "homepage": "https://github.com/somewhereafter/catinabox#readme",
+  "bugs": {
+    "url": "https://github.com/somewhereafter/catinabox/issues"
+  },
+  "keywords": [
+    "codex",
+    "telegram",
+    "tmux",
+    "remote-terminal",
+    "agent"
+  ],
+  "bin": {
+    "catinabox": "./bin/catinabox"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node --experimental-sqlite dist/vps/main.js",
+    "bridge": "node --experimental-sqlite dist/vps/codex-bridge-main.js",
+    "test": "vitest run --config test-vps/vitest.config.mts",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p test-vps/tsconfig.json",
+    "verify": "npm run typecheck && npm test && npm run build"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "markdown-it": "^14.3.0",
+    "rebrowser-puppeteer-core": "^23.10.3"
+  },
+  "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^25.6.0",
+    "typescript": "^6.0.2",
+    "vitest": "^4.1.0"
+  }
+}

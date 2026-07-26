@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ "${1:-}" == "doctor" ]]; then
+  shift
+  exec node --experimental-sqlite "$root_dir/dist/vps/doctor.js" "$@"
+fi
+exec node --experimental-sqlite "$root_dir/dist/vps/codex-telegram-cli.js" "$@"
