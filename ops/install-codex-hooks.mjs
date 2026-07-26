@@ -42,8 +42,13 @@ function containsChatinaboxHook(value) {
     (hook) =>
       isRecord(hook) &&
       typeof hook.command === "string" &&
-      hook.command.endsWith(
-        " /opt/chatinabox/current/dist/vps/codex-hook.js",
+      (
+        hook.command.endsWith(
+          " /opt/chatinabox/current/dist/vps/codex-hook.js",
+        ) ||
+        hook.command.endsWith(
+          " /opt/anime-pipe/current/dist-vps/vps/codex-hook.js",
+        )
       ),
   );
 }

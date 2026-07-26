@@ -19,6 +19,10 @@ if (!blockPath || !targetPath) {
 
 const start = "<!-- chatinabox:begin -->";
 const end = "<!-- chatinabox:end -->";
+const legacyMarkers = [
+  [start, end],
+  ["<!-- catinabox:begin -->", "<!-- catinabox:end -->"],
+];
 const block = readFileSync(blockPath, "utf8").trim();
 if (!block.startsWith(start) || !block.endsWith(end)) {
   throw new Error("Chatinabox instruction block is missing managed markers");
@@ -56,12 +60,19 @@ for (const legacyPath of legacyPaths) {
 function removeManagedBlock(filePath) {
   if (!existsSync(filePath)) return;
   const existing = readFileSync(filePath, "utf8");
-  const startIndex = existing.indexOf(start);
-  const endIndex = existing.indexOf(end, startIndex + start.length);
-  if (startIndex < 0 || endIndex < 0) return;
-  const cleaned =
-    `${existing.slice(0, startIndex).trimEnd()}\n\n` +
-    existing.slice(endIndex + end.length).trimStart();
+  let cleaned = existing;
+  for (const [blockStart, blockEnd] of legacyMarkers) {
+    const startIndex = cleaned.indexOf(blockStart);
+    const endIndex = cleaned.indexOf(
+      blockEnd,
+      startIndex + blockStart.length,
+    );
+    if (startIndex < 0 || endIndex < 0) continue;
+    cleaned =
+      `${cleaned.slice(0, startIndex).trimEnd()}\n\n` +
+      cleaned.slice(endIndex + blockEnd.length).trimStart();
+  }
+  if (cleaned === existing) return;
   const contents = cleaned.trim() ? `${cleaned.trimEnd()}\n` : "";
   const legacyTemporaryPath = path.join(
     path.dirname(filePath),

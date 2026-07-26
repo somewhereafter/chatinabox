@@ -117,6 +117,9 @@ chmod +x "$release_dir/bin/chatinabox" "$release_dir/ops/chatinabox-command"
   cd "$release_dir"
   npm ci --omit=dev
 )
+# The installer may inherit a restrictive operator umask. Release code contains
+# no secrets and must remain readable/traversable by the unprivileged service.
+chmod -R a+rX "$release_dir"
 ln -sfn "$release_dir" /opt/chatinabox/current
 
 node_path="$(command -v node)"
