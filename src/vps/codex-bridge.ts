@@ -13,10 +13,15 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import {
+  chmod as chmodFile,
+  copyFile,
+  mkdir as mkdirDirectory,
   open as openFile,
   readdir,
   realpath,
+  rename as renameFile,
   stat as statFile,
+  unlink as unlinkFile,
 } from "node:fs/promises";
 import net from "node:net";
 import path from "node:path";
@@ -115,6 +120,7 @@ interface BridgeOptions {
   readonly lobbyCwd?: string;
   readonly managerCwd?: string;
   readonly workspaceRoots?: readonly string[];
+  readonly sharedDataDirectory?: string;
 }
 
 interface ProcessRow {
@@ -2451,6 +2457,24 @@ export class CodexBridge {
       );
       activityDirty = false;
     };
+    const emitGeneratedImage = async (
+      generated: GeneratedImageTranscriptRecord,
+    ): Promise<void> => {
+      const stagedPath = await this.stageGeneratedImage(
+        binding.session_id,
+        generated,
+      ).catch(() => null);
+      if (!stagedPath) return;
+      this.insertMessageEvent(
+        "image_generated",
+        target,
+        binding.session_id,
+        activity?.turnId ?? generated.callId,
+        stagedPath,
+        `transcript-image-generated:${binding.session_id}:` +
+          generated.callId,
+      );
+    };
     if (
       pendingAgent &&
       pendingKey &&
@@ -2524,10 +2548,17 @@ export class CodexBridge {
       try {
         record = JSON.parse(line);
       } catch {
+        const generated = transcriptGeneratedImageFromLineTail(line);
+        if (generated) await emitGeneratedImage(generated);
         continue;
       }
       if (!isPlainRecord(record) || !isPlainRecord(record.payload)) continue;
       const payload = record.payload;
+      const generated = transcriptGeneratedImage(record);
+      if (generated) {
+        await emitGeneratedImage(generated);
+        continue;
+      }
       if (record.type === "turn_context") {
         this.saveAssistantName(
           target,
@@ -3011,6 +3042,73 @@ export class CodexBridge {
       binding.pane_id,
       binding.pane_pid,
     );
+  }
+
+  private async stageGeneratedImage(
+    sessionId: string,
+    generated: GeneratedImageTranscriptRecord,
+  ): Promise<string | null> {
+    if (!/^call_[A-Za-z0-9_-]{1,280}$/u.test(generated.callId)) return null;
+    const configuredCodexHome = process.env.CODEX_HOME?.trim();
+    const generatedRoot = await realpath(path.join(
+      configuredCodexHome || path.join(homedir(), ".codex"),
+      "generated_images",
+    )).catch(() => null);
+    const source = await realpath(generated.savedPath).catch(() => null);
+    if (
+      !generatedRoot ||
+      !source ||
+      !source.startsWith(`${generatedRoot}${path.sep}`)
+    ) {
+      return null;
+    }
+    const extension = path.extname(source).toLowerCase();
+    if (
+      (extension !== ".png" && extension !== ".jpg" && extension !== ".jpeg") ||
+      path.basename(source, extension) !== generated.callId
+    ) {
+      return null;
+    }
+    const sourceStats = await statFile(source).catch(() => null);
+    if (
+      !sourceStats?.isFile() ||
+      sourceStats.size < 1 ||
+      sourceStats.size > 10 * 1024 * 1024
+    ) {
+      return null;
+    }
+    const signature = readFileSync(source).subarray(0, 12);
+    if (!isSupportedGeneratedImage(signature, extension)) return null;
+
+    const destinationDirectory = path.join(
+      this.options.sharedDataDirectory ??
+        path.dirname(this.options.databasePath),
+      "generated-images",
+    );
+    await mkdirDirectory(destinationDirectory, {
+      recursive: true,
+      mode: 0o770,
+    });
+    const sessionKey = createHash("sha256")
+      .update(sessionId)
+      .digest("hex")
+      .slice(0, 16);
+    const destination = path.join(
+      destinationDirectory,
+      `${sessionKey}-${generated.callId}${extension}`,
+    );
+    const temporary = path.join(
+      destinationDirectory,
+      `.staging-${randomBytes(12).toString("hex")}`,
+    );
+    try {
+      await copyFile(source, temporary);
+      await chmodFile(temporary, 0o660);
+      await renameFile(temporary, destination);
+    } finally {
+      await unlinkFile(temporary).catch(() => undefined);
+    }
+    return destination;
   }
 
   private rememberImageViewCall(
@@ -3846,6 +3944,7 @@ function isCodexEventKind(value: unknown): value is CodexEventKind {
     value === "assistant_progress" ||
     value === "agent_reasoning" ||
     value === "context_compacted" ||
+    value === "image_generated" ||
     value === "image_viewed" ||
     value === "session_renamed" ||
     value === "session_handoff" ||
@@ -3856,6 +3955,67 @@ function isCodexEventKind(value: unknown): value is CodexEventKind {
     value === "state_activity" ||
     value === "turn_aborted"
   );
+}
+
+interface GeneratedImageTranscriptRecord {
+  readonly callId: string;
+  readonly savedPath: string;
+}
+
+export function transcriptGeneratedImage(
+  record: unknown,
+): GeneratedImageTranscriptRecord | null {
+  if (
+    !isPlainRecord(record) ||
+    record.type !== "event_msg" ||
+    !isPlainRecord(record.payload)
+  ) {
+    return null;
+  }
+  const payload = record.payload;
+  if (
+    payload.type !== "image_generation_end" ||
+    payload.status !== "completed"
+  ) {
+    return null;
+  }
+  const callId = stringField(payload, "call_id", 300);
+  const savedPath = stringField(payload, "saved_path", 4_096);
+  return callId && savedPath ? { callId, savedPath } : null;
+}
+
+export function transcriptGeneratedImageFromLineTail(
+  line: string,
+): GeneratedImageTranscriptRecord | null {
+  const match = /"saved_path":"((?:[^"\\]|\\.)+)"\}\}\s*$/u.exec(line);
+  if (!match) return null;
+  let savedPath: string;
+  try {
+    savedPath = JSON.parse(`"${match[1]}"`) as string;
+  } catch {
+    return null;
+  }
+  const extension = path.extname(savedPath);
+  const callId = path.basename(savedPath, extension);
+  return /^call_[A-Za-z0-9_-]{1,280}$/u.test(callId)
+    ? { callId, savedPath }
+    : null;
+}
+
+function isSupportedGeneratedImage(
+  signature: Buffer,
+  extension: string,
+): boolean {
+  if (extension === ".png") {
+    return signature.byteLength >= 8 &&
+      signature.subarray(0, 8).equals(
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      );
+  }
+  return signature.byteLength >= 3 &&
+    signature[0] === 0xff &&
+    signature[1] === 0xd8 &&
+    signature[2] === 0xff;
 }
 
 export function transcriptCompactionSignal(

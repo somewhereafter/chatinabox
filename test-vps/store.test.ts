@@ -166,6 +166,16 @@ describe("ChatinaboxStore", () => {
       telegram_message_id: 78,
       queued_for_next_turn: 1,
     });
+    store.recordCodexPrompt(-10042, 42, pane, 79, false, 26);
+    expect(store.latestPendingCodexPromptForTarget(
+      pane,
+      Number.MAX_SAFE_INTEGER,
+      Number.MAX_SAFE_INTEGER,
+    )).toMatchObject({
+      chat_id: -10042,
+      message_thread_id: 26,
+      telegram_message_id: 79,
+    });
     store.markCodexPromptDelivered(
       store.nextCodexPrompt(42, 42, pane)!.id,
     );

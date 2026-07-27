@@ -33,6 +33,7 @@ export interface CodexPromptRow {
   id: number;
   chat_id: number;
   owner_user_id: number;
+  message_thread_id: number;
   server_pid: number;
   pane_id: string;
   pane_pid: number;
@@ -232,6 +233,7 @@ export class ChatinaboxStore {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         chat_id INTEGER NOT NULL,
         owner_user_id INTEGER NOT NULL,
+        message_thread_id INTEGER NOT NULL DEFAULT 0,
         server_pid INTEGER NOT NULL,
         pane_id TEXT NOT NULL,
         pane_pid INTEGER NOT NULL,
@@ -263,6 +265,11 @@ export class ChatinaboxStore {
         PRIMARY KEY (
           chat_id, owner_user_id, server_pid, pane_id, pane_pid
         )
+      );
+      CREATE TABLE IF NOT EXISTS codex_generated_image_deliveries (
+        event_key TEXT PRIMARY KEY,
+        telegram_message_id INTEGER NOT NULL,
+        delivered_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS codex_queue_status_messages (
         chat_id INTEGER NOT NULL,
@@ -618,22 +625,25 @@ export class ChatinaboxStore {
     target: CodexPaneIdentity,
     telegramMessageId: number,
     queuedForNextTurn = false,
+    messageThreadId = 0,
   ): void {
     this.db.prepare(`
       INSERT INTO codex_prompts (
-        chat_id, owner_user_id, server_pid, pane_id, pane_pid,
+        chat_id, owner_user_id, message_thread_id,
+        server_pid, pane_id, pane_pid,
         telegram_message_id, created_at, queued_for_next_turn
       )
-      SELECT ?, ?, ?, ?, ?, ?, ?, ?
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
       WHERE NOT EXISTS (
         SELECT 1 FROM codex_prompts
-        WHERE chat_id = ? AND owner_user_id = ?
+        WHERE chat_id = ? AND owner_user_id = ? AND message_thread_id = ?
           AND server_pid = ? AND pane_id = ? AND pane_pid = ?
           AND telegram_message_id = ?
       )
     `).run(
       chatId,
       ownerUserId,
+      messageThreadId,
       target.serverPid,
       target.paneId,
       target.panePid,
@@ -642,6 +652,7 @@ export class ChatinaboxStore {
       queuedForNextTurn ? 1 : 0,
       chatId,
       ownerUserId,
+      messageThreadId,
       target.serverPid,
       target.paneId,
       target.panePid,
@@ -653,6 +664,53 @@ export class ChatinaboxStore {
         SELECT id FROM codex_prompts ORDER BY id DESC LIMIT 1000
       )
     `).run();
+  }
+
+  latestPendingCodexPromptForTarget(
+    target: CodexPaneIdentity,
+    createdThrough: number,
+    turnStartedAt: number,
+  ): CodexPromptRow | null {
+    return (
+      (this.db.prepare(`
+        SELECT * FROM codex_prompts
+        WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+          AND delivered_at IS NULL AND created_at <= ?
+          AND (
+            queued_for_next_turn <> 1
+            OR created_at <= ?
+          )
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+      `).get(
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        createdThrough,
+        turnStartedAt,
+      ) as CodexPromptRow | undefined) ?? null
+    );
+  }
+
+  hasCodexGeneratedImageDelivery(eventKey: string): boolean {
+    return this.db.prepare(`
+      SELECT 1 FROM codex_generated_image_deliveries WHERE event_key = ?
+    `).get(eventKey) !== undefined;
+  }
+
+  recordCodexGeneratedImageDelivery(
+    eventKey: string,
+    telegramMessageId: number,
+  ): void {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO codex_generated_image_deliveries (
+        event_key, telegram_message_id, delivered_at
+      ) VALUES (?, ?, ?)
+    `).run(eventKey, telegramMessageId, this.now());
+    this.db.prepare(`
+      DELETE FROM codex_generated_image_deliveries
+      WHERE delivered_at < ?
+    `).run(this.now() - 7 * 24 * 60 * 60 * 1_000);
   }
 
   nextCodexPrompt(
@@ -1710,6 +1768,12 @@ export class ChatinaboxStore {
       this.db.exec(`
         ALTER TABLE codex_prompts
         ADD COLUMN queued_for_next_turn INTEGER NOT NULL DEFAULT 0
+      `);
+    }
+    if (!columns.has("message_thread_id")) {
+      this.db.exec(`
+        ALTER TABLE codex_prompts
+        ADD COLUMN message_thread_id INTEGER NOT NULL DEFAULT 0
       `);
     }
   }

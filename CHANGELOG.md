@@ -4,6 +4,19 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.2.0 — 2026-07-27
+
+- Auto-forwarded completed Codex image generations to the Telegram topic that
+  originated the active turn, with a root-to-bot staging boundary, file
+  validation, and restart-safe delivery deduplication.
+- Made `chatinabox send-image` and `send-file` prefer the current worker's
+  attached group and topic instead of falling back to the owner direct message.
+- Added a permanent, reply-linked Scribe transcript receipt before each voice
+  prompt is relayed to Codex, including complete chunked receipts for long
+  transcripts.
+- Updated the configured forum group photo with the abstract Quiet Aperture
+  artwork.
+
 ## 2.1.0 — 2026-07-27
 
 - Added optional Telegram voice-note and audio transcription through

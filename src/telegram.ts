@@ -477,6 +477,7 @@ export async function tgSendDocument(
   blob: Blob,
   filename: string,
   caption?: string,
+  messageThreadId?: number,
 ): Promise<Response> {
   const fd = new FormData();
   fd.set("chat_id", String(chatId));
@@ -485,6 +486,9 @@ export async function tgSendDocument(
   if (caption) {
     fd.set("caption", caption);
     fd.set("parse_mode", "HTML");
+  }
+  if (messageThreadId) {
+    fd.set("message_thread_id", String(messageThreadId));
   }
 
   return fetch(`${API}/bot${env.TG_BOT_TOKEN}/sendDocument`, {
@@ -501,6 +505,7 @@ export async function tgSendPhoto(
   caption?: string,
   replyMarkup?: TelegramInlineKeyboardMarkup,
   messageThreadId?: number,
+  replyToMessageId?: number,
 ): Promise<TelegramResponse<{ message_id: number }>> {
   const fd = new FormData();
   fd.set("chat_id", String(chatId));
@@ -512,6 +517,12 @@ export async function tgSendPhoto(
   if (replyMarkup) fd.set("reply_markup", JSON.stringify(replyMarkup));
   if (messageThreadId) {
     fd.set("message_thread_id", String(messageThreadId));
+  }
+  if (replyToMessageId) {
+    fd.set("reply_parameters", JSON.stringify({
+      message_id: replyToMessageId,
+      allow_sending_without_reply: true,
+    }));
   }
   const response = await fetch(`${API}/bot${env.TG_BOT_TOKEN}/sendPhoto`, {
     method: "POST",

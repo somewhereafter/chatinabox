@@ -247,12 +247,18 @@ async function main(): Promise<number> {
       const file = args.shift();
       if (!file) return usage(`${command} requires FILE`);
       const chatOption = takeOption(args, "--chat");
+      const threadOption = takeOption(args, "--thread");
       const caption = args.join(" ").trim();
+      const source = chatOption
+        ? null
+        : await resolveCurrentTarget(bridge);
       return await deliverTelegramMedia(
         command,
         file,
         caption,
         chatOption,
+        threadOption,
+        source,
         json,
       );
     }
@@ -853,6 +859,8 @@ async function deliverTelegramMedia(
   inputPath: string,
   caption: string,
   chatOption: string | undefined,
+  threadOption: string | undefined,
+  source: CodexPaneIdentity | null,
   json: boolean,
 ): Promise<number> {
   const filePath = path.resolve(inputPath);
@@ -868,7 +876,11 @@ async function deliverTelegramMedia(
     );
   }
 
-  const { env, chatId } = loadTelegramDeliveryTarget(chatOption);
+  const { env, chatId, messageThreadId } = loadTelegramDeliveryTarget(
+    chatOption,
+    threadOption,
+    source,
+  );
   const fileName = path.basename(filePath);
   const bytes = readFileSync(filePath);
   const safeCaption = caption
@@ -881,6 +893,8 @@ async function deliverTelegramMedia(
       chatId,
       new Blob([bytes], { type: imageMimeType(fileName) }),
       safeCaption,
+      undefined,
+      messageThreadId || undefined,
     );
   } else {
     const raw = await tgSendDocument(
@@ -889,6 +903,7 @@ async function deliverTelegramMedia(
       new Blob([bytes], { type: "application/octet-stream" }),
       fileName,
       safeCaption,
+      messageThreadId || undefined,
     );
     response = (await raw.json()) as TelegramResponse<{ message_id: number }>;
   }
@@ -901,6 +916,7 @@ async function deliverTelegramMedia(
         ok: true,
         delivered: true,
         chatId,
+        messageThreadId,
         messageId: response.result.message_id,
         file: filePath,
       })}\n`,
@@ -915,20 +931,31 @@ async function deliverTelegramMedia(
 
 function loadTelegramDeliveryTarget(
   chatOption: string | undefined,
-): { readonly env: BotEnv; readonly chatId: number } {
+  threadOption: string | undefined,
+  source: CodexPaneIdentity | null,
+): {
+  readonly env: BotEnv;
+  readonly chatId: number;
+  readonly messageThreadId: number;
+} {
   const secretsPath =
     process.env.CHATINABOX_ENV ?? "/etc/chatinabox/chatinabox.env";
   if (existsSync(secretsPath)) process.loadEnvFile(secretsPath);
   const token = process.env.TG_BOT_TOKEN?.trim();
   if (!token) throw new Error("TG_BOT_TOKEN is unavailable");
 
+  const attachedRoute = chatOption
+    ? null
+    : source
+      ? attachedTelegramRoute(source)
+      : mostRecentAttachedRoute();
   const rawChat =
     chatOption ??
+    attachedRoute?.chatId ??
     process.env.CHATINABOX_TELEGRAM_CHAT_ID ??
     process.env.TG_ALLOWED_USER_IDS?.split(",")
       .map((value) => value.trim())
-      .find((value) => /^\d+$/u.test(value)) ??
-    mostRecentAttachedChat();
+      .find((value) => /^\d+$/u.test(value));
   if (!rawChat || !/^-?\d+$/u.test(rawChat)) {
     throw new Error(
       "No default Telegram chat is configured; use --chat CHAT_ID",
@@ -938,26 +965,70 @@ function loadTelegramDeliveryTarget(
   if (!Number.isSafeInteger(chatId) || chatId === 0) {
     throw new Error("Telegram chat id is invalid");
   }
-  return { env: { TG_BOT_TOKEN: token }, chatId };
+  const rawThread = threadOption ?? attachedRoute?.messageThreadId ?? "0";
+  if (!/^\d+$/u.test(rawThread)) {
+    throw new Error("Telegram message thread id is invalid");
+  }
+  const messageThreadId = Number(rawThread);
+  if (!Number.isSafeInteger(messageThreadId) || messageThreadId < 0) {
+    throw new Error("Telegram message thread id is invalid");
+  }
+  return { env: { TG_BOT_TOKEN: token }, chatId, messageThreadId };
 }
 
-function mostRecentAttachedChat(): string | undefined {
+function attachedTelegramRoute(
+  target: CodexPaneIdentity,
+): {
+  readonly chatId: string;
+  readonly messageThreadId: string;
+} | null {
+  return queryAttachedTelegramRoute(
+    `WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?`,
+    [target.serverPid, target.paneId, target.panePid],
+  );
+}
+
+function mostRecentAttachedRoute(): {
+  readonly chatId: string;
+  readonly messageThreadId: string;
+} | null {
+  return queryAttachedTelegramRoute("", []);
+}
+
+function queryAttachedTelegramRoute(
+  where: string,
+  parameters: readonly (number | string)[],
+): {
+  readonly chatId: string;
+  readonly messageThreadId: string;
+} | null {
   const dataDir =
     process.env.CHATINABOX_DATA_DIR ?? "/var/lib/chatinabox";
   const databasePath = path.join(dataDir, "chatinabox.sqlite");
-  if (!existsSync(databasePath)) return undefined;
+  if (!existsSync(databasePath)) return null;
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
     const row = database.prepare(
-      `SELECT chat_id
+      `SELECT chat_id, message_thread_id
        FROM codex_attachments
+       ${where}
        ORDER BY attached_at DESC
        LIMIT 1`,
-    ).get() as { chat_id?: number } | undefined;
+    ).get(...parameters) as {
+      chat_id?: number;
+      message_thread_id?: number;
+    } | undefined;
     const chatId = row?.chat_id;
-    return Number.isSafeInteger(chatId) && chatId !== 0
-      ? String(chatId)
-      : undefined;
+    const messageThreadId = row?.message_thread_id;
+    return Number.isSafeInteger(chatId) &&
+        chatId !== 0 &&
+        Number.isSafeInteger(messageThreadId) &&
+        messageThreadId! >= 0
+      ? {
+          chatId: String(chatId),
+          messageThreadId: String(messageThreadId),
+        }
+      : null;
   } finally {
     database.close();
   }
@@ -1082,8 +1153,8 @@ Commands:
   interrupt TARGET             Send Ctrl-C
   keys TARGET KEY [KEY...]     Send allowlisted terminal keys
   screen TARGET --output FILE  Capture the current terminal as PNG
-  send-image FILE [CAPTION]    Send an inline image to your Telegram chat
-  send-file FILE [CAPTION]     Send a local file to your Telegram chat
+  send-image FILE [CAPTION]    Send an inline image to the attached topic
+  send-file FILE [CAPTION]     Send a local file to the attached topic
   profile show                 Show the private experience profile
   profile set [OPTIONS]        Update names, symbols, defaults, or setup state
   profile sync                 Reapply bot and forum identity to Telegram
@@ -1093,7 +1164,9 @@ TARGET can be the 1-based list number, tmux pane id (%4), or unique name.
 New-session options: --cwd PATH, --model sol|luna|terra,
   --effort low|medium|high|xhigh, --fast, --standard.
   Omitted options use the private profile defaults.
-Media commands use the sole allowed user as the default chat; override with --chat ID.
+Media commands prefer this worker's attached Telegram topic, then the latest
+attachment, configured chat, and sole allowed user. Override with --chat ID
+and optional --thread ID.
 Profile options include --assistant-name, --assistant-mark, --assistant-photo,
   --overview-name, --overview-emoji, --group-name, --group-photo,
   --manager-name, --manager-emoji, --manager-role,

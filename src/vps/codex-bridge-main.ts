@@ -15,6 +15,8 @@ const bridge = new CodexBridge({
   databasePath:
     process.env.CHATINABOX_BRIDGE_DB ??
     "/var/lib/chatinabox-bridge/bridge.sqlite",
+  sharedDataDirectory:
+    process.env.CHATINABOX_DATA_DIR ?? "/var/lib/chatinabox",
   defaultCwd: process.env.CHATINABOX_DEFAULT_CWD ?? process.cwd(),
   lobbyCwd:
     process.env.CHATINABOX_LOBBY_CWD ??

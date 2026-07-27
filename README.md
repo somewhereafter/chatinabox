@@ -86,8 +86,10 @@ sudo ELEVENLABS_API_KEY='your-key' \
 ```
 
 Telegram voice notes and audio uploads then reach Codex like typed messages.
-Audio is sent to Scribe v2 in memory and is not added to the local attachment
-store. `CHATINABOX_SCRIBE_LANGUAGE` defaults to `eng`; optional comma-separated
+Chatinabox replies to the voice note with the exact Scribe transcript before
+relaying it, so the recognized prompt stays visible. Audio is sent to Scribe v2
+in memory and is not added to the local attachment store.
+`CHATINABOX_SCRIBE_LANGUAGE` defaults to `eng`; optional comma-separated
 `CHATINABOX_SCRIBE_KEYTERMS` can improve technical-term recognition.
 
 Check the host and source without installing:
@@ -186,7 +188,9 @@ chatinabox send-image /tmp/chart.png "Latest result" --json
 ```
 
 Session mutations use tmux server PID, pane ID, and pane PID rather than display
-names alone.
+names alone. Media commands prefer the current worker's attached Telegram
+group and topic. Images created by Codex for a Telegram-originated turn are
+forwarded to that same topic automatically.
 
 ## Operations
 

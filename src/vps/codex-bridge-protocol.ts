@@ -33,6 +33,7 @@ export type CodexEventKind =
   | "assistant_progress"
   | "agent_reasoning"
   | "context_compacted"
+  | "image_generated"
   | "image_viewed"
   | "session_renamed"
   | "session_handoff"

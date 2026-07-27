@@ -3,6 +3,8 @@ import {
   chmodSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -977,6 +979,11 @@ export class CodexTelegramController {
         languageCode: this.dependencies.env.SCRIBE_LANGUAGE_CODE,
         keyterms: this.dependencies.env.SCRIBE_KEYTERMS,
       });
+      await this.sendVoiceTranscriptReceipt(
+        attachment,
+        transcript,
+        message.message_id,
+      );
       const promptText = message.caption?.trim()
         ? `${transcript}\n\n${message.caption.trim()}`
         : transcript;
@@ -997,6 +1004,25 @@ export class CodexTelegramController {
       );
     }
     return true;
+  }
+
+  private async sendVoiceTranscriptReceipt(
+    attachment: CodexAttachmentRow,
+    transcript: string,
+    replyToMessageId: number,
+  ): Promise<void> {
+    const chunks = voiceTranscriptReceiptHtml(transcript);
+    for (const [index, html] of chunks.entries()) {
+      const sent = await tgSendRichHtml(
+        this.dependencies.env,
+        attachment.chat_id,
+        html,
+        index === 0 ? replyToMessageId : undefined,
+        undefined,
+        attachment.message_thread_id || undefined,
+      ).catch(() => null);
+      if (!sent?.ok) return;
+    }
   }
 
   private async relayPrompt(
@@ -1062,6 +1088,7 @@ export class CodexTelegramController {
       replyToMessageId,
       "queuedUntilNextToolCall" in response &&
         response.queuedUntilNextToolCall,
+      attachment.message_thread_id,
     );
     if (
       "queuedUntilNextToolCall" in response &&
@@ -1709,6 +1736,9 @@ export class CodexTelegramController {
   private async deliverEvent(event: CodexEvent): Promise<boolean> {
     const attachments =
       this.dependencies.store.codexAttachmentsForTarget(event.target);
+    if (event.kind === "image_generated") {
+      return this.deliverGeneratedImage(event, attachments);
+    }
     if (attachments.length === 0) return true;
     if (event.kind === "session_renamed") {
       const panes = await this.listPanes().catch(() => []);
@@ -2091,6 +2121,73 @@ export class CodexTelegramController {
         );
       }
     }
+    return true;
+  }
+
+  private async deliverGeneratedImage(
+    event: CodexEvent,
+    attachments: readonly CodexAttachmentRow[],
+  ): Promise<boolean> {
+    const deliveryKey = `${event.sessionId}:${path.basename(event.message)}`;
+    if (
+      this.dependencies.store.hasCodexGeneratedImageDelivery(deliveryKey)
+    ) {
+      removeStagedGeneratedImage(
+        event.message,
+        this.dependencies.env.DATA_DIR,
+      );
+      return true;
+    }
+    const pending = this.dependencies.store.latestPendingCodexPromptForTarget(
+      event.target,
+      event.createdAt,
+      event.turnStartedAt ?? event.createdAt,
+    );
+    const attachment = pending
+      ? attachments.find((candidate) =>
+          candidate.chat_id === pending.chat_id &&
+          candidate.owner_user_id === pending.owner_user_id &&
+          candidate.message_thread_id === pending.message_thread_id
+        )
+      : undefined;
+    if (!attachment || !pending) {
+      removeStagedGeneratedImage(
+        event.message,
+        this.dependencies.env.DATA_DIR,
+      );
+      return true;
+    }
+    const generated = readStagedGeneratedImage(
+      event.message,
+      this.dependencies.env.DATA_DIR,
+    );
+    if (!generated) {
+      removeStagedGeneratedImage(
+        event.message,
+        this.dependencies.env.DATA_DIR,
+      );
+      return true;
+    }
+    const sent = await tgSendPhoto(
+      this.dependencies.env,
+      attachment.chat_id,
+      new Blob([Uint8Array.from(generated.bytes)], {
+        type: generated.mimeType,
+      }),
+      "🎨 <b>Generated image</b>",
+      undefined,
+      attachment.message_thread_id || undefined,
+      pending.telegram_message_id,
+    ).catch(() => null);
+    if (!sent?.ok) return false;
+    this.dependencies.store.recordCodexGeneratedImageDelivery(
+      deliveryKey,
+      sent.result.message_id,
+    );
+    removeStagedGeneratedImage(
+      event.message,
+      this.dependencies.env.DATA_DIR,
+    );
     return true;
   }
 
@@ -3674,6 +3771,82 @@ export function promptsReadByTurn(
       prompt.queued_for_next_turn !== 1 ||
       prompt.created_at <= turnStartedAt,
   );
+}
+
+export function voiceTranscriptReceiptHtml(
+  transcript: string,
+): string[] {
+  const characters = Array.from(transcript);
+  const chunks: string[] = [];
+  for (let offset = 0; offset < characters.length; offset += 2_800) {
+    const text = characters.slice(offset, offset + 2_800).join("");
+    chunks.push(
+      `<p><b>🎙️ Transcript${offset === 0 ? "" : " · continued"}</b></p>` +
+        `<pre>${escapeTelegramHtml(text)}</pre>`,
+    );
+  }
+  return chunks.length > 0
+    ? chunks
+    : ["<p><b>🎙️ Transcript</b></p><pre></pre>"];
+}
+
+function readStagedGeneratedImage(
+  filePath: string,
+  dataDirectory: string,
+): {
+  readonly bytes: Buffer;
+  readonly mimeType: "image/png" | "image/jpeg";
+} | null {
+  const root = safeRealpath(path.join(dataDirectory, "generated-images"));
+  const candidate = safeRealpath(filePath);
+  if (!root || !candidate || !candidate.startsWith(`${root}${path.sep}`)) {
+    return null;
+  }
+  try {
+    const stats = statSync(candidate);
+    if (!stats.isFile() || stats.size < 1 || stats.size > 10 * 1024 * 1024) {
+      return null;
+    }
+    const bytes = readFileSync(candidate);
+    if (
+      bytes.byteLength >= 8 &&
+      bytes.subarray(0, 8).equals(
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      )
+    ) {
+      return { bytes, mimeType: "image/png" };
+    }
+    if (
+      bytes.byteLength >= 3 &&
+      bytes[0] === 0xff &&
+      bytes[1] === 0xd8 &&
+      bytes[2] === 0xff
+    ) {
+      return { bytes, mimeType: "image/jpeg" };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function removeStagedGeneratedImage(
+  filePath: string,
+  dataDirectory: string,
+): void {
+  const root = safeRealpath(path.join(dataDirectory, "generated-images"));
+  const candidate = safeRealpath(filePath);
+  if (root && candidate?.startsWith(`${root}${path.sep}`)) {
+    rmSync(candidate, { force: true });
+  }
+}
+
+function safeRealpath(filePath: string): string | null {
+  try {
+    return realpathSync(filePath);
+  } catch {
+    return null;
+  }
 }
 
 export function mergeTransientStatus(

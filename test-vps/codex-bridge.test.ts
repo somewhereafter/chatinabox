@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
@@ -21,6 +27,8 @@ import {
   shellSessionFromToolInput,
   shellSessionFromToolOutput,
   splitCompleteTranscriptChunk,
+  transcriptGeneratedImage,
+  transcriptGeneratedImageFromLineTail,
   transcriptCompactionSignal,
   transcriptTurnEndSignal,
   transcriptReasoningSummaries,
@@ -506,6 +514,122 @@ gpt-5.6-sol high
 
     expect(split.complete.byteLength).toBe(0);
     expect(split.consumedBytes).toBe(oversizedSlice.byteLength);
+  });
+
+  it("extracts completed generated-image paths from complete and oversized tails", () => {
+    const savedPath =
+      "/root/.codex/generated_images/thread/call_image_123.png";
+    expect(transcriptGeneratedImage({
+      type: "event_msg",
+      payload: {
+        type: "image_generation_end",
+        call_id: "call_image_123",
+        status: "completed",
+        saved_path: savedPath,
+      },
+    })).toEqual({ callId: "call_image_123", savedPath });
+    expect(transcriptGeneratedImageFromLineTail(
+      `${"x".repeat(1000)},"saved_path":${JSON.stringify(savedPath)}}}`,
+    )).toEqual({ callId: "call_image_123", savedPath });
+  });
+
+  it("stages an oversized generated-image event for unprivileged delivery", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-image-"));
+    const databasePath = path.join(directory, "bridge.sqlite");
+    const transcriptPath = path.join(directory, "rollout.jsonl");
+    const codexHome = path.join(directory, "codex-home");
+    const generatedDirectory = path.join(
+      codexHome,
+      "generated_images",
+      "thread",
+    );
+    const sourcePath = path.join(generatedDirectory, "call_image_large.png");
+    mkdirSync(generatedDirectory, { recursive: true });
+    writeFileSync(
+      sourcePath,
+      Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from("image"),
+      ]),
+    );
+    writeFileSync(
+      transcriptPath,
+      line({
+        timestamp: "2026-07-27T10:00:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "image-turn" },
+      }) +
+        line({
+          timestamp: "2026-07-27T10:00:01.000Z",
+          type: "event_msg",
+          payload: {
+            type: "image_generation_end",
+            call_id: "call_image_large",
+            status: "completed",
+            result: "a".repeat(2 * 1024 * 1024 + 100),
+            saved_path: sourcePath,
+          },
+        }),
+    );
+    const previousCodexHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = codexHome;
+    const bridge = new CodexBridge({
+      socketPath: path.join(directory, "bridge.sock"),
+      databasePath,
+      sharedDataDirectory: path.join(directory, "shared"),
+    });
+    await bridge.listen();
+    try {
+      const db = new DatabaseSync(databasePath);
+      db.prepare(`
+        INSERT INTO transcript_bindings (
+          server_pid, pane_id, pane_pid, session_id, transcript_path,
+          cursor, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, ?)
+      `).run(
+        100,
+        "%4",
+        200,
+        "image-session",
+        transcriptPath,
+        Date.now(),
+      );
+      db.close();
+      for (let index = 0; index < 3; index += 1) {
+        await (
+          bridge as unknown as {
+            mirrorTranscriptsOnce(): Promise<void>;
+          }
+        ).mirrorTranscriptsOnce();
+      }
+      const response = await bridge.dispatch({ op: "events", limit: 20 });
+      expect(response).toMatchObject({
+        ok: true,
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "image_generated",
+            sessionId: "image-session",
+          }),
+        ]),
+      });
+      if (!response.ok || !("events" in response)) {
+        throw new Error("Expected bridge events");
+      }
+      const imageEvent = response.events.find(
+        (event) => event.kind === "image_generated",
+      );
+      expect(imageEvent).toBeDefined();
+      expect(imageEvent && existsSync(imageEvent.message)).toBe(true);
+      expect(imageEvent?.message).toContain("generated-images");
+    } finally {
+      await bridge.close();
+      if (previousCodexHome === undefined) {
+        delete process.env.CODEX_HOME;
+      } else {
+        process.env.CODEX_HOME = previousCodexHome;
+      }
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("recognizes the native start and completion signals for context compaction", () => {

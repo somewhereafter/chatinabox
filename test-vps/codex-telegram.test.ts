@@ -1,4 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -22,6 +28,7 @@ import {
   selectTelegramMedia,
   selectTelegramVoice,
   visibleCodexGoal,
+  voiceTranscriptReceiptHtml,
   promptsReadByTurn,
 } from "../src/vps/codex-telegram";
 import type { TelegramMessage } from "../src/telegram-types";
@@ -289,7 +296,11 @@ describe("Codex Telegram attachments", () => {
     };
     store.attachCodex(42, 42, pane);
 
-    vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request) => {
+    const telegramBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
       const href = String(url);
       if (href.endsWith("/getFile")) {
         return new Response(JSON.stringify({
@@ -311,6 +322,9 @@ describe("Codex Telegram attachments", () => {
         return new Response(JSON.stringify({
           text: "Please run the verification suite.",
         }), { status: 200 });
+      }
+      if (href.endsWith("/sendRichMessage")) {
+        telegramBodies.push(JSON.parse(String(init?.body)));
       }
       return new Response(JSON.stringify({
         ok: true,
@@ -355,6 +369,127 @@ describe("Codex Telegram attachments", () => {
       text: "Please run the verification suite.",
       deliveryId: expect.stringContaining(":77"),
     }));
+    expect(telegramBodies).toContainEqual(expect.objectContaining({
+      chat_id: 42,
+      reply_parameters: expect.objectContaining({ message_id: 77 }),
+      rich_message: {
+        html: expect.stringContaining(
+          "<pre>Please run the verification suite.</pre>",
+        ),
+      },
+    }));
+    store.close();
+  });
+
+  it("keeps long Scribe receipts complete without truncating the transcript", () => {
+    const transcript = `first <line>\n${"x".repeat(6_000)}`;
+    const html = voiceTranscriptReceiptHtml(transcript);
+    expect(html).toHaveLength(3);
+    const visible = html.map((chunk) =>
+      chunk.match(/<pre>([\s\S]*)<\/pre>/u)?.[1] ?? ""
+    ).join("");
+    expect(visible).toBe(
+      transcript.replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;"),
+    );
+  });
+
+  it("delivers a generated image only to the originating Telegram topic", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-output-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "output",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+    };
+    store.attachCodex(-10042, 42, pane, 26);
+    store.attachCodex(-10042, 42, pane, 68);
+    store.recordCodexPrompt(-10042, 42, pane, 77, false, 26);
+    const generatedDirectory = path.join(root, "generated-images");
+    const generatedPath = path.join(
+      generatedDirectory,
+      "session-call_image.png",
+    );
+    mkdirSync(generatedDirectory, { recursive: true });
+    writeFileSync(
+      generatedPath,
+      Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        Buffer.from("image"),
+      ]),
+    );
+    const events = [{
+      id: 1,
+      kind: "image_generated" as const,
+      target: pane,
+      sessionId: "session",
+      turnId: "turn",
+      assistantName: "Sol" as const,
+      message: generatedPath,
+      turnStartedAt: 1,
+      createdAt: Date.now(),
+    }];
+    const acknowledged = new Set<number>();
+    const bridge = {
+      request: vi.fn(async (request: { op: string; eventId?: number }) => {
+        if (request.op === "events") {
+          return {
+            ok: true,
+            events: events.filter((event) => !acknowledged.has(event.id)),
+          };
+        }
+        if (request.op === "ack") {
+          acknowledged.add(request.eventId!);
+          return { ok: true, acked: true };
+        }
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const photoBodies: FormData[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      if (String(url).endsWith("/sendPhoto")) {
+        photoBodies.push(init?.body as FormData);
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        result: { message_id: 901 },
+      }), { status: 200 });
+    }));
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    await controller.deliverEventsOnce();
+    expect(photoBodies).toHaveLength(1);
+    expect(photoBodies[0]?.get("chat_id")).toBe("-10042");
+    expect(photoBodies[0]?.get("message_thread_id")).toBe("26");
+    expect(JSON.parse(String(photoBodies[0]?.get("reply_parameters"))))
+      .toMatchObject({ message_id: 77 });
+    expect(acknowledged).toEqual(new Set([1]));
+    expect(existsSync(generatedPath)).toBe(false);
+
+    await controller.deliverEventsOnce();
+    expect(photoBodies).toHaveLength(1);
     store.close();
   });
 
@@ -1332,6 +1467,7 @@ describe("Codex Telegram attachments", () => {
       id: 1,
       chat_id: 42,
       owner_user_id: 42,
+      message_thread_id: 0,
       server_pid: 100,
       pane_id: "%4",
       pane_pid: 200,
