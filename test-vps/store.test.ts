@@ -146,6 +146,14 @@ describe("ChatinaboxStore", () => {
     expect(pending.telegram_message_id).toBe(77);
     store.markCodexPromptDelivered(pending.id);
     expect(store.nextCodexPrompt(42, 42, pane)).toBeNull();
+    store.recordCodexPrompt(42, 42, pane, 78, true);
+    expect(store.nextCodexPrompt(42, 42, pane)).toMatchObject({
+      telegram_message_id: 78,
+      queued_for_next_turn: 1,
+    });
+    store.markCodexPromptDelivered(
+      store.nextCodexPrompt(42, 42, pane)!.id,
+    );
 
     expect(store.queueCodexPrompt(42, 42, pane, 78, "first")).toBe(1);
     now += 10;

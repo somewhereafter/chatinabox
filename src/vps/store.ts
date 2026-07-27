@@ -39,6 +39,7 @@ export interface CodexPromptRow {
   telegram_message_id: number;
   created_at: number;
   delivered_at: number | null;
+  queued_for_next_turn: number;
 }
 
 export interface CodexStatusRow {
@@ -235,7 +236,8 @@ export class ChatinaboxStore {
         pane_pid INTEGER NOT NULL,
         telegram_message_id INTEGER NOT NULL,
         created_at INTEGER NOT NULL,
-        delivered_at INTEGER
+        delivered_at INTEGER,
+        queued_for_next_turn INTEGER NOT NULL DEFAULT 0
       );
       CREATE INDEX IF NOT EXISTS codex_prompts_pending_idx
         ON codex_prompts(
@@ -403,6 +405,7 @@ export class ChatinaboxStore {
       );
     `);
     this.migrateCodexAttachments();
+    this.migrateCodexPrompts();
     this.migrateCodexStatuses();
     this.migrateCodexTopicRouting();
     this.migrateTopicSetups();
@@ -612,12 +615,13 @@ export class ChatinaboxStore {
     ownerUserId: number,
     target: CodexPaneIdentity,
     telegramMessageId: number,
+    queuedForNextTurn = false,
   ): void {
     this.db.prepare(`
       INSERT INTO codex_prompts (
         chat_id, owner_user_id, server_pid, pane_id, pane_pid,
-        telegram_message_id, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        telegram_message_id, created_at, queued_for_next_turn
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       chatId,
       ownerUserId,
@@ -626,6 +630,7 @@ export class ChatinaboxStore {
       target.panePid,
       telegramMessageId,
       this.now(),
+      queuedForNextTurn ? 1 : 0,
     );
     this.db.prepare(`
       DELETE FROM codex_prompts
@@ -1649,6 +1654,19 @@ export class ChatinaboxStore {
       this.db.exec(`
         ALTER TABLE codex_attachments
         ADD COLUMN assistant_name TEXT NOT NULL DEFAULT 'Codex'
+      `);
+    }
+  }
+
+  private migrateCodexPrompts(): void {
+    const columns = new Set(
+      (this.db.prepare(`PRAGMA table_info(codex_prompts)`).all() as unknown as
+        Array<{ name: string }>).map((column) => column.name),
+    );
+    if (!columns.has("queued_for_next_turn")) {
+      this.db.exec(`
+        ALTER TABLE codex_prompts
+        ADD COLUMN queued_for_next_turn INTEGER NOT NULL DEFAULT 0
       `);
     }
   }

@@ -63,6 +63,7 @@ import type {
   CodexAttachmentRow,
   CodexGoalHistoryRow,
   CodexGoalRow,
+  CodexPromptRow,
   CodexStatusRow,
   CodexStatusSnapshot,
   CodexThinkingSectionRow,
@@ -962,6 +963,8 @@ export class CodexTelegramController {
       attachment.owner_user_id,
       target,
       replyToMessageId,
+      "queuedUntilNextToolCall" in response &&
+        response.queuedUntilNextToolCall,
     );
     if (
       "queuedUntilNextToolCall" in response &&
@@ -1779,7 +1782,10 @@ export class CodexTelegramController {
           transient.telegram_message_id,
         ).catch(() => undefined);
       }
-      const pendingBatch = event.kind === "assistant_final"
+      const pendingThrough = (
+        event.kind === "assistant_final" ||
+        event.kind === "assistant_progress"
+      )
         ? this.dependencies.store.pendingCodexPromptsThrough(
             attachment.chat_id,
             attachment.owner_user_id,
@@ -1787,20 +1793,22 @@ export class CodexTelegramController {
             event.createdAt,
           )
         : [];
-      const pending = event.kind === "assistant_final"
-        ? pendingBatch[pendingBatch.length - 1]
-        : event.kind === "assistant_progress"
-          ? this.dependencies.store.nextCodexPrompt(
-              attachment.chat_id,
-              attachment.owner_user_id,
-              event.target,
-            )
-          : null;
-      const turnStartedAt =
+      const effectiveTurnStartedAt =
         event.turnStartedAt ||
         transient?.started_at ||
-        pendingBatch[0]?.created_at ||
         event.createdAt;
+      const pendingBatch = promptsReadByTurn(
+        pendingThrough,
+        effectiveTurnStartedAt,
+      );
+      const pending = event.kind === "assistant_final"
+        ? pendingBatch[0]
+        : event.kind === "assistant_progress"
+          ? pendingBatch[pendingBatch.length - 1]
+          : null;
+      const turnStartedAt =
+        pendingBatch[0]?.created_at ||
+        effectiveTurnStartedAt;
       const turnElapsedMs = Math.max(0, event.createdAt - turnStartedAt);
       const totalWorkMs = event.kind === "assistant_final"
           ? this.dependencies.store.addCodexSessionWork(
@@ -1893,7 +1901,7 @@ export class CodexTelegramController {
           transient,
         );
       }
-      if (pendingBatch.length > 0) {
+      if (event.kind === "assistant_final" && pendingBatch.length > 0) {
         this.dependencies.store.markCodexPromptsDelivered(
           pendingBatch.map((row) => row.id),
         );
@@ -1976,16 +1984,11 @@ export class CodexTelegramController {
         row.telegram_message_id,
       ) ?? row;
     } else if (needsRender) {
-      const pending = this.dependencies.store.nextCodexPrompt(
-        attachment.chat_id,
-        attachment.owner_user_id,
-        target,
-      );
       let sent = await tgSendRichHtml(
         this.dependencies.env,
         attachment.chat_id,
         formatThinkingSectionRichHtml(row),
-        pending?.telegram_message_id,
+        undefined,
         undefined,
         attachment.message_thread_id || undefined,
       ).catch(() => null);
@@ -1994,7 +1997,7 @@ export class CodexTelegramController {
           this.dependencies.env,
           attachment.chat_id,
           formatThinkingSectionFallbackHtml(row),
-          pending?.telegram_message_id,
+          undefined,
           undefined,
           attachment.message_thread_id || undefined,
         ).catch(() => null);
@@ -3309,6 +3312,17 @@ export function buildTelegramTextPrompt(message: TelegramMessage): string {
     "",
     text,
   ].join("\n");
+}
+
+export function promptsReadByTurn(
+  prompts: readonly CodexPromptRow[],
+  turnStartedAt: number,
+): CodexPromptRow[] {
+  return prompts.filter(
+    (prompt) =>
+      prompt.queued_for_next_turn !== 1 ||
+      prompt.created_at <= turnStartedAt,
+  );
 }
 
 function mergeTransientStatus(

@@ -20,6 +20,7 @@ import {
   sanitizeAttachmentFileName,
   selectTelegramMedia,
   visibleCodexGoal,
+  promptsReadByTurn,
 } from "../src/vps/codex-telegram";
 import type { TelegramMessage } from "../src/telegram-types";
 import {
@@ -718,6 +719,9 @@ describe("Codex Telegram attachments", () => {
       });
     };
 
+    store.recordCodexPrompt(-10088, 42, pane, 101);
+    now += 1;
+    store.recordCodexPrompt(-10088, 42, pane, 102);
     addEvent("agent_reasoning", "Inspecting state");
     addEvent("agent_reasoning", "Checking ordering");
     await controller.deliverEventsOnce();
@@ -733,6 +737,7 @@ describe("Codex Telegram attachments", () => {
     );
     expect(JSON.stringify(firstThinking?.body)).toContain("Inspecting state");
     expect(JSON.stringify(firstThinking?.body)).toContain("Checking ordering");
+    expect(firstThinking?.body.reply_parameters).toBeUndefined();
 
     calls.length = 0;
     addEvent("agent_reasoning", "Preparing continuation");
@@ -746,6 +751,9 @@ describe("Codex Telegram attachments", () => {
         JSON.stringify(call.body).includes("<footer>cont.</footer>"),
     );
     expect(continuationIndex).toBeGreaterThan(0);
+    expect(calls[continuationIndex]?.body.reply_parameters).toMatchObject({
+      message_id: 102,
+    });
     expect(store.codexThinkingSection(-10088, 42, pane)).toBeNull();
 
     calls.length = 0;
@@ -764,8 +772,40 @@ describe("Codex Telegram attachments", () => {
     );
     expect(finalThinkingIndex).toBeGreaterThanOrEqual(0);
     expect(finalAnswerIndex).toBeGreaterThan(finalThinkingIndex);
+    expect(calls[finalAnswerIndex]?.body.reply_parameters).toMatchObject({
+      message_id: 101,
+    });
     expect(calls.at(-1)?.method).toBe("pinChatMessage");
     store.close();
+  });
+
+  it("does not treat an explicit next-turn queue as already read", () => {
+    const base = {
+      id: 1,
+      chat_id: 42,
+      owner_user_id: 42,
+      server_pid: 100,
+      pane_id: "%4",
+      pane_pid: 200,
+      telegram_message_id: 101,
+      created_at: 1_000,
+      delivered_at: null,
+      queued_for_next_turn: 0,
+    };
+    const queued = {
+      ...base,
+      id: 2,
+      telegram_message_id: 102,
+      created_at: 2_000,
+      queued_for_next_turn: 1,
+    };
+
+    expect(promptsReadByTurn([base, queued], 900).map(
+      (prompt) => prompt.telegram_message_id,
+    )).toEqual([101]);
+    expect(promptsReadByTurn([queued], 2_100).map(
+      (prompt) => prompt.telegram_message_id,
+    )).toEqual([102]);
   });
 
   it("reanchors a live transient once, then edits thinking in place", async () => {
