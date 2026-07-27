@@ -228,6 +228,59 @@ describe("Codex bridge", () => {
     });
   });
 
+  it("ignores a newer Spark-specific limit and keeps account-wide Codex usage", () => {
+    const contents =
+      line({
+        timestamp: "2026-07-27T15:08:45.208Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: {
+            limit_id: "codex",
+            limit_name: null,
+            primary: {
+              used_percent: 48,
+              window_minutes: 10080,
+              resets_at: 1785611896,
+            },
+            secondary: null,
+            credits: { balance: "5000" },
+            plan_type: "pro",
+          },
+        },
+      }) +
+      line({
+        timestamp: "2026-07-27T15:10:00.360Z",
+        type: "event_msg",
+        payload: {
+          type: "token_count",
+          rate_limits: {
+            limit_id: "codex_bengalfox",
+            limit_name: "GPT-5.3-Codex-Spark",
+            primary: {
+              used_percent: 0,
+              window_minutes: 10080,
+              resets_at: 1785769793,
+            },
+            secondary: null,
+            credits: { balance: "5000" },
+            plan_type: "pro",
+          },
+        },
+      });
+
+    expect(parseCodexUsageFromTranscriptTail(contents)).toEqual({
+      observedAt: Date.parse("2026-07-27T15:08:45.208Z"),
+      planType: "pro",
+      creditsBalance: "5000",
+      limits: [{
+        usedPercent: 48,
+        windowMinutes: 10080,
+        resetsAt: 1785611896,
+      }],
+    });
+  });
+
   it("reads current context occupancy from the latest token count", () => {
     const contents = line({
       type: "event_msg",

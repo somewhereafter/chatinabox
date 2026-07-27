@@ -4624,6 +4624,7 @@ export function parseCodexUsageFromTranscriptTail(
     const observedAt = Date.parse(record.timestamp);
     if (!Number.isFinite(observedAt)) continue;
     const rateLimits = record.payload.rate_limits;
+    if (isSparkCodexRateLimit(rateLimits)) continue;
     const limits = [rateLimits.primary, rateLimits.secondary]
       .map(parseCodexUsageLimit)
       .filter((limit): limit is CodexUsageLimit => limit !== null);
@@ -4645,6 +4646,18 @@ export function parseCodexUsageFromTranscriptTail(
     };
   }
   return null;
+}
+
+function isSparkCodexRateLimit(rateLimits: Record<string, unknown>): boolean {
+  const limitId =
+    typeof rateLimits.limit_id === "string"
+      ? rateLimits.limit_id.trim().toLowerCase()
+      : "";
+  const limitName =
+    typeof rateLimits.limit_name === "string"
+      ? rateLimits.limit_name.trim().toLowerCase()
+      : "";
+  return limitId === "codex_bengalfox" || limitName.includes("codex-spark");
 }
 
 /** Read current context occupancy from the newest complete token-count record. */
