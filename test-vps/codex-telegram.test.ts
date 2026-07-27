@@ -140,6 +140,30 @@ describe("Codex Telegram attachments", () => {
     expect(html).toContain("<mark>🎯 goal · paused</mark>");
     expect(html).toContain("Ship goal mode across Telegram and terminal");
     expect(html).toContain("12,000 / 50,000 tokens · 1m 30s");
+
+    const interrupting = formatCodexTransientRichHtml({
+      statusKind: "state_interrupting",
+      toolCalls: 2,
+      editedFiles: 0,
+      exploredThings: 0,
+      activeShells: 0,
+      queuedMessages: 0,
+      replyToMessageId: null,
+      startedAt: 1,
+    }, 2, personalProfile, null);
+    expect(interrupting).toContain("<mark>■ interrupt requested</mark>");
+
+    const interrupted = formatCodexTransientRichHtml({
+      statusKind: "state_interrupted",
+      toolCalls: 2,
+      editedFiles: 0,
+      exploredThings: 0,
+      activeShells: 0,
+      queuedMessages: 0,
+      replyToMessageId: null,
+      startedAt: 1,
+    }, 2, personalProfile, null);
+    expect(interrupted).toContain("<mark>■ task interrupted</mark>");
   });
 
   it("makes goal edit mode visible and preserves the current objective", () => {
@@ -745,6 +769,110 @@ describe("Codex Telegram attachments", () => {
     store.close();
   });
 
+  it("coalesces activity bursts and throttles transient edits without losing counters", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-activity-"));
+    temporaryRoots.push(root);
+    let now = 1_800_000_000_000;
+    const store = new ChatinaboxStore(
+      path.join(root, "state.sqlite"),
+      () => now,
+    );
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "activity",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(-10042, 42, pane, 7);
+    store.setCodexStatus(-10042, 42, pane, 700, {
+      statusKind: "state_working",
+      toolCalls: 0,
+      editedFiles: 0,
+      exploredThings: 0,
+      activeShells: 0,
+      queuedMessages: 0,
+      replyToMessageId: 650,
+      startedAt: now - 1_000,
+    });
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ method, body });
+      return { json: async () => ({ ok: true, result: true }) };
+    }));
+    let events = [1, 2, 3].map((id) => ({
+      id,
+      kind: "state_activity" as const,
+      target: pane,
+      sessionId: "session",
+      turnId: "turn",
+      assistantName: "Sol" as const,
+      message: `${id}\u001f0\u001f${id}\u001f0`,
+      createdAt: now,
+    }));
+    const acknowledged: number[] = [];
+    const bridge = {
+      request: vi.fn(async (
+        request: { op: string; eventId?: number },
+      ) => {
+        if (request.op === "events") return { ok: true, events };
+        if (request.op === "ack") {
+          acknowledged.push(request.eventId!);
+          return { ok: true, acknowledged: true };
+        }
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+      now: () => now,
+    });
+
+    await controller.deliverEventsOnce();
+    expect(calls.filter((call) => call.method === "editMessageText"))
+      .toHaveLength(1);
+    expect(acknowledged).toEqual([1, 2, 3]);
+    expect(store.codexStatus(-10042, 42, pane)).toMatchObject({
+      tool_calls: 3,
+      explored_things: 3,
+    });
+
+    calls.length = 0;
+    now += 1_000;
+    events = [{
+      ...events[0],
+      id: 4,
+      message: "4\u001f1\u001f4\u001f0",
+      createdAt: now,
+    }];
+    await controller.deliverEventsOnce();
+    expect(calls).toHaveLength(0);
+    expect(store.codexStatus(-10042, 42, pane)).toMatchObject({
+      telegram_message_id: 700,
+      tool_calls: 4,
+      edited_files: 1,
+      explored_things: 4,
+    });
+    store.close();
+  });
+
   it("batches thoughts, then flushes them before continuation and final messages", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-thinking-"));
     temporaryRoots.push(root);
@@ -1110,6 +1238,22 @@ describe("Codex Telegram attachments", () => {
         call.method === "deleteMessage" &&
         call.body.message_id === 1_000,
     )).toBe(true);
+    const replacementIndex = calls.findIndex(
+      (call) =>
+        call.method === "sendRichMessage" &&
+        (
+          call.body.reply_parameters as
+            | { message_id?: number }
+            | undefined
+        )?.message_id === 101,
+    );
+    const deletionIndex = calls.findIndex(
+      (call) =>
+        call.method === "deleteMessage" &&
+        call.body.message_id === 1_000,
+    );
+    expect(replacementIndex).toBeGreaterThanOrEqual(0);
+    expect(deletionIndex).toBeGreaterThan(replacementIndex);
 
     await vi.advanceTimersByTimeAsync(701);
     const latestEdit = calls
@@ -1118,6 +1262,83 @@ describe("Codex Telegram attachments", () => {
     expect(JSON.stringify(latestEdit?.body)).toContain(
       "📥 <b>2</b> msgs queued",
     );
+    store.close();
+  });
+
+  it("keeps the old transient when a reanchored replacement cannot be sent", async () => {
+    vi.useFakeTimers();
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-transient-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "chatinabox",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(42, 42, pane);
+    store.setCodexStatus(42, 42, pane, 700, {
+      statusKind: "state_working",
+      toolCalls: 1,
+      editedFiles: 0,
+      exploredThings: 0,
+      activeShells: 0,
+      queuedMessages: 0,
+      replyToMessageId: 100,
+      startedAt: 1,
+    });
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ method, body });
+      return {
+        json: async () => ({
+          ok: false,
+          error_code: 500,
+          description: "temporary failure",
+        }),
+      };
+    }));
+    const bridge = {
+      request: vi.fn(async () => ({
+        ok: true,
+        sent: true,
+        queuedUntilNextToolCall: true,
+      })),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    await controller.routeAttachedMessage(message({
+      message_id: 101,
+      chat: { id: 42 },
+      from: { id: 42 },
+      text: "reanchor me",
+    }));
+
+    expect(calls.some((call) => call.method === "deleteMessage")).toBe(false);
+    expect(store.codexStatus(42, 42, pane)).toMatchObject({
+      telegram_message_id: 700,
+      reply_to_message_id: 100,
+    });
     store.close();
   });
 

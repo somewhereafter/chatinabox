@@ -602,6 +602,12 @@ export class CodexBridge {
   ): Promise<CodexBridgeResponse> {
     const target = await this.requireTarget(request.target);
     if (!target) return failure("STALE_TARGET", "That Codex session is no longer available.");
+    if (!target.busy) {
+      return failure(
+        "NOT_WORKING",
+        "That Codex session is not currently running a task.",
+      );
+    }
     await run(TMUX, ["send-keys", "-t", target.paneId, "C-c"]);
     return { ok: true, interrupted: true };
   }
