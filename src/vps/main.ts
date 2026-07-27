@@ -342,9 +342,12 @@ export function formatFirstRunWelcome(): string {
   return (
     "⌁ <b>Welcome to Chatinabox</b>\n\n" +
     "This first conversation is setup. Talk to the guide normally—describe " +
-    "the names, tone, symbols, model defaults, workspace, and idle policy " +
-    "you want, or simply say <i>keep it simple</i>.\n\n" +
-    "The guide will shape a private profile without changing the source. " +
+    "how you want the bot and workspace to feel, or simply say " +
+    "<i>keep it simple</i>. It can co-design the bot name and photo, forum " +
+    "name and photo, manager identity, model defaults, workspace, and idle " +
+    "policy with you.\n\n" +
+    "The guide will show you a compact preview, then shape a private profile " +
+    "without changing the source. " +
     "It will then walk you through creating a Telegram forum with two control " +
     "topics and your first working topic.\n\n" +
     "<blockquote>When the forum is ready, pin the 🔮 manager/orchestrator " +

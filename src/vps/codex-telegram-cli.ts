@@ -1,13 +1,21 @@
 import {
+  chmodSync,
   existsSync,
+  mkdirSync,
   readFileSync,
+  renameSync,
   statSync,
   writeFileSync,
 } from "node:fs";
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   escapeTelegramHtml,
+  tgSetChatPhoto,
+  tgSetChatTitle,
+  tgSetMyName,
+  tgSetMyProfilePhoto,
   tgSendDocument,
   tgSendPhoto,
 } from "../telegram";
@@ -30,6 +38,9 @@ import {
 } from "./experience-profile";
 
 async function main(): Promise<number> {
+  const environmentPath =
+    process.env.CHATINABOX_ENV ?? "/etc/chatinabox/chatinabox.env";
+  if (existsSync(environmentPath)) process.loadEnvFile(environmentPath);
   const args = process.argv.slice(2);
   const json = removeFlag(args, "--json");
   const command = args.shift() ?? "list";
@@ -37,7 +48,7 @@ async function main(): Promise<number> {
 
   try {
     if (command === "profile") {
-      return profileCommand(args, json);
+      return await profileCommand(args, json);
     }
     if (command === "catalog") {
       return outputCatalog(await bridge.request({ op: "list" }), json);
@@ -263,7 +274,7 @@ async function main(): Promise<number> {
   }
 }
 
-function profileCommand(args: string[], json: boolean): number {
+async function profileCommand(args: string[], json: boolean): Promise<number> {
   const action = args.shift() ?? "show";
   const profilePath =
     process.env.CHATINABOX_PROFILE_PATH?.trim() ||
@@ -285,14 +296,30 @@ function profileCommand(args: string[], json: boolean): number {
     );
     return outputProfile({ ok: true, profile, profilePath }, json);
   }
+  if (action === "sync") {
+    if (args.length > 0) return usage("profile sync does not take arguments");
+    const profile = readExperienceProfile(profilePath);
+    return outputProfile(
+      {
+        ok: true,
+        profile,
+        profilePath,
+        telegram: await syncTelegramIdentity(profile),
+      },
+      json,
+    );
+  }
   if (action !== "set") {
-    return usage("profile requires show, set, or defaults");
+    return usage("profile requires show, set, sync, or defaults");
   }
 
   const assistantName = takeOption(args, "--assistant-name");
   const assistantMark = takeOption(args, "--assistant-mark");
+  const assistantPhoto = takeOption(args, "--assistant-photo");
   const overviewName = takeOption(args, "--overview-name");
   const overviewEmoji = takeOption(args, "--overview-emoji");
+  const groupName = takeOption(args, "--group-name");
+  const groupPhoto = takeOption(args, "--group-photo");
   const managerName = takeOption(args, "--manager-name");
   const managerEmoji = takeOption(args, "--manager-emoji");
   const managerRole = takeOption(args, "--manager-role");
@@ -341,25 +368,43 @@ function profileCommand(args: string[], json: boolean): number {
       return usage("--idle-minutes must be an integer from 0 to 10080");
     }
   }
+  const assistantPhotoPath = assistantPhoto !== undefined
+    ? prepareIdentityPhoto(assistantPhoto, "assistant")
+    : undefined;
+  const groupPhotoPath = groupPhoto !== undefined
+    ? prepareIdentityPhoto(groupPhoto, "group")
+    : undefined;
 
   const patch: ExperienceProfilePatch = {
     ...(complete || reopen ? { setupComplete: complete } : {}),
     ...(
-      assistantName !== undefined || assistantMark !== undefined
+      assistantName !== undefined ||
+        assistantMark !== undefined ||
+        assistantPhotoPath !== undefined
         ? {
             assistant: {
               ...(assistantName !== undefined ? { name: assistantName } : {}),
               ...(assistantMark !== undefined ? { mark: assistantMark } : {}),
+              ...(assistantPhotoPath !== undefined
+                ? { photoPath: assistantPhotoPath }
+                : {}),
             },
           }
         : {}
     ),
     ...(
-      overviewName !== undefined || overviewEmoji !== undefined
+      overviewName !== undefined ||
+        overviewEmoji !== undefined ||
+        groupName !== undefined ||
+        groupPhotoPath !== undefined
         ? {
             overview: {
               ...(overviewName !== undefined ? { name: overviewName } : {}),
               ...(overviewEmoji !== undefined ? { emoji: overviewEmoji } : {}),
+              ...(groupName !== undefined ? { groupName } : {}),
+              ...(groupPhotoPath !== undefined
+                ? { groupPhotoPath }
+                : {}),
             },
           }
         : {}
@@ -425,7 +470,167 @@ function profileCommand(args: string[], json: boolean): number {
     profilePath,
     patchExperienceProfile(readExperienceProfile(profilePath), patch),
   );
-  return outputProfile({ ok: true, profile, profilePath }, json);
+  const identityChanged =
+    assistantName !== undefined ||
+    assistantPhotoPath !== undefined ||
+    groupName !== undefined ||
+    groupPhotoPath !== undefined;
+  return outputProfile({
+    ok: true,
+    profile,
+    profilePath,
+    ...(identityChanged
+      ? { telegram: await syncTelegramIdentity(profile) }
+      : {}),
+  }, json);
+}
+
+interface TelegramIdentitySync {
+  readonly bot: "updated" | "skipped" | "failed";
+  readonly groups: readonly {
+    readonly chatId: number;
+    readonly status: "updated" | "failed";
+    readonly detail?: string;
+  }[];
+  readonly warnings: readonly string[];
+}
+
+function prepareIdentityPhoto(
+  input: string,
+  target: "assistant" | "group",
+): string {
+  const source = path.resolve(input);
+  const stats = statSync(source);
+  if (!stats.isFile()) throw new Error(`${input} is not a regular file`);
+  if (stats.size > 20 * 1_024 * 1_024) {
+    throw new Error(`${input} is larger than 20 MB`);
+  }
+  const convert =
+    process.env.CHATINABOX_CONVERT_PATH?.trim() ||
+    "/usr/bin/convert";
+  if (!existsSync(convert)) {
+    throw new Error(
+      "ImageMagick is required to prepare identity photos; install it and retry",
+    );
+  }
+  const directory = "/var/lib/chatinabox/profile-assets";
+  mkdirSync(directory, { recursive: true, mode: 0o755 });
+  const destination = path.join(directory, `${target}.jpg`);
+  const temporary = `${destination}.${process.pid}.tmp.jpg`;
+  const converted = spawnSync(convert, [
+    source,
+    "-auto-orient",
+    "-thumbnail",
+    "1024x1024^",
+    "-gravity",
+    "center",
+    "-extent",
+    "1024x1024",
+    temporary,
+  ], { encoding: "utf8", timeout: 30_000 });
+  if (converted.status !== 0) {
+    throw new Error(
+      `could not prepare ${target} photo: ` +
+        (converted.stderr.trim() || "ImageMagick failed"),
+    );
+  }
+  chmodSync(temporary, 0o644);
+  renameSync(temporary, destination);
+  return destination;
+}
+
+async function syncTelegramIdentity(
+  profile: ReturnType<typeof readExperienceProfile>,
+): Promise<TelegramIdentitySync> {
+  const token = process.env.TG_BOT_TOKEN?.trim();
+  if (!token) {
+    return {
+      bot: "skipped",
+      groups: [],
+      warnings: ["TG_BOT_TOKEN is unavailable; run profile sync after install."],
+    };
+  }
+  const env: BotEnv = { TG_BOT_TOKEN: token };
+  const warnings: string[] = [];
+  let bot: TelegramIdentitySync["bot"] = "updated";
+  const named = await tgSetMyName(env, profile.assistant.name)
+    .catch(() => null);
+  if (!named?.ok) {
+    bot = "failed";
+    warnings.push(named?.description || "Could not update the bot name.");
+  }
+  if (profile.assistant.photoPath) {
+    const photo = await tgSetMyProfilePhoto(
+      env,
+      new Blob([readFileSync(profile.assistant.photoPath)], {
+        type: "image/jpeg",
+      }),
+    ).catch(() => null);
+    if (!photo?.ok) {
+      bot = "failed";
+      warnings.push(photo?.description || "Could not update the bot photo.");
+    }
+  }
+
+  const groups: {
+    chatId: number;
+    status: "updated" | "failed";
+    detail?: string;
+  }[] = [];
+  for (const chatId of registeredOverviewChats()) {
+    const title = profile.overview.groupName
+      ? await tgSetChatTitle(
+          env,
+          chatId,
+          profile.overview.groupName,
+        ).catch(() => null)
+      : null;
+    let failure = !profile.overview.groupName || title?.ok
+      ? ""
+      : title?.description || "Could not update the group title.";
+    if (!failure && profile.overview.groupPhotoPath) {
+      const photo = await tgSetChatPhoto(
+        env,
+        chatId,
+        new Blob([readFileSync(profile.overview.groupPhotoPath)], {
+          type: "image/jpeg",
+        }),
+      ).catch(() => null);
+      if (!photo?.ok) {
+        failure = photo?.description || "Could not update the group photo.";
+      }
+    }
+    groups.push({
+      chatId,
+      status: failure ? "failed" : "updated",
+      ...(failure ? { detail: failure } : {}),
+    });
+    if (failure) {
+      warnings.push(
+        `Group ${chatId}: ${failure} Give the bot permission to change group info.`,
+      );
+    }
+  }
+  return { bot, groups, warnings };
+}
+
+function registeredOverviewChats(): number[] {
+  const databasePath = path.join(
+    process.env.CHATINABOX_DATA_DIR ?? "/var/lib/chatinabox",
+    "chatinabox.sqlite",
+  );
+  if (!existsSync(databasePath)) return [];
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const rows = database.prepare(
+      "SELECT chat_id FROM nexus_dashboards ORDER BY chat_id",
+    ).all() as unknown as { chat_id: number }[];
+    return rows
+      .map((row) => row.chat_id)
+      .filter((chatId) => Number.isSafeInteger(chatId) && chatId < 0);
+  } finally {
+    database.close();
+  }
 }
 
 function configuredWorkerDefaults(): {
@@ -458,6 +663,7 @@ function outputProfile(
     readonly ok: true;
     readonly profile: ReturnType<typeof readExperienceProfile>;
     readonly profilePath: string;
+    readonly telegram?: TelegramIdentitySync;
   },
   json: boolean,
 ): number {
@@ -880,6 +1086,7 @@ Commands:
   send-file FILE [CAPTION]     Send a local file to your Telegram chat
   profile show                 Show the private experience profile
   profile set [OPTIONS]        Update names, symbols, defaults, or setup state
+  profile sync                 Reapply bot and forum identity to Telegram
   profile defaults             Reset to the neutral first-run profile
 
 TARGET can be the 1-based list number, tmux pane id (%4), or unique name.
@@ -887,8 +1094,9 @@ New-session options: --cwd PATH, --model sol|luna|terra,
   --effort low|medium|high|xhigh, --fast, --standard.
   Omitted options use the private profile defaults.
 Media commands use the sole allowed user as the default chat; override with --chat ID.
-Profile options include --assistant-name, --assistant-mark, --overview-name,
-  --overview-emoji, --manager-name, --manager-emoji, --manager-role,
+Profile options include --assistant-name, --assistant-mark, --assistant-photo,
+  --overview-name, --overview-emoji, --group-name, --group-photo,
+  --manager-name, --manager-emoji, --manager-role,
   --manager-topic, --manager-icon, --manager-cwd, --manager-model,
   --manager-effort, --manager-fast|--manager-standard, --default-model,
   --default-effort, --default-fast|--default-standard, --idle-minutes,

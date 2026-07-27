@@ -101,14 +101,25 @@ At the start of a new conversation, run `chatinabox profile show --json`. When
 the profile reports `"setupComplete": false`, become a calm setup guide before
 doing ordinary Lobby work.
 
-Ask one or two useful questions at a time and infer taste from normal language.
-Help the user choose the assistant byline, overview/dashboard identity, manager
-identity and role, worker defaults, and inactivity window. Do not force them
-through every option. If they say “keep it simple,” retain the neutral defaults.
+Start with how they want the workspace to feel, not a settings questionnaire.
+Ask one or two useful questions at a time, infer taste from normal language, and
+propose a coherent set when they want help choosing. This can include the real
+Telegram bot display name and optional profile photo, the forum group title and
+optional group photo, the overview/dashboard identity, manager identity and
+role, worker defaults, and inactivity window. Do not force them through every
+option. If they say “keep it simple,” retain the neutral defaults.
 
-Apply only approved choices with `chatinabox profile set ... --json`, then mark
-the profile complete with `chatinabox profile set --complete --json`. Explain
-how to create a Telegram supergroup with Topics enabled and set up:
+Before applying changes, show one compact preview and get confirmation. Apply
+only approved choices with `chatinabox profile set ... --json`; use
+`--assistant-name`, `--assistant-photo FILE`, `--group-name`, and
+`--group-photo FILE` for the Telegram identity. A photo sent by the user is
+available as a local attachment path. The command prepares a safe square JPEG
+and syncs any already registered forum. Then mark the profile complete with
+`chatinabox profile set --complete --json`.
+
+Explain how to create a Telegram supergroup with Topics enabled and add the bot
+as an administrator. It needs permission to manage topics, pin and delete
+messages, and change group info. Set up:
 
 1. an overview/dashboard topic with `/overview setup`;
 2. a 🔮 manager topic with `/manager setup`;
@@ -116,6 +127,10 @@ how to create a Telegram supergroup with Topics enabled and set up:
 
 Remind them to pin the manager and overview/dashboard topics in the forum list.
 Do not pin bot messages.
+
+`/overview setup` applies the configured group title and photo once the forum
+exists. If a Telegram identity update reports a warning, explain the exact
+missing permission and retry with `chatinabox profile sync --json`.
 
 If an existing manager identity changes later, tell the user to send
 `/manager wake` in that topic; Chatinabox will resync its topic icon, topic

@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title description">
   <title id="title">Chatinabox</title>
-  <desc id="description">Your Codex terminal, carried through Telegram.</desc>
+  <desc id="description">Codex sessions through Telegram.</desc>
   <defs>
     <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
       <path d="M24 0H0V24" fill="none" stroke="#223035" stroke-width="1"/>
@@ -17,7 +17,7 @@
 
   <g fill="#98a3a1" font-family="Consolas, ui-monospace, monospace" font-size="11" letter-spacing="2">
     <text x="64" y="48">REMOTE INSTRUMENT / 01</text>
-    <text x="1042" y="48">REV. 2.0.0</text>
+    <text x="1042" y="48">REV. 2.0.1</text>
   </g>
 
   <text x="59" y="143" fill="#d8ceba" font-family="Georgia, 'Times New Roman', serif" font-size="72" font-style="italic">chatinabox</text>

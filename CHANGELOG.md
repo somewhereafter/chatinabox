@@ -4,6 +4,17 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.0.1 — 2026-07-27
+
+- Extended first-run personalization to the actual Telegram bot name/photo and
+  forum group name/photo, with preview-first setup guidance and retryable sync.
+- Added Codex login, automation-flag, and managed-hook checks to installation
+  and diagnostics.
+- Preserved existing environment settings during upgrades and restored the
+  previous immutable release when activation fails.
+- Made the `/screen` browser dependencies optional for the rest of Chatinabox.
+- Reworked the README into a shorter, factual install and operating guide.
+
 ## 2.0.0 — 2026-07-27
 
 - Added automatic new-topic setup with bounded Git repository discovery,

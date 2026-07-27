@@ -78,3 +78,38 @@ describe("Telegram API backoff", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });
+
+describe("Telegram identity", () => {
+  it("uses native bot and forum identity methods", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      json: async () => ({ ok: true, result: true }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const {
+      tgSetChatPhoto,
+      tgSetChatTitle,
+      tgSetMyName,
+      tgSetMyProfilePhoto,
+    } = await import("../src/telegram");
+    const env = { TG_BOT_TOKEN: "test-token" };
+    const photo = new Blob(["jpeg"], { type: "image/jpeg" });
+
+    await tgSetMyName(env, "mori");
+    await tgSetMyProfilePhoto(env, photo);
+    await tgSetChatTitle(env, -10042, "night shift");
+    await tgSetChatPhoto(env, -10042, photo);
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      "https://api.telegram.org/bottest-token/setMyName",
+      "https://api.telegram.org/bottest-token/setMyProfilePhoto",
+      "https://api.telegram.org/bottest-token/setChatTitle",
+      "https://api.telegram.org/bottest-token/setChatPhoto",
+    ]);
+    const botPhoto = fetchMock.mock.calls[1]?.[1]?.body as FormData;
+    expect(botPhoto.get("photo")).toContain("attach://profile_photo");
+    expect(botPhoto.get("profile_photo")).toBeInstanceOf(Blob);
+    const groupPhoto = fetchMock.mock.calls[3]?.[1]?.body as FormData;
+    expect(groupPhoto.get("chat_id")).toBe("-10042");
+    expect(groupPhoto.get("photo")).toBeInstanceOf(Blob);
+  });
+});

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_EXPERIENCE_PROFILE,
   ExperienceProfileProvider,
+  normalizeExperienceProfile,
   patchExperienceProfile,
   readExperienceProfile,
   writeExperienceProfile,
@@ -14,8 +15,13 @@ describe("Experience profile", () => {
   it("ships neutral first-run defaults while retaining the manager orb", () => {
     expect(DEFAULT_EXPERIENCE_PROFILE).toMatchObject({
       setupComplete: false,
-      assistant: { name: "codex", mark: "⌁" },
-      overview: { name: "overview", emoji: "◉" },
+      assistant: { name: "codex", mark: "⌁", photoPath: "" },
+      overview: {
+        name: "overview",
+        emoji: "◉",
+        groupName: "codex workspace",
+        groupPhotoPath: "",
+      },
       manager: {
         name: "orchestrator",
         topicIconEmoji: "🔮",
@@ -26,8 +32,17 @@ describe("Experience profile", () => {
   it("keeps a custom identity in configuration rather than product code", () => {
     const profile = patchExperienceProfile(DEFAULT_EXPERIENCE_PROFILE, {
       setupComplete: true,
-      assistant: { name: "mori", mark: "✦" },
-      overview: { name: "desk", emoji: "◉" },
+      assistant: {
+        name: "mori",
+        mark: "✦",
+        photoPath: "/var/lib/chatinabox/profile-assets/assistant.jpg",
+      },
+      overview: {
+        name: "desk",
+        emoji: "◉",
+        groupName: "night shift",
+        groupPhotoPath: "/var/lib/chatinabox/profile-assets/group.jpg",
+      },
       manager: {
         name: "Mori",
         emoji: "🪄",
@@ -41,8 +56,17 @@ describe("Experience profile", () => {
 
     expect(profile).toMatchObject({
       setupComplete: true,
-      assistant: { name: "mori", mark: "✦" },
-      overview: { name: "desk", emoji: "◉" },
+      assistant: {
+        name: "mori",
+        mark: "✦",
+        photoPath: "/var/lib/chatinabox/profile-assets/assistant.jpg",
+      },
+      overview: {
+        name: "desk",
+        emoji: "◉",
+        groupName: "night shift",
+        groupPhotoPath: "/var/lib/chatinabox/profile-assets/group.jpg",
+      },
       manager: {
         name: "Mori",
         topicIconEmoji: "🔮",
@@ -69,5 +93,14 @@ describe("Experience profile", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("does not invent a Telegram group name for an older private profile", () => {
+    const legacy = {
+      ...DEFAULT_EXPERIENCE_PROFILE,
+      overview: { name: "nexus", emoji: "🪐" },
+    };
+    const profile = normalizeExperienceProfile(legacy);
+    expect(profile.overview.groupName).toBe("");
   });
 });

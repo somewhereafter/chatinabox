@@ -1,5 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { CodexBridgeClient } from "./codex-bridge-client";
 import { normalizeExperienceProfile } from "./experience-profile";
 
@@ -8,6 +10,7 @@ interface Check {
   readonly label: string;
   readonly detail: string;
   readonly hint?: string;
+  readonly required?: boolean;
 }
 
 async function main(): Promise<void> {
@@ -33,12 +36,16 @@ async function main(): Promise<void> {
     ["/usr/local/bin/codex", "/usr/bin/codex"],
   );
   checks.push(tmux, codex);
-  checks.push(executableCheck(
+  checks.push({
+    ...executableCheck(
     "ImageMagick",
     process.env.CHATINABOX_CONVERT_PATH,
     ["/usr/bin/convert", "/usr/local/bin/convert"],
-  ));
-  checks.push(executableCheck(
+    ),
+    required: false,
+  });
+  checks.push({
+    ...executableCheck(
     "Chrome/Chromium",
     process.env.CHATINABOX_CHROME_PATH,
     [
@@ -47,7 +54,9 @@ async function main(): Promise<void> {
       "/usr/bin/chromium",
       "/usr/bin/chromium-browser",
     ],
-  ));
+    ),
+    required: false,
+  });
 
   if (codex.ok) {
     const version = spawnSync(codex.detail, ["--version"], {
@@ -62,7 +71,39 @@ async function main(): Promise<void> {
         : "could not execute",
       hint: "Run codex --version as root.",
     });
+    const login = spawnSync(codex.detail, ["login", "status"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    checks.push({
+      ok: login.status === 0,
+      label: "Codex login",
+      detail: login.status === 0
+        ? login.stdout.trim() || "authenticated"
+        : "root is not authenticated",
+      hint: "Run sudo codex login.",
+    });
+    const help = spawnSync(codex.detail, ["--help"], {
+      encoding: "utf8",
+      timeout: 3_000,
+    });
+    const helpText = `${help.stdout}\n${help.stderr}`;
+    const requiredFlags = [
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--dangerously-bypass-hook-trust",
+    ];
+    const missingFlags = requiredFlags.filter((flag) => !helpText.includes(flag));
+    checks.push({
+      ok: help.status === 0 && missingFlags.length === 0,
+      label: "Codex automation flags",
+      detail: missingFlags.length === 0
+        ? "full-access and trusted-hook flags available"
+        : `missing: ${missingFlags.join(", ")}`,
+      hint: "Update Codex, then re-run the installer.",
+    });
   }
+
+  checks.push(hooksCheck("/root/.codex/hooks.json"));
 
   const token = process.env.TG_BOT_TOKEN?.trim();
   const allowed = process.env.TG_ALLOWED_USER_IDS?.trim();
@@ -104,6 +145,7 @@ async function main(): Promise<void> {
 
   if (token) {
     const bot = await telegramCall<{
+      id?: number;
       username?: string;
     }>(token, "getMe");
     checks.push({
@@ -114,6 +156,51 @@ async function main(): Promise<void> {
         : "not reachable or token rejected",
       hint: "Verify the BotFather token and outbound HTTPS.",
     });
+    if (bot?.ok && Number.isSafeInteger(bot.result?.id)) {
+      const databasePath = path.join(
+        process.env.CHATINABOX_DATA_DIR || "/var/lib/chatinabox",
+        "chatinabox.sqlite",
+      );
+      for (const chatId of registeredForumChats(databasePath)) {
+        const membership = await telegramCall<{
+          status?: string;
+          can_manage_topics?: boolean;
+          can_pin_messages?: boolean;
+          can_delete_messages?: boolean;
+          can_change_info?: boolean;
+        }>(token, "getChatMember", {
+          chat_id: chatId,
+          user_id: bot.result!.id!,
+        });
+        const member = membership?.result;
+        const creator = member?.status === "creator";
+        const missing = creator
+          ? []
+          : [
+              ["manage topics", member?.can_manage_topics],
+              ["pin messages", member?.can_pin_messages],
+              ["delete messages", member?.can_delete_messages],
+              ["change group info", member?.can_change_info],
+            ].filter(([, enabled]) => enabled !== true)
+              .map(([label]) => label);
+        checks.push({
+          ok: membership?.ok === true &&
+            (creator ||
+              member?.status === "administrator" && missing.length === 0),
+          label: `Forum permissions (${chatId})`,
+          detail: membership?.ok !== true
+            ? "could not inspect the bot membership"
+            : creator
+            ? "group creator"
+            : missing.length === 0
+            ? "topics, pins, deletes, and group info allowed"
+            : `missing: ${missing.join(", ")}`,
+          hint:
+            "Enable topics, pins, deletes, and changing group info in the " +
+            "bot's Telegram administrator permissions.",
+        });
+      }
+    }
 
     const webhook = await telegramCall<{ url?: string }>(
       token,
@@ -132,20 +219,25 @@ async function main(): Promise<void> {
     });
   }
 
-  const failed = checks.filter((check) => !check.ok);
+  const failed = checks.filter((check) => !check.ok && check.required !== false);
+  const warnings = checks.filter((check) =>
+    !check.ok && check.required === false
+  );
   if (json) {
     process.stdout.write(
       `${JSON.stringify({
         ok: failed.length === 0,
         checks,
         failed: failed.length,
+        warnings: warnings.length,
       })}\n`,
     );
   } else {
     process.stdout.write("Chatinabox doctor\n\n");
     for (const check of checks) {
       process.stdout.write(
-        `${check.ok ? "✓" : "✗"} ${check.label}\n  ${check.detail}\n`,
+        `${check.ok ? "✓" : check.required === false ? "!" : "✗"} ` +
+          `${check.label}\n  ${check.detail}\n`,
       );
     }
     if (failed.length === 0) {
@@ -156,8 +248,70 @@ async function main(): Promise<void> {
         if (check.hint) process.stdout.write(`- ${check.hint}\n`);
       }
     }
+    if (warnings.length > 0) {
+      process.stdout.write("\nOptional features:\n");
+      for (const check of warnings) {
+        if (check.hint) process.stdout.write(`- ${check.hint}\n`);
+      }
+    }
   }
   process.exitCode = failed.length === 0 ? 0 : 1;
+}
+
+function registeredForumChats(databasePath: string): number[] {
+  if (!existsSync(databasePath)) return [];
+  try {
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      const rows = database.prepare(
+        "SELECT chat_id FROM nexus_dashboards ORDER BY chat_id",
+      ).all() as unknown as { chat_id: number }[];
+      return rows
+        .map((row) => row.chat_id)
+        .filter((chatId) => Number.isSafeInteger(chatId) && chatId < 0);
+    } finally {
+      database.close();
+    }
+  } catch {
+    return [];
+  }
+}
+
+function hooksCheck(hooksPath: string): Check {
+  if (!existsSync(hooksPath)) {
+    return {
+      ok: false,
+      label: "Codex hooks",
+      detail: `missing: ${hooksPath}`,
+      hint: "Re-run the installer to merge the Chatinabox hooks.",
+    };
+  }
+  try {
+    const text = readFileSync(hooksPath, "utf8");
+    const required = [
+      "SessionStart",
+      "UserPromptSubmit",
+      "Stop",
+      "SessionEnd",
+      "/opt/chatinabox/current/",
+    ];
+    const missing = required.filter((value) => !text.includes(value));
+    return {
+      ok: missing.length === 0,
+      label: "Codex hooks",
+      detail: missing.length === 0
+        ? "installed without replacing unrelated hooks"
+        : `missing managed entries: ${missing.join(", ")}`,
+      hint: "Re-run the installer to repair the managed hook entries.",
+    };
+  } catch {
+    return {
+      ok: false,
+      label: "Codex hooks",
+      detail: `could not read ${hooksPath}`,
+      hint: "Check root ownership and re-run the installer.",
+    };
+  }
 }
 
 function profileCheck(profilePath: string): Check {
@@ -261,8 +415,14 @@ function serviceCheck(label: string, unit: string): Check {
 async function telegramCall<T>(
   token: string,
   method: string,
+  body?: Record<string, unknown>,
 ): Promise<{ ok?: boolean; result?: T } | null> {
   return fetch(`https://api.telegram.org/bot${token}/${method}`, {
+    method: body ? "POST" : "GET",
+    ...(body && {
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
     signal: AbortSignal.timeout(5_000),
   }).then((response) => response.json() as Promise<{
     ok?: boolean;

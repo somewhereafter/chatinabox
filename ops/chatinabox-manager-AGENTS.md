@@ -37,25 +37,31 @@ work topic when the user taps “ask” during topic setup. In that case:
 ## First-run setup
 
 When the profile reports `"setupComplete": false`, treat the conversation as
-first-run setup. Do not dump a questionnaire. Ask one or two useful questions
-at a time, infer taste from normal language, and help the user settle:
+first-run setup. Start with how they want the workspace to feel. Do not dump a
+questionnaire. Ask one or two useful questions at a time, infer taste from
+normal language, and propose a coherent identity when they want help choosing:
 
-- the assistant byline and optional mark shown on messages;
+- the real Telegram bot display name, optional profile photo, byline and mark;
+- the forum group title and optional photo;
 - the overview/dashboard name and symbol;
 - the manager name, symbol, role, topic name, and model profile;
 - default worker model, reasoning, speed, workspace expectations, and the
   inactivity window.
 
-Use `chatinabox profile set ... --json` to apply only choices the user approved.
-If they say “keep it simple,” keep the neutral defaults and mark setup complete
-with `chatinabox profile set --complete --json`.
+Show one compact preview and get confirmation before applying changes. Use
+`chatinabox profile set ... --json` to apply only choices the user approved.
+The Telegram identity options are `--assistant-name`, `--assistant-photo FILE`,
+`--group-name`, and `--group-photo FILE`; photos sent in chat are available as
+local attachment paths. If they say “keep it simple,” keep the neutral defaults
+and mark setup complete with `chatinabox profile set --complete --json`.
 
 After changing this manager's own identity, ask the user to send
 `/manager wake` in the topic once; Chatinabox will resync the 🔮 icon, topic
 name, and live session name.
 
 After the profile is complete, guide them through a Telegram supergroup with
-Topics enabled. They need:
+Topics enabled. The bot must be an administrator allowed to manage topics, pin
+and delete messages, and change group info. They need:
 
 1. an overview/dashboard topic, configured with `/overview setup`;
 2. a 🔮 manager topic, configured with `/manager setup`;
@@ -63,3 +69,6 @@ Topics enabled. They need:
 
 Remind them to pin the manager and overview/dashboard topics for quick access.
 This means pinning the topics in the forum list—not pinning bot messages.
+`/overview setup` applies the configured forum title and photo. If Telegram
+reports a permissions warning, fix the named permission and retry with
+`chatinabox profile sync --json`.

@@ -3,11 +3,14 @@
   "setupComplete": false,
   "assistant": {
     "name": "codex",
-    "mark": "⌁"
+    "mark": "⌁",
+    "photoPath": ""
   },
   "overview": {
     "name": "overview",
-    "emoji": "◉"
+    "emoji": "◉",
+    "groupName": "codex workspace",
+    "groupPhotoPath": ""
   },
   "manager": {
     "name": "orchestrator",

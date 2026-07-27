@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import {
   buildInlineKeyboard,
   issueCallbackReference,
@@ -7,6 +8,8 @@ import {
 import {
   tgAnswerCallbackQuery,
   tgEditRichHtml,
+  tgSetChatPhoto,
+  tgSetChatTitle,
   tgSend,
   tgSendRichHtml,
   escapeTelegramHtml,
@@ -143,8 +146,46 @@ export class OverviewController {
     // The overview is deliberately never a conversational Codex route.
     this.dependencies.store.detachCodex(chatId, ownerUserId!);
     this.dependencies.store.registerOverview(chatId, ownerUserId!, threadId);
+    await this.syncForumIdentity(chatId);
     await this.refresh(chatId, true);
     return true;
+  }
+
+  private async syncForumIdentity(chatId: number): Promise<void> {
+    const profile = this.profile();
+    const title = profile.overview.groupName
+      ? await tgSetChatTitle(
+          this.dependencies.env,
+          chatId,
+          profile.overview.groupName,
+        ).catch(() => null)
+      : null;
+    if (profile.overview.groupName && !title?.ok) {
+      await tgSend(
+        this.dependencies.env,
+        chatId,
+        "The dashboard is ready, but I could not apply the group name. " +
+          "Give the bot permission to change group info, then run " +
+          "<code>chatinabox profile sync --json</code> from the manager.",
+      ).catch(() => undefined);
+      return;
+    }
+    if (!profile.overview.groupPhotoPath) return;
+    const photo = await tgSetChatPhoto(
+      this.dependencies.env,
+      chatId,
+      new Blob([readFileSync(profile.overview.groupPhotoPath)], {
+        type: "image/jpeg",
+      }),
+    ).catch(() => null);
+    if (!photo?.ok) {
+      await tgSend(
+        this.dependencies.env,
+        chatId,
+        "The group name is set, but I could not apply its photo. " +
+          "Check the bot's group-info permission and run profile sync again.",
+      ).catch(() => undefined);
+    }
   }
 
   async handleCallback(callback: TelegramCallbackQuery): Promise<boolean> {

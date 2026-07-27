@@ -13,6 +13,8 @@ describe("First-run onboarding", () => {
     const welcome = formatFirstRunWelcome();
     expect(welcome).toContain("first conversation is setup");
     expect(welcome).toContain("keep it simple");
+    expect(welcome).toContain("bot name and photo");
+    expect(welcome).toContain("forum name and photo");
     expect(welcome).toContain("pin the 🔮 manager/orchestrator");
     expect(welcome).toContain("overview/dashboard topic");
     expect(welcome).toContain("overview/dashboard topic");

@@ -17,10 +17,13 @@ export interface ExperienceProfile {
   readonly assistant: {
     readonly name: string;
     readonly mark: string;
+    readonly photoPath: string;
   };
   readonly overview: {
     readonly name: string;
     readonly emoji: string;
+    readonly groupName: string;
+    readonly groupPhotoPath: string;
   };
   readonly manager: {
     readonly name: string;
@@ -58,10 +61,13 @@ export const DEFAULT_EXPERIENCE_PROFILE: ExperienceProfile = {
   assistant: {
     name: "codex",
     mark: "⌁",
+    photoPath: "",
   },
   overview: {
     name: "overview",
     emoji: "◉",
+    groupName: "codex workspace",
+    groupPhotoPath: "",
   },
   manager: {
     name: "orchestrator",
@@ -163,10 +169,15 @@ export function normalizeExperienceProfile(
     assistant: {
       name: text(assistant.name, "codex", 1, 32),
       mark: text(assistant.mark, "⌁", 0, 16),
+      photoPath: identityAssetPath(assistant.photoPath),
     },
     overview: {
       name: text(overview.name, "overview", 1, 32),
       emoji: text(overview.emoji, "◉", 0, 8),
+      // Empty keeps pre-2.0.1 profiles from unexpectedly renaming an existing
+      // Telegram forum. New profiles contain the explicit neutral default.
+      groupName: text(overview.groupName, "", 0, 128),
+      groupPhotoPath: identityAssetPath(overview.groupPhotoPath),
     },
     manager: {
       name: text(manager.name, "orchestrator", 1, 32),
@@ -226,6 +237,15 @@ function managerWorkspace(value: unknown, fallback: string): string {
       normalized !== "/var/lib/chatinabox-bridge/"
     ? normalized
     : fallback;
+}
+
+function identityAssetPath(value: unknown): string {
+  if (typeof value !== "string" || value.length > 1_024) return "";
+  const normalized = path.posix.normalize(value.trim());
+  return normalized.startsWith("/var/lib/chatinabox/profile-assets/") &&
+      normalized.endsWith(".jpg")
+    ? normalized
+    : "";
 }
 
 function workerModel(value: unknown, fallback: WorkerModel): WorkerModel {

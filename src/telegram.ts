@@ -107,6 +107,64 @@ async function tgCall<T>(
   return data;
 }
 
+async function tgMultipartCall<T>(
+  env: BotEnv,
+  method: string,
+  form: FormData,
+): Promise<TelegramResponse<T>> {
+  const response = await fetch(`${API}/bot${env.TG_BOT_TOKEN}/${method}`, {
+    method: "POST",
+    body: form,
+  });
+  const data = (await response.json()) as TelegramResponse<T>;
+  if (!data.ok) {
+    console.error(
+      `[Telegram] ${method} failed (code=${data.error_code ?? "unknown"})`,
+    );
+  }
+  return data;
+}
+
+/** Apply the configured display name to the Telegram bot account. */
+export async function tgSetMyName(env: BotEnv, name: string) {
+  return tgCall<boolean>(env, "setMyName", { name });
+}
+
+/** Apply a static JPEG as the Telegram bot account's profile photo. */
+export async function tgSetMyProfilePhoto(env: BotEnv, photo: Blob) {
+  const form = new FormData();
+  form.set("photo", JSON.stringify({
+    type: "static",
+    photo: "attach://profile_photo",
+  }));
+  form.set("profile_photo", photo, "chatinabox-profile.jpg");
+  return tgMultipartCall<boolean>(env, "setMyProfilePhoto", form);
+}
+
+/** Apply the configured title to a Telegram forum group. */
+export async function tgSetChatTitle(
+  env: BotEnv,
+  chatId: number,
+  title: string,
+) {
+  return tgCall<boolean>(env, "setChatTitle", {
+    chat_id: chatId,
+    title,
+  });
+}
+
+/** Apply a static JPEG as a Telegram forum group's photo. */
+export async function tgSetChatPhoto(
+  env: BotEnv,
+  chatId: number,
+  photo: Blob,
+) {
+  const form = new FormData();
+  form.set("chat_id", String(chatId));
+  form.set("photo", photo, "chatinabox-group.jpg");
+  return tgMultipartCall<boolean>(env, "setChatPhoto", form);
+}
+
 /** Send a text message. Returns the sent Message. */
 export async function tgSend(
   env: BotEnv,
