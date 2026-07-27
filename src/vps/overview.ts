@@ -29,6 +29,10 @@ import {
   DEFAULT_EXPERIENCE_PROFILE,
   type ExperienceProfile,
 } from "./experience-profile";
+import {
+  retireWorkTopicSetup,
+  sendControlTopicConflict,
+} from "./control-topics";
 import { abortableSleep } from "./sleep";
 import type {
   ChatinaboxStore,
@@ -138,8 +142,10 @@ export class OverviewController {
       );
       return true;
     }
-    if (subcommand === "refresh") {
-      if (!this.isOverviewChat(chatId)) {
+    const threadId = overviewThreadId(message);
+    const existing = this.dependencies.store.overviewDashboard(chatId);
+    if (subcommand === "refresh" || (!subcommand && existing)) {
+      if (!existing) {
         await tgSend(
           this.dependencies.env,
           chatId,
@@ -151,11 +157,58 @@ export class OverviewController {
       await this.refresh(chatId, true);
       return true;
     }
+    if (!subcommand) {
+      await tgSend(
+        this.dependencies.env,
+        chatId,
+        "Run <code>/forum setup</code> in General for the easiest setup, or " +
+          "<code>/overview setup</code> here to use this topic.",
+        message.message_id,
+        undefined,
+        threadId || undefined,
+      );
+      return true;
+    }
+    if (existing && existing.message_thread_id !== threadId) {
+      await sendControlTopicConflict(
+        this.dependencies.env,
+        chatId,
+        message.message_id,
+        threadId,
+        "overview",
+        existing.message_thread_id,
+      );
+      return true;
+    }
+    await this.setupTopic(chatId, ownerUserId!, threadId);
+    return true;
+  }
 
-    const threadId = overviewThreadId(message);
-    // The overview is deliberately never a conversational Codex route.
-    this.dependencies.store.detachCodex(chatId, ownerUserId!);
-    this.dependencies.store.registerOverview(chatId, ownerUserId!, threadId);
+  async setupTopic(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId: number,
+  ): Promise<boolean> {
+    const existing = this.dependencies.store.overviewDashboard(chatId);
+    if (existing && existing.message_thread_id !== messageThreadId) {
+      return false;
+    }
+    await retireWorkTopicSetup(
+      this.dependencies.env,
+      this.dependencies.store,
+      chatId,
+      ownerUserId,
+      messageThreadId,
+      "overview",
+    );
+    if (!existing) {
+      // The overview is deliberately never a conversational Codex route.
+      this.dependencies.store.registerOverview(
+        chatId,
+        ownerUserId,
+        messageThreadId,
+      );
+    }
     await this.syncForumIdentity(chatId);
     await this.refresh(chatId, true);
     return true;

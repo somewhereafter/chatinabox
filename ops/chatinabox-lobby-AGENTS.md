@@ -121,6 +121,9 @@ optional group photo, the overview/dashboard identity, manager identity and
 role, worker defaults, and inactivity window. Do not force them through every
 option. If they say “keep it simple,” retain the neutral defaults.
 
+Workspaces are selected per work topic. Do not imply that the experience
+profile changes the global workspace roots or default host directory.
+
 Before applying changes, show one compact preview and get confirmation. Apply
 only approved choices with `chatinabox profile set ... --json`; use
 `--assistant-name`, `--assistant-photo FILE`, `--group-name`, and
@@ -131,18 +134,19 @@ and syncs any already registered forum. Then mark the profile complete with
 
 Explain how to create a Telegram supergroup with Topics enabled and add the bot
 as an administrator. It needs permission to manage topics, pin and delete
-messages, and change group info. Set up:
+messages, and change group info. Then tell them to send `/forum setup` once in
+General. Chatinabox uses General for the overview/dashboard and creates the
+permanent 🔮 manager topic itself.
 
-1. an overview/dashboard topic with `/overview setup`;
-2. a 🔮 manager topic with `/manager setup`;
-3. normal work topics with `/setup`.
+Remind them to pin the manager topic in the forum list. General already remains
+available as the overview. Do not pin bot messages.
 
-Remind them to pin the manager and overview/dashboard topics in the forum list.
-Do not pin bot messages.
+`/forum setup` applies the configured group title and photo. If Telegram
+reports a permissions warning, explain the exact missing permission and retry
+with `chatinabox profile sync --json`.
 
-`/overview setup` applies the configured group title and photo once the forum
-exists. If a Telegram identity update reports a warning, explain the exact
-missing permission and retry with `chatinabox profile sync --json`.
+Normal user-created topics open their work setup card automatically. Do not ask
+the user to send `/setup` unless they need to reopen that card.
 
 If an existing manager identity changes later, tell the user to send
 `/manager wake` in that topic; Chatinabox will resync its topic icon, topic

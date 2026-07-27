@@ -493,26 +493,26 @@ describe("Codex Telegram attachments", () => {
     store.close();
   });
 
-  it("creates a linked task topic without replacing the Nox topic", async () => {
+  it("creates a linked task topic without replacing the Manager topic", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-new-topic-"));
     temporaryRoots.push(root);
     const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
-    const nox = {
+    const manager = {
       serverPid: 100,
       paneId: "%10",
       panePid: 210,
       sessionName: "codex",
-      windowName: "🪄 Nox · orchestrator",
+      windowName: "🪄 Guide · orchestrator",
       windowIndex: 0,
-      cwd: "/var/lib/chatinabox-bridge/nox",
+      cwd: "/var/lib/chatinabox-bridge/manager",
       active: true,
       busy: false,
       codexPid: 310,
       assistantName: "Sol" as const,
-      sessionId: "nox-session",
+      sessionId: "manager-session",
     };
     const worker = {
-      ...nox,
+      ...manager,
       paneId: "%21",
       panePid: 221,
       windowName: "GitHub Token Graph",
@@ -521,13 +521,13 @@ describe("Codex Telegram attachments", () => {
       sessionId: "worker-session",
     };
     store.registerManagerTopic(-10042, 42, 68);
-    store.setManagerTarget(-10042, nox);
-    store.attachCodex(-10042, 42, nox, 68);
+    store.setManagerTarget(-10042, manager);
+    store.attachCodex(-10042, 42, manager, 68);
     const event = {
       id: 1,
       kind: "session_handoff" as const,
-      target: nox,
-      sessionId: "nox-session",
+      target: manager,
+      sessionId: "manager-session",
       turnId: "turn",
       assistantName: "Sol" as const,
       message: JSON.stringify({
@@ -547,7 +547,7 @@ describe("Codex Telegram attachments", () => {
         if (request.op === "list") {
           return {
             ok: true,
-            panes: [nox, worker],
+            panes: [manager, worker],
             recent: [],
             totalSessions: 2,
             usage: null,
@@ -631,8 +631,8 @@ describe("Codex Telegram attachments", () => {
       ...source,
       paneId: "%10",
       panePid: 210,
-      windowName: "🪄 Nox · orchestrator",
-      cwd: "/var/lib/chatinabox-bridge/nox",
+      windowName: "🪄 Guide · orchestrator",
+      cwd: "/var/lib/chatinabox-bridge/manager",
       codexPid: 310,
     };
     store.attachCodex(-10042, 42, source, 20);
@@ -724,8 +724,8 @@ describe("Codex Telegram attachments", () => {
       ...source,
       paneId: "%10",
       panePid: 210,
-      windowName: "🪄 Nox · orchestrator",
-      cwd: "/var/lib/chatinabox-bridge/nox",
+      windowName: "🪄 Guide · orchestrator",
+      cwd: "/var/lib/chatinabox-bridge/manager",
       codexPid: 310,
     };
     store.attachCodex(-10042, 42, source, 20);
@@ -2442,7 +2442,9 @@ describe("Codex Telegram attachments", () => {
     expect(help).toContain("/key down down enter");
     expect(help).toContain("down down right");
     expect(help).toContain("/model");
-    expect(help).toContain("persistent 🪄 Lobby");
+    expect(help).toContain("return to Lobby in private");
+    expect(help).toContain("open Manager in a forum");
+    expect(help).toContain("/forum setup");
     expect(help).toContain("/codex off");
   });
 

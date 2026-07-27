@@ -26,6 +26,105 @@ describe("Overview dashboard", () => {
     expect(overviewThreadId({ message_thread_id: 42 })).toBe(42);
   });
 
+  it("promotes a manual topic without leaving work setup or an attachment", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-overview-promote-"));
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const worker = pane("temporary worker", "Sol", false);
+    store.rememberTopic(-10042, 42, 7, "Overview", root);
+    store.updateTopicSetup(-10042, 42, 7, { starter_message_id: 700 });
+    store.attachCodex(-10042, 42, worker, 7);
+    const calls: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      calls.push(
+        JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+      );
+      return {
+        json: async () => ({ ok: true, result: { message_id: 900 } }),
+      };
+    }));
+    const controller = new OverviewController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: {
+        request: vi.fn(async () => ({
+          ok: true as const,
+          totalSessions: 0,
+          recent: [],
+          usage: null,
+          panes: [],
+        })),
+      },
+      profile: () => customProfile,
+    });
+
+    await controller.handleCommand({
+      message_id: 10,
+      chat: { id: -10042, type: "supergroup" },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      text: "/overview setup",
+      date: 1,
+    }, { name: "overview", argument: "setup" });
+
+    expect(store.overviewDashboard(-10042)?.message_thread_id).toBe(7);
+    expect(store.topicSetup(-10042, 42, 7)).toBeNull();
+    expect(store.codexAttachment(-10042, 42, 7)).toBeNull();
+    expect(JSON.stringify(calls)).toContain("reserved for Chatinabox control");
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("does not move an existing Overview when setup is sent elsewhere", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-overview-guard-"));
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    store.registerOverview(-10042, 42, 0);
+    const requests = vi.fn();
+    const sends: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      sends.push(
+        JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+      );
+      return {
+        json: async () => ({ ok: true, result: { message_id: 900 } }),
+      };
+    }));
+    const controller = new OverviewController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: { request: requests },
+      profile: () => customProfile,
+    });
+
+    await controller.handleCommand({
+      message_id: 10,
+      chat: { id: -10042, type: "supergroup" },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      text: "/overview setup",
+      date: 1,
+    }, { name: "overview", argument: "setup" });
+
+    expect(store.overviewDashboard(-10042)?.message_thread_id).toBe(0);
+    expect(requests).not.toHaveBeenCalled();
+    expect(JSON.stringify(sends)).toContain("already set up");
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  });
+
   it("excludes the Lobby and splits running workers into working and idle", () => {
     const stats = overviewStatsFromBridge({
       ok: true,

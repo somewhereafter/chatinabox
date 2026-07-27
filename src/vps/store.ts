@@ -1608,6 +1608,17 @@ export class ChatinaboxStore {
     `).all() as unknown as TopicSetupRow[];
   }
 
+  deleteTopicSetup(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId: number,
+  ): boolean {
+    return this.db.prepare(`
+      DELETE FROM topic_setups
+      WHERE chat_id = ? AND owner_user_id = ? AND message_thread_id = ?
+    `).run(chatId, ownerUserId, messageThreadId).changes > 0;
+  }
+
   rememberTopic(
     chatId: number,
     ownerUserId: number,

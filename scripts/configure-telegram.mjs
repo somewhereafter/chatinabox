@@ -2,7 +2,8 @@ const token = process.env.TG_BOT_TOKEN?.trim();
 if (!token) throw new Error("TG_BOT_TOKEN is required");
 
 const commands = [
-  { command: "setup", description: "Start a new chat in this topic" },
+  { command: "forum", description: "Set up this forum from General" },
+  { command: "setup", description: "Reopen setup for this work topic" },
   { command: "overview", description: "Set up or refresh the dashboard" },
   { command: "manager", description: "Set up or wake the workspace guide" },
   { command: "codex", description: "Sessions, connection, and controls" },

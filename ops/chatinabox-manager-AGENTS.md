@@ -51,8 +51,10 @@ normal language, and propose a coherent identity when they want help choosing:
 - the forum group title and optional photo;
 - the overview/dashboard name and symbol;
 - the manager name, symbol, role, topic name, and model profile;
-- default worker model, reasoning, speed, workspace expectations, and the
-  inactivity window.
+- default worker model, reasoning, speed, and the inactivity window.
+
+Workspaces are selected per work topic. Do not imply that the experience
+profile changes the global workspace roots or default host directory.
 
 Show one compact preview and get confirmation before applying changes. Use
 `chatinabox profile set ... --json` to apply only choices the user approved.
@@ -67,14 +69,15 @@ name, and live session name.
 
 After the profile is complete, guide them through a Telegram supergroup with
 Topics enabled. The bot must be an administrator allowed to manage topics, pin
-and delete messages, and change group info. They need:
+and delete messages, and change group info. Tell them to send `/forum setup`
+once in General. Chatinabox uses General for the overview/dashboard and creates
+the permanent 🔮 manager topic itself.
 
-1. an overview/dashboard topic, configured with `/overview setup`;
-2. a 🔮 manager topic, configured with `/manager setup`;
-3. one normal work topic, configured with `/setup`.
+Remind them to pin the manager topic for quick access. General already remains
+available as the overview. This means pinning the topic in the forum list—not a
+bot message. `/forum setup` applies the configured forum title and photo. If
+Telegram reports a permissions warning, fix the named permission and retry
+with `chatinabox profile sync --json`.
 
-Remind them to pin the manager and overview/dashboard topics for quick access.
-This means pinning the topics in the forum list—not pinning bot messages.
-`/overview setup` applies the configured forum title and photo. If Telegram
-reports a permissions warning, fix the named permission and retry with
-`chatinabox profile sync --json`.
+Normal user-created topics open their work setup card automatically. Do not ask
+the user to send `/setup` unless they need to reopen that card.

@@ -2,6 +2,7 @@ import path from "node:path";
 import {
   buildInlineKeyboard,
   issueCallbackReference,
+  LEGACY_TOPIC_MANAGER_ACTION,
   parseCallbackReference,
   type InlineKeyboardButtonInput,
   type TelegramInlineKeyboardMarkup,
@@ -37,6 +38,10 @@ import {
   DEFAULT_EXPERIENCE_PROFILE,
   type ExperienceProfile,
 } from "./experience-profile";
+import {
+  controlTopicRole,
+  controlTopicSetupBlockedText,
+} from "./control-topics";
 import { abortableSleep } from "./sleep";
 import type {
   CodexAttachmentRow,
@@ -227,6 +232,25 @@ export class TopicSessionController {
   ): Promise<boolean> {
     const identity = topicIdentity(message);
     if (!identity) return false;
+    const reservedRole = controlTopicRole(
+      this.dependencies.store,
+      identity.chatId,
+      identity.messageThreadId,
+    );
+    if (reservedRole) {
+      if (command?.name === "setup") {
+        await tgSend(
+          this.dependencies.env,
+          identity.chatId,
+          controlTopicSetupBlockedText(reservedRole),
+          message.message_id,
+          undefined,
+          identity.messageThreadId,
+        );
+        return true;
+      }
+      return false;
+    }
 
     if (message.forum_topic_created) {
       const name = normalizeTopicName(message.forum_topic_created.name);
@@ -399,6 +423,28 @@ export class TopicSessionController {
     if (!parsed.ok || !parsed.value.action.startsWith("topic_setup.")) {
       return false;
     }
+    const reservedRole = controlTopicRole(
+      this.dependencies.store,
+      chatId!,
+      messageThreadId,
+    );
+    if (reservedRole) {
+      await tgAnswerCallbackQuery(this.dependencies.env, callback.id, {
+        text: `${
+          reservedRole === "overview" ? "Overview" : "Manager"
+        } is a control topic.`,
+        showAlert: true,
+        cacheTime: 0,
+      }).catch(() => undefined);
+      await tgEditRichHtml(
+        this.dependencies.env,
+        chatId!,
+        messageId!,
+        controlTopicSetupBlockedText(reservedRole),
+        emptyKeyboard(),
+      ).catch(() => undefined);
+      return true;
+    }
     await tgAnswerCallbackQuery(this.dependencies.env, callback.id, {
       text: setupCallbackAnswer(parsed.value.action),
       cacheTime: 0,
@@ -528,10 +574,10 @@ export class TopicSessionController {
             parsed.value.payload,
           ));
         return true;
-      case "topic_setup.nox":
+      case "topic_setup.manager":
         await this.runTopicSetupOperation(
           row,
-          () => this.startNoxGuide(row, messageId!),
+          () => this.startManagerGuide(row, messageId!),
         );
         return true;
       case "topic_setup.back":
@@ -552,6 +598,13 @@ export class TopicSessionController {
           messageId!,
         );
         return true;
+    }
+    if (parsed.value.action === LEGACY_TOPIC_MANAGER_ACTION) {
+      await this.runTopicSetupOperation(
+        row,
+        () => this.startManagerGuide(row, messageId!),
+      );
+      return true;
     }
     await this.editSetupCard(
       chatId!,
@@ -790,7 +843,7 @@ export class TopicSessionController {
       | "topic_setup.sessions"
       | "topic_setup.attach"
       | "topic_setup.resume"
-      | "topic_setup.nox"
+      | "topic_setup.manager"
       | "topic_setup.back"
       | "topic_setup.start",
     payload: Record<string, unknown> = {},
@@ -1036,7 +1089,7 @@ export class TopicSessionController {
     }
   }
 
-  private async startNoxGuide(
+  private async startManagerGuide(
     row: TopicSetupRow,
     messageId: number,
   ): Promise<void> {
@@ -1045,7 +1098,7 @@ export class TopicSessionController {
       this.dependencies.env,
       row.chat_id,
       messageId,
-      formatStartingNoxCard(manager.name),
+      formatStartingManagerCard(manager.name),
       emptyKeyboard(),
     ).catch(() => undefined);
     const result = await this.bridge.request({
@@ -1074,7 +1127,7 @@ export class TopicSessionController {
     messageId: number,
     pane: CodexPane,
     preferredTopicName?: string,
-    noxGuide = false,
+    managerGuide = false,
   ): Promise<void> {
     let topicName = row.topic_name;
     const candidateName = normalizeTopicName(preferredTopicName ?? pane.windowName);
@@ -1126,8 +1179,8 @@ export class TopicSessionController {
       this.dependencies.env,
       row.chat_id,
       messageId,
-      noxGuide
-        ? formatNoxReadyCard(this.profile().manager.name, topicName)
+      managerGuide
+        ? formatManagerReadyCard(this.profile().manager.name, topicName)
         : formatAdoptedCard(topicName, pane),
       emptyKeyboard(),
     ).catch(() => undefined);
@@ -1494,7 +1547,7 @@ export class TopicSessionController {
         await this.issueSetupButton(
           row,
           `${this.profile().manager.emoji} ask ${this.profile().manager.name}`,
-          "topic_setup.nox",
+          "topic_setup.manager",
         ),
       ],
     ]);
@@ -1711,14 +1764,14 @@ function formatResumingSavedCard(session: CodexRecentSession): string {
   );
 }
 
-function formatStartingNoxCard(name: string): string {
+function formatStartingManagerCard(name: string): string {
   return (
     `<mark>calling ${escapeTelegramHtml(name)}…</mark>\n\n` +
     "Preparing a natural-language setup guide for this topic."
   );
 }
 
-function formatNoxReadyCard(name: string, topicName: string): string {
+function formatManagerReadyCard(name: string, topicName: string): string {
   return (
     `<mark>${escapeTelegramHtml(name.toLowerCase())} · setup guide</mark>\n\n` +
     `<b>${escapeTelegramHtml(topicName)}</b>\n\n` +
@@ -1844,10 +1897,13 @@ function sessionDefaults(profile: ExperienceProfile): {
 }
 
 function setupCallbackAnswer(action: string): string {
+  if (action === LEGACY_TOPIC_MANAGER_ACTION) {
+    return "Calling setup guide…";
+  }
   switch (action) {
     case "topic_setup.start":
       return "Starting chat…";
-    case "topic_setup.nox":
+    case "topic_setup.manager":
       return "Calling setup guide…";
     case "topic_setup.name":
       return "Send a new name";

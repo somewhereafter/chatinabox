@@ -45,6 +45,51 @@ describe("Manager topic", () => {
     );
   });
 
+  it("does not move an existing Manager when setup or wake is sent elsewhere", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-manager-guard-"));
+    roots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    store.registerManagerTopic(-10042, 42, 2);
+    const bridge = { request: vi.fn() };
+    const sends: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+      sends.push(
+        JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+      );
+      return {
+        json: async () => ({ ok: true, result: { message_id: 1_000 } }),
+      };
+    }));
+    const controller = new ManagerController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge,
+      profile: () => personalProfile,
+    });
+
+    await controller.handleCommand({
+      message_id: 10,
+      chat: { id: -10042, type: "supergroup" },
+      message_thread_id: 3,
+      is_topic_message: true,
+      from: { id: 42 },
+      text: "/manager wake",
+      date: 1,
+    }, { name: "manager", argument: "wake" });
+
+    expect(store.managerTopic(-10042)?.message_thread_id).toBe(2);
+    expect(bridge.request).not.toHaveBeenCalled();
+    expect(JSON.stringify(sends)).toContain("already set up");
+    expect(JSON.stringify(sends)).toContain("https://t.me/c/42/2");
+    store.close();
+  });
+
   it("creates and persistently attaches a dedicated high-effort Sol worker", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-wizard-"));
     roots.push(root);

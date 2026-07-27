@@ -9,15 +9,15 @@ import {
 } from "../src/vps/experience-profile";
 
 describe("First-run onboarding", () => {
-  it("opens a conversational setup and names the two pinned control topics", () => {
+  it("opens a conversational setup and points to one forum bootstrap", () => {
     const welcome = formatFirstRunWelcome();
     expect(welcome).toContain("first conversation is setup");
     expect(welcome).toContain("keep it simple");
     expect(welcome).toContain("bot name and photo");
     expect(welcome).toContain("forum name and photo");
     expect(welcome).toContain("pin the 🔮 manager/orchestrator");
-    expect(welcome).toContain("overview/dashboard topic");
-    expect(welcome).toContain("overview/dashboard topic");
+    expect(welcome).toContain("/forum setup");
+    expect(welcome).toContain("General holds the overview/dashboard");
   });
 
   it("summarizes a configured profile before a settings conversation", () => {
