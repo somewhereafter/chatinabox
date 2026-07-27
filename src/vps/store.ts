@@ -69,6 +69,7 @@ export interface CodexStatusSnapshot {
   readonly queuedMessages: number;
   readonly replyToMessageId: number | null;
   readonly startedAt: number;
+  readonly lastUpdateAt?: number;
 }
 
 export interface CodexQueueStatusRow extends CodexStatusRow {

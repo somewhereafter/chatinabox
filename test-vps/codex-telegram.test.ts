@@ -873,6 +873,84 @@ describe("Codex Telegram attachments", () => {
     store.close();
   });
 
+  it("refreshes a silent working timer every fifteen seconds without faking activity", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-heartbeat-"));
+    temporaryRoots.push(root);
+    let now = 1_800_000_000_000;
+    const store = new ChatinaboxStore(
+      path.join(root, "state.sqlite"),
+      () => now,
+    );
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "heartbeat",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(-10042, 42, pane, 7);
+    store.setCodexStatus(-10042, 42, pane, 700, {
+      statusKind: "state_waiting_terminal",
+      toolCalls: 1,
+      editedFiles: 0,
+      exploredThings: 2,
+      activeShells: 1,
+      queuedMessages: 0,
+      replyToMessageId: 650,
+      startedAt: now - 60_000,
+    });
+    const actualUpdatedAt =
+      store.codexStatus(-10042, 42, pane)!.updated_at;
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ method, body });
+      return { json: async () => ({ ok: true, result: true }) };
+    }));
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: { request: vi.fn() } as never,
+      now: () => now,
+    });
+
+    now += 14_999;
+    await controller.refreshStaleTransientTimersOnce();
+    expect(calls).toHaveLength(0);
+
+    now += 1;
+    await controller.refreshStaleTransientTimersOnce();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.method).toBe("editMessageText");
+    expect(JSON.stringify(calls[0]?.body)).toContain("15s since update");
+    expect(store.codexStatus(-10042, 42, pane)?.updated_at)
+      .toBe(actualUpdatedAt);
+
+    now += 5_000;
+    await controller.refreshStaleTransientTimersOnce();
+    expect(calls).toHaveLength(1);
+
+    now += 10_000;
+    await controller.refreshStaleTransientTimersOnce();
+    expect(calls).toHaveLength(2);
+    expect(JSON.stringify(calls[1]?.body)).toContain("30s since update");
+    store.close();
+  });
+
   it("batches thoughts, then flushes them before continuation and final messages", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-thinking-"));
     temporaryRoots.push(root);

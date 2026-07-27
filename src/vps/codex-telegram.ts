@@ -85,6 +85,7 @@ const TELEGRAM_TEXT_BURST_DEBOUNCE_MS = 700;
 const THINKING_SECTION_FLUSH_INTERVAL_MS = 5_000;
 const GOAL_SYNC_INTERVAL_MS = 5_000;
 const TRANSIENT_ACTIVITY_RENDER_INTERVAL_MS = 4_000;
+const TRANSIENT_TIMER_REFRESH_INTERVAL_MS = 15_000;
 
 interface CodexTelegramDependencies {
   readonly env: ChatinaboxEnv;
@@ -152,6 +153,7 @@ export class CodexTelegramController {
   private readonly flushingTextBursts = new Set<string>();
   private readonly transientMutationVersions = new Map<string, number>();
   private readonly transientRenderedAt = new Map<string, number>();
+  private readonly transientTimerRenderedAt = new Map<string, number>();
   private readonly profile: () => ExperienceProfile;
   private readonly now: () => number;
   private readonly thinkingFlushIntervalMs: number;
@@ -1279,6 +1281,7 @@ export class CodexTelegramController {
         if (this.now() - this.lastGoalSyncAt >= this.goalSyncIntervalMs) {
           await this.syncGoalsOnce();
         }
+        await this.refreshStaleTransientTimersOnce();
       } catch {
         if (!signal.aborted) {
           console.error("[ChatinaboxTelegram] Event delivery pass failed; retrying.");
@@ -2017,6 +2020,73 @@ export class CodexTelegramController {
         continue;
       }
       await this.flushThinkingSection(attachment, target, false);
+    }
+  }
+
+  async refreshStaleTransientTimersOnce(): Promise<void> {
+    const now = this.now();
+    for (const attachment of this.dependencies.store.codexAttachments()) {
+      const target = attachmentTarget(attachment);
+      const status = this.dependencies.store.codexStatus(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        target,
+      );
+      if (
+        !status ||
+        status.status_kind === "state_goal" ||
+        status.status_kind === "state_interrupting" ||
+        status.status_kind === "state_interrupted" ||
+        now - status.updated_at < TRANSIENT_TIMER_REFRESH_INTERVAL_MS
+      ) {
+        continue;
+      }
+      const key = codexOwnerTargetKey(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        target,
+      );
+      if (
+        now - (this.transientTimerRenderedAt.get(key) ?? 0) <
+          TRANSIENT_TIMER_REFRESH_INTERVAL_MS
+      ) {
+        continue;
+      }
+      const storedGoal = this.dependencies.store.codexGoal(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        attachment.message_thread_id,
+      );
+      if (storedGoal?.awaiting_edit === 1) continue;
+      const mutation = this.beginTransientMutation(attachment, target);
+      const goal = visibleCodexGoal(storedGoal);
+      const snapshot = statusSnapshotFromRow(
+        status,
+        status.reply_to_message_id,
+      );
+      const keyboard = await this.transientControlKeyboard(
+        attachment,
+        goal,
+      ).catch(() => undefined);
+      if (!this.isCurrentTransientMutation(mutation)) continue;
+      const edited = await tgEditRichHtml(
+        this.dependencies.env,
+        attachment.chat_id,
+        status.telegram_message_id,
+        formatCodexTransientRichHtml(
+          snapshot,
+          now,
+          this.profile(),
+          goal,
+        ),
+        keyboard,
+      ).catch(() => null);
+      if (
+        this.isCurrentTransientMutation(mutation) &&
+        telegramEditSucceeded(edited)
+      ) {
+        this.transientTimerRenderedAt.set(key, now);
+      }
     }
   }
 
@@ -3503,6 +3573,7 @@ function mergeTransientStatus(
     replyToMessageId:
       replyToMessageId ?? existing?.reply_to_message_id ?? null,
     startedAt,
+    lastUpdateAt: now,
   };
 }
 
@@ -3592,11 +3663,19 @@ export function formatCodexTransientRichHtml(
       ? "<p><mark>■ interrupt requested</mark></p>"
       : snapshot.statusKind === "state_interrupted"
         ? "<p><mark>■ task interrupted</mark></p>"
-        : `<p><mark>${escapeTelegramHtml(
-          assistantIdentity(profile),
-        )} is working for ${
-          formatCompactDuration(Math.max(0, now - snapshot.startedAt))
-        }…</mark></p>`;
+        : snapshot.lastUpdateAt !== undefined
+          ? `<p><mark>${escapeTelegramHtml(
+            assistantIdentity(profile),
+          )} is working · ${
+            formatCompactDuration(
+              Math.max(0, now - snapshot.lastUpdateAt),
+            )
+          } since update…</mark></p>`
+          : `<p><mark>${escapeTelegramHtml(
+            assistantIdentity(profile),
+          )} is working for ${
+            formatCompactDuration(Math.max(0, now - snapshot.startedAt))
+          }…</mark></p>`;
   const goalSection = goal
     ? `<blockquote><b>🎯 ${escapeTelegramHtml(goalStatusLabel(goal.status))}</b>` +
       `<br/>${escapeTelegramHtml(truncateVisible(goal.objective, 700))}` +
@@ -4249,6 +4328,7 @@ function statusSnapshotFromRow(
     queuedMessages: row.queued_messages,
     replyToMessageId,
     startedAt: row.started_at,
+    lastUpdateAt: row.updated_at,
   };
 }
 

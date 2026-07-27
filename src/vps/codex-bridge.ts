@@ -53,6 +53,8 @@ const TRANSCRIPT_DISCOVERY_TAIL_BYTES = 1024 * 1024;
 const MODEL_DISCOVERY_TAIL_BYTES = 8 * 1024 * 1024;
 const TRANSCRIPT_DISCOVERY_TIMEOUT_MS = 15_000;
 const TRANSCRIPT_COMPLETION_TIMEOUT_MS = 6 * 60 * 60 * 1_000;
+const MANAGED_STARTUP_ATTEMPTS = 80;
+const MANAGED_STARTUP_INTERVAL_MS = 250;
 const TMUX = resolveExecutable("CHATINABOX_TMUX_PATH", [
   "/usr/bin/tmux",
   "/usr/local/bin/tmux",
@@ -109,6 +111,7 @@ interface BridgeOptions {
   readonly databasePath: string;
   readonly defaultCwd?: string;
   readonly lobbyCwd?: string;
+  readonly managerCwd?: string;
 }
 
 interface ProcessRow {
@@ -160,6 +163,8 @@ export class CodexBridge {
   private readonly server: net.Server;
   private mirrorTimer: NodeJS.Timeout | null = null;
   private mirrorRunning = false;
+  private readonly managedStartupRecoveries =
+    new Map<string, Promise<boolean>>();
   private usageCache:
     { readonly value: CodexUsage | null; readonly cachedAt: number } | null =
       null;
@@ -523,12 +528,48 @@ export class CodexBridge {
         ),
       });
     }
-    return panes.sort(
+    const sorted = panes.sort(
       (left, right) =>
         left.sessionName.localeCompare(right.sessionName) ||
         left.windowIndex - right.windowIndex ||
         left.paneId.localeCompare(right.paneId),
     );
+    for (const pane of sorted) {
+      await this.recoverManagedTrustGate(pane);
+    }
+    return sorted;
+  }
+
+  private async recoverManagedTrustGate(pane: CodexPane): Promise<void> {
+    if (!this.isManagedCwd(pane.cwd)) return;
+    const key = [
+      pane.serverPid,
+      pane.paneId,
+      pane.panePid,
+    ].join("\u001f");
+    const active = this.managedStartupRecoveries.get(key);
+    if (active) {
+      await active;
+      return;
+    }
+    const screen = await run(TMUX, [
+      "capture-pane",
+      "-p",
+      "-t",
+      pane.paneId,
+    ]).catch(() => "");
+    if (managedCodexStartupState(screen) !== "directory_trust") return;
+    const recovery = this.ensureManagedCodexReady(pane).finally(() => {
+      this.managedStartupRecoveries.delete(key);
+    });
+    this.managedStartupRecoveries.set(key, recovery);
+    const ready = await recovery;
+    if (!ready) {
+      console.error(
+        `[ChatinaboxBridge] Managed worker ${pane.paneId} remained blocked ` +
+          "after automatic directory-trust recovery.",
+      );
+    }
   }
 
   private async requireTarget(value: unknown): Promise<CodexPane | null> {
@@ -733,7 +774,10 @@ export class CodexBridge {
       fast: request.fast === true,
       cwd,
     };
-    const command = workerCodexCommand(profile);
+    const command = workerCodexCommand(
+      profile,
+      this.isManagedCwd(cwd) ? cwd : undefined,
+    );
     const response = await this.startTmuxCodex({
       existing,
       tmuxSession,
@@ -874,7 +918,10 @@ export class CodexBridge {
       ),
     };
     const command =
-      `${workerCodexCommand(profile)} resume ${request.sessionId}`;
+      `${workerCodexCommand(
+        profile,
+        this.isManagedCwd(profile.cwd) ? profile.cwd : undefined,
+      )} resume ${request.sessionId}`;
     const response = await this.startTmuxCodex({
       existing,
       tmuxSession,
@@ -1135,9 +1182,60 @@ export class CodexBridge {
         candidate.windowName === name &&
         !existing.some((old) => samePaneIdentity(old, candidate)),
     );
-    return pane
-      ? { ok: true, pane }
-      : failure("START_FAILED", "Codex session did not become ready.");
+    if (!pane) {
+      return failure("START_FAILED", "Codex session did not become ready.");
+    }
+    if (
+      this.isManagedCwd(cwd) &&
+      !await this.ensureManagedCodexReady(pane)
+    ) {
+      await run(TMUX, ["kill-pane", "-t", pane.paneId])
+        .catch(() => undefined);
+      return failure(
+        "START_BLOCKED",
+        "The managed Codex session did not reach a usable prompt.",
+      );
+    }
+    return { ok: true, pane };
+  }
+
+  private isManagedCwd(cwd: string): boolean {
+    const candidate = path.resolve(cwd);
+    return [
+      this.options.lobbyCwd ?? DEFAULT_CHATINABOX_LOBBY_CWD,
+      this.options.managerCwd,
+    ].some(
+      (managed) =>
+        typeof managed === "string" &&
+        candidate === path.resolve(managed),
+    );
+  }
+
+  private async ensureManagedCodexReady(
+    pane: CodexPaneIdentity,
+  ): Promise<boolean> {
+    let approvedTrust = false;
+    for (
+      let attempt = 0;
+      attempt < MANAGED_STARTUP_ATTEMPTS;
+      attempt += 1
+    ) {
+      const screen = await run(TMUX, [
+        "capture-pane",
+        "-p",
+        "-t",
+        pane.paneId,
+      ]).catch(() => "");
+      const state = managedCodexStartupState(screen);
+      if (state === "ready") return true;
+      if (state === "directory_trust" && !approvedTrust) {
+        await run(TMUX, ["send-keys", "-t", pane.paneId, "Enter"])
+          .catch(() => undefined);
+        approvedTrust = true;
+      }
+      await delay(MANAGED_STARTUP_INTERVAL_MS);
+    }
+    return false;
   }
 
   private listRecentSessions(): CodexRecentSession[] {
@@ -3061,29 +3159,55 @@ export function workerCodexCommand(input: {
   readonly model: "sol" | "luna" | "terra";
   readonly reasoningEffort: "low" | "medium" | "high" | "xhigh";
   readonly fast: boolean;
-}): string {
+}, trustedCwd?: string): string {
   const tier = input.fast
     ? ` -c 'service_tier="fast"' --enable fast_mode`
+    : "";
+  const trust = trustedCwd
+    ? ` -c ${shellArgument(
+      `projects.${JSON.stringify(
+        path.resolve(trustedCwd),
+      )}.trust_level="trusted"`,
+    )}`
     : "";
   return (
     `${fullAccessCodexCommand()} ` +
     `-c 'model="${modelForProfile(input.model)}"' ` +
     `-c 'model_reasoning_effort="${input.reasoningEffort}"'` +
-    tier
+    tier +
+    trust
   );
 }
 
 export function lobbyCodexCommand(lobbyCwd: string): string {
-  const trustOverride =
-    `projects.${JSON.stringify(lobbyCwd)}.trust_level="trusted"`;
   return workerCodexCommand({
     model: "terra",
     reasoningEffort: "low",
     fast: true,
-  }) +
+  }, lobbyCwd) +
     ` -c 'model_reasoning_summary="concise"'` +
-    ` -c 'model_verbosity="low"'` +
-    ` -c ${shellArgument(trustOverride)}`;
+    ` -c 'model_verbosity="low"'`;
+}
+
+export function managedCodexStartupState(
+  screen: string,
+): "starting" | "directory_trust" | "ready" {
+  if (
+    /Do you trust the contents of this directory\?/iu.test(screen) &&
+    /1\.\s*Yes,\s*continue/iu.test(screen)
+  ) {
+    return "directory_trust";
+  }
+  if (
+    /^\s*›(?:\s|$)/mu.test(screen) &&
+    (
+      /\bgpt-[\w.-]+\b/iu.test(screen) ||
+      /Use \/skills to list available skills/iu.test(screen)
+    )
+  ) {
+    return "ready";
+  }
+  return "starting";
 }
 
 function modelForProfile(profile: "sol" | "luna" | "terra"): string {

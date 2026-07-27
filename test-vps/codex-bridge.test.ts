@@ -10,6 +10,7 @@ import {
   fullAccessCodexCommand,
   isInternalCodexPrompt,
   isCompactedTranscriptPrefix,
+  managedCodexStartupState,
   renderAnsiTerminalSvg,
   parseCodexUsageFromTranscriptTail,
   reasoningSummaryKey,
@@ -150,12 +151,40 @@ describe("Codex bridge", () => {
     });
     expect(worker).toContain(`service_tier="default"`);
     expect(worker).toContain("--disable fast_mode");
+    expect(worker).not.toContain("trust_level");
+    const managedWorker = workerCodexCommand({
+      model: "sol",
+      reasoningEffort: "high",
+      fast: false,
+    }, "/var/lib/chatinabox-bridge/nox");
+    expect(managedWorker).toContain(
+      `projects."/var/lib/chatinabox-bridge/nox".trust_level="trusted"`,
+    );
     expect(lobbyCodexCommand("/tmp/lobby")).toContain(
       `model_reasoning_summary="concise"`,
     );
     expect(lobbyCodexCommand("/tmp/lobby")).toContain(
       `model_verbosity="low"`,
     );
+  });
+
+  it("recognizes managed Codex trust gates and real prompts", () => {
+    expect(managedCodexStartupState(`
+Do you trust the contents of this directory?
+
+› 1. Yes, continue
+  2. No, quit
+
+Press enter to continue
+    `)).toBe("directory_trust");
+    expect(managedCodexStartupState(`
+› Run /review on my current changes
+
+Use /skills to list available skills
+
+gpt-5.6-sol high
+    `)).toBe("ready");
+    expect(managedCodexStartupState("Starting Codex…")).toBe("starting");
   });
 
   it("rejects unknown worker profiles before touching tmux", async () => {

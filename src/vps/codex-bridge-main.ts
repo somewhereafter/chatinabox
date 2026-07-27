@@ -2,6 +2,12 @@ import {
   CodexBridge,
 } from "./codex-bridge";
 import { DEFAULT_CODEX_BRIDGE_SOCKET } from "./codex-bridge-protocol";
+import { readExperienceProfile } from "./experience-profile";
+
+const profile = readExperienceProfile(
+  process.env.CHATINABOX_PROFILE_PATH ??
+    "/etc/chatinabox/profile.json",
+);
 
 const bridge = new CodexBridge({
   socketPath:
@@ -13,6 +19,9 @@ const bridge = new CodexBridge({
   lobbyCwd:
     process.env.CHATINABOX_LOBBY_CWD ??
     "/var/lib/chatinabox-bridge/lobby",
+  managerCwd:
+    process.env.CHATINABOX_MANAGER_CWD ??
+    profile.manager.cwd,
 });
 
 let stopping = false;

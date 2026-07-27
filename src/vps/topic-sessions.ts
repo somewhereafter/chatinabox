@@ -100,9 +100,8 @@ export class TopicSessionController {
         continue;
       }
       const manager = this.dependencies.store.managerTopic(attachment.chat_id);
-      if (manager?.message_thread_id === attachment.message_thread_id) {
-        continue;
-      }
+      const isManagerTopic =
+        manager?.message_thread_id === attachment.message_thread_id;
       const pane = panes.find((candidate) =>
         samePaneIdentity(candidate, {
           serverPid: attachment.server_pid,
@@ -174,6 +173,7 @@ export class TopicSessionController {
       const idleCloseMs =
         this.profile().sessions.idleCloseMinutes * 60 * 1_000;
       if (
+        !isManagerTopic &&
         idleCloseMs > 0 &&
         this.now() - row.idle_since >= idleCloseMs
       ) {
