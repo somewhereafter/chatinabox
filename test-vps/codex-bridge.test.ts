@@ -416,9 +416,9 @@ describe("Codex bridge", () => {
       model: "sol",
       reasoningEffort: "high",
       fast: false,
-    }, "/var/lib/chatinabox-bridge/nox");
+    }, "/var/lib/chatinabox-bridge/manager");
     expect(managedWorker).toContain(
-      `projects."/var/lib/chatinabox-bridge/nox".trust_level="trusted"`,
+      `projects."/var/lib/chatinabox-bridge/manager".trust_level="trusted"`,
     );
     expect(lobbyCodexCommand("/tmp/lobby")).toContain(
       `model_reasoning_summary="concise"`,

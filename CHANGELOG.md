@@ -4,6 +4,20 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.4.0 — 2026-07-27
+
+- Replaced manual control-topic setup with one `/forum setup` command in
+  General: General becomes the Overview and Chatinabox creates and connects the
+  Manager topic itself.
+- Reserved Overview and Manager topics from normal work setup, invalidated
+  stale setup buttons, cleaned up safely promoted topics, and prevented setup
+  or wake commands from silently moving an existing control role.
+- Added private one-time Telegram owner confirmation during interactive
+  installation, enforced Node.js 22.13 or newer, and clarified root-owned Codex
+  installation and upgrades.
+- Aligned the README, first-run guide, Telegram command menu, and in-bot help
+  with the actual forum and session behavior.
+
 ## 2.3.0 — 2026-07-27
 
 - Added provider-neutral session artifact shelves: agents can share native

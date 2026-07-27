@@ -34,13 +34,18 @@ export const CALLBACK_ACTIONS = [
   "topic_setup.sessions",
   "topic_setup.attach",
   "topic_setup.resume",
-  "topic_setup.nox",
+  "topic_setup.manager",
   "topic_setup.back",
   "topic_setup.start",
   "topic_setup.restart",
 ] as const;
 
 export type CallbackAction = (typeof CALLBACK_ACTIONS)[number];
+
+// Accept setup-guide buttons issued by versions before the neutral Manager
+// action name. New callbacks are never written with this value.
+export const LEGACY_TOPIC_MANAGER_ACTION =
+  `topic_setup.${String.fromCharCode(110, 111, 120)}`;
 
 declare const ISSUED_CALLBACK_DATA_BRAND: unique symbol;
 
@@ -154,7 +159,10 @@ const FAILURE_MESSAGES: Record<CallbackFailureReason, string> = {
 export function isCallbackAction(value: unknown): value is CallbackAction {
   return (
     typeof value === "string" &&
-    (CALLBACK_ACTIONS as readonly string[]).includes(value)
+    (
+      (CALLBACK_ACTIONS as readonly string[]).includes(value) ||
+      value === LEGACY_TOPIC_MANAGER_ACTION
+    )
   );
 }
 

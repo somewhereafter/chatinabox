@@ -2399,9 +2399,10 @@ export class CodexTelegramController {
       await tgSend(
         this.dependencies.env,
         source.chat_id,
-        "⚠️ <b>New topic could not be created.</b>\n" +
+          "⚠️ <b>New topic could not be created.</b>\n" +
           `${escapeTelegramHtml(pane.windowName)} is running but remains ` +
-          "unattached. Ask Nox to reconnect it.",
+          `unattached. Ask ${escapeTelegramHtml(this.profile().manager.name)} ` +
+          "to reconnect it.",
         undefined,
         undefined,
         source.message_thread_id || undefined,
@@ -4833,16 +4834,17 @@ export function codexHelpText(
     "🪄 <b>Chatinabox controls</b>\n\n" +
     "<b>Sessions</b>\n" +
     "<code>/codex</code> — list running and recent chats; tap one to attach\n" +
-    "<code>/codex new [name]</code> — start and attach a Sol · high worker\n" +
+    "<code>/codex new [name]</code> — start a worker; forums open a linked topic\n" +
     "<code>/codex rename name</code> — rename the attached session\n" +
-    "<code>/codex detach</code> — return to the persistent 🪄 Lobby\n" +
+    "<code>/codex detach</code> — open Manager in a forum; return to Lobby in private\n" +
     "<code>/codex off</code> — pause routing; your next message wakes Lobby\n" +
     "<code>/codex interrupt</code> — interrupt the current run with Ctrl-C\n\n" +
     "<b>Forum topics</b>\n" +
-    "<code>/setup</code> — configure and start a chat in a new topic\n" +
-    `<code>/overview setup</code> — create the ` +
+    "<code>/forum setup</code> — prepare Overview and Manager from General\n" +
+    "<code>/setup</code> — reopen setup for a normal work topic\n" +
+    `<code>/overview refresh</code> — refresh the ` +
     `${escapeTelegramHtml(overview.name)} dashboard\n` +
-    `<code>/manager setup</code> — connect the 🔮 ` +
+    `<code>/manager wake</code> — reconnect the 🔮 ` +
     `${escapeTelegramHtml(manager.role)} topic\n` +
     "Renaming a connected topic also renames its live Codex session.\n\n" +
     "<b>Experience</b>\n" +

@@ -120,6 +120,47 @@ describe("Topic session setup", () => {
     })).toBe(false);
   });
 
+  it("blocks work setup and stale setup buttons in control topics", async () => {
+    const { controller, store, requests, sends } = setup();
+    const topic = {
+      message_id: 10,
+      chat: { id: -10042, type: "supergroup" as const },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      forum_topic_created: { name: "overview", icon_color: 1 },
+      date: 1,
+    };
+    await controller.handleMessage(topic, null);
+    const startCallback = callbackByLabel(sends, "new chat");
+    expect(startCallback).toBeTruthy();
+    store.registerOverview(-10042, 42, 7);
+
+    expect(await controller.handleMessage({
+      ...topic,
+      message_id: 11,
+      text: "/setup",
+      forum_topic_created: undefined,
+    }, { name: "setup", argument: "" })).toBe(true);
+    expect(JSON.stringify(sends.at(-1))).toContain("control topic");
+
+    expect(await controller.handleCallback({
+      id: "stale-control-card",
+      from: { id: 42 },
+      message: {
+        message_id: 100,
+        message_thread_id: 7,
+        chat: { id: -10042, type: "supergroup" },
+      },
+      data: startCallback,
+    })).toBe(true);
+    expect(JSON.stringify(sends)).toContain("show_alert");
+    expect(requests.some((request) =>
+      (request as { op?: string }).op === "new"
+    )).toBe(false);
+    store.close();
+  });
+
   it("never lets a temporarily attached Lobby overwrite topic setup", async () => {
     const { controller, store } = setup();
     store.rememberTopic(
@@ -246,7 +287,7 @@ describe("Topic session setup", () => {
     expect(card?.message_thread_id).toBe(7);
     expect(JSON.stringify(card)).toContain("🧪 experiment");
     expect(JSON.stringify(card)).toContain("ask orchestrator");
-    expect(JSON.stringify(card)).not.toContain("ask Nox");
+    expect(JSON.stringify(card)).not.toContain("private manager name");
     const keyboard = card?.reply_markup as {
       inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
     };
@@ -358,9 +399,9 @@ describe("Topic session setup", () => {
   it("starts a temporary natural-language manager guide in a new topic", async () => {
     const profile = patchExperienceProfile(DEFAULT_EXPERIENCE_PROFILE, {
       manager: {
-        name: "Nox",
+        name: "Guide",
         emoji: "🪄",
-        cwd: "/var/lib/chatinabox-bridge/nox",
+        cwd: "/var/lib/chatinabox-bridge/manager",
         model: "terra",
         reasoningEffort: "high",
         fast: true,
@@ -372,8 +413,8 @@ describe("Topic session setup", () => {
         ok: true,
         pane: {
           ...pane,
-          windowName: "Nox · setup · new work",
-          cwd: "/var/lib/chatinabox-bridge/nox",
+          windowName: "Guide · setup · new work",
+          cwd: "/var/lib/chatinabox-bridge/manager",
           assistantName: "Terra",
         },
       }),
@@ -387,28 +428,28 @@ describe("Topic session setup", () => {
       forum_topic_created: { name: "new work", icon_color: 1 },
       date: 1,
     }, null);
-    const askNox = callbackByLabel(sends, "ask Nox");
-    expect(askNox).toBeTruthy();
+    const askManager = callbackByLabel(sends, "ask Guide");
+    expect(askManager).toBeTruthy();
     await controller.handleCallback({
-      id: "nox",
+      id: "manager",
       from: { id: 42 },
       message: {
         message_id: 100,
         message_thread_id: 7,
         chat: { id: -10042, type: "supergroup" },
       },
-      data: askNox,
+      data: askManager,
     });
     expect(requests).toContainEqual({
       op: "new",
-      name: "Nox · setup · new work",
-      cwd: "/var/lib/chatinabox-bridge/nox",
+      name: "Guide · setup · new work",
+      cwd: "/var/lib/chatinabox-bridge/manager",
       model: "terra",
       reasoningEffort: "high",
       fast: true,
     });
     expect(store.codexAttachment(-10042, 42, 7)?.window_name)
-      .toBe("Nox · setup · new work");
+      .toBe("Guide · setup · new work");
     expect(JSON.stringify(sends.at(-1))).toContain("setup guide");
     store.close();
   });
@@ -899,9 +940,9 @@ describe("Topic session setup", () => {
       paneId: "%4",
       panePid: 200,
       sessionName: "codex",
-      windowName: "🪄 Nox · orchestrator",
+      windowName: "🪄 Guide · orchestrator",
       windowIndex: 0,
-      cwd: "/var/lib/chatinabox-bridge/nox",
+      cwd: "/var/lib/chatinabox-bridge/manager",
       active: true,
       busy: false,
       codexPid: 300,

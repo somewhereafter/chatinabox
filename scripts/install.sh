@@ -60,9 +60,11 @@ need tmux
 need codex
 need systemctl
 
-node_major="$(node -p 'Number(process.versions.node.split(".")[0])')"
-if (( node_major < 22 )); then
-  echo "Node.js 22 or newer is required; found $(node --version)." >&2
+read -r node_major node_minor < <(
+  node -p 'process.versions.node.split(".").slice(0, 2).join(" ")'
+)
+if (( node_major < 22 || (node_major == 22 && node_minor < 13) )); then
+  echo "Node.js 22.13 or newer is required; found $(node --version)." >&2
   exit 1
 fi
 
@@ -145,12 +147,19 @@ if [[ -z "$bot_token" ]]; then
   read -r -s -p "Telegram bot token from @BotFather: " bot_token
   echo
 fi
-if [[ -z "$owner_ids" ]]; then
-  read -r -p "Your numeric Telegram user ID: " owner_ids
-fi
 if [[ ! "$bot_token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; then
   echo "The Telegram bot token does not look valid." >&2
   exit 1
+fi
+if [[ -z "$owner_ids" ]]; then
+  if [[ ! -t 0 ]]; then
+    echo "CHATINABOX_TG_USER_ID is required for a non-interactive install." >&2
+    exit 1
+  fi
+  printf '\n› Confirming the Telegram owner\n'
+  owner_ids="$(
+    TG_BOT_TOKEN="$bot_token" node "$repo_dir/scripts/discover-telegram-owner.mjs"
+  )"
 fi
 if [[ ! "$owner_ids" =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]]; then
   echo "Use one numeric Telegram ID, or a comma-separated list." >&2

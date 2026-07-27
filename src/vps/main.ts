@@ -27,6 +27,11 @@ import { ChatinaboxStore } from "./store";
 import { TopicSessionController } from "./topic-sessions";
 import { ManagerController } from "./manager";
 import { TelegramProgressPacer } from "./progress-pacer";
+import { ForumSetupController } from "./forum-setup";
+import {
+  controlTopicRole,
+  controlTopicSetupBlockedText,
+} from "./control-topics";
 
 interface App {
   readonly env: ChatinaboxEnv;
@@ -35,6 +40,7 @@ interface App {
   readonly overview: OverviewController;
   readonly topics: TopicSessionController;
   readonly manager: ManagerController;
+  readonly forum: ForumSetupController;
   readonly profile: () => ExperienceProfile;
 }
 
@@ -58,6 +64,7 @@ const LOCAL_COMMANDS = new Set([
   "codex_help",
   "nexus",
   "overview",
+  "forum",
   "setup",
   "wizard",
   "manager",
@@ -121,6 +128,25 @@ async function handleClaimedUpdate(app: App, update: TelegramUpdate) {
 
   const command =
     message.text === undefined ? null : parseTelegramCommand(message.text);
+  if (command?.name === "forum") {
+    await app.forum.handleCommand(message, command);
+    return;
+  }
+  if (command?.name === "setup") {
+    const threadId = telegramMessageThreadId(message);
+    const role = controlTopicRole(app.store, message.chat.id, threadId);
+    if (role) {
+      await tgSend(
+        app.env,
+        message.chat.id,
+        controlTopicSetupBlockedText(role),
+        message.message_id,
+        undefined,
+        threadId || undefined,
+      );
+      return;
+    }
+  }
   if (await app.topics.handleMessage(message, command)) return;
   if (command?.name === "nexus" || command?.name === "overview") {
     await app.overview.handleCommand(message, command);
@@ -357,6 +383,13 @@ async function main(): Promise<void> {
   });
   const topics = new TopicSessionController({ env, store, profile });
   const manager = new ManagerController({ env, store, profile });
+  const forum = new ForumSetupController({
+    env,
+    store,
+    overview,
+    manager,
+    profile,
+  });
   const app: App = {
     env,
     store,
@@ -364,6 +397,7 @@ async function main(): Promise<void> {
     overview,
     topics,
     manager,
+    forum,
     profile,
   };
   const controller = new AbortController();
@@ -388,16 +422,17 @@ export function formatFirstRunWelcome(): string {
   return (
     "⌁ <b>Welcome to Chatinabox</b>\n\n" +
     "This first conversation is setup. Talk to the guide normally—describe " +
-    "how you want the bot and workspace to feel, or simply say " +
+    "how you want the bot to feel, or simply say " +
     "<i>keep it simple</i>. It can co-design the bot name and photo, forum " +
-    "name and photo, manager identity, model defaults, workspace, and idle " +
+    "name and photo, manager identity, model defaults, and idle " +
     "policy with you.\n\n" +
     "The guide will show you a compact preview, then shape a private profile " +
     "without changing the source. " +
-    "It will then walk you through creating a Telegram forum with two control " +
-    "topics and your first working topic.\n\n" +
+    "It will then walk you through creating a Telegram forum. Once the bot is " +
+    "an administrator, one <code>/forum setup</code> command in General " +
+    "prepares the Overview and Manager for you.\n\n" +
     "<blockquote>When the forum is ready, pin the 🔮 manager/orchestrator " +
-    "topic and the overview/dashboard topic so they stay easy to reach." +
+    "topic so it stays easy to reach. General holds the overview/dashboard." +
     "</blockquote>\n\n" +
     "<footer>you can return here later with /settings</footer>"
   );

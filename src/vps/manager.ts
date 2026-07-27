@@ -18,6 +18,10 @@ import {
   DEFAULT_EXPERIENCE_PROFILE,
   type ExperienceProfile,
 } from "./experience-profile";
+import {
+  retireWorkTopicSetup,
+  sendControlTopicConflict,
+} from "./control-topics";
 import type { ChatinaboxStore, ManagerTopicRow } from "./store";
 
 type BridgeClient = Pick<CodexBridgeClient, "request">;
@@ -99,10 +103,63 @@ export class ManagerController {
       );
       return true;
     }
-    const row = this.dependencies.store.registerManagerTopic(
+    const existing = this.dependencies.store.managerTopic(chatId);
+    if (!existing && subcommand !== "setup") {
+      await tgSend(
+        this.dependencies.env,
+        chatId,
+        "Run <code>/forum setup</code> in General for the easiest setup, or " +
+          "<code>/manager setup</code> here to use this topic.",
+        message.message_id,
+        undefined,
+        threadId,
+      );
+      return true;
+    }
+    if (existing && existing.message_thread_id !== threadId) {
+      await sendControlTopicConflict(
+        this.dependencies.env,
+        chatId,
+        message.message_id,
+        threadId,
+        "manager",
+        existing.message_thread_id,
+      );
+      return true;
+    }
+    await this.setupTopic(
       chatId,
       ownerUserId!,
       threadId,
+      message.message_id,
+    );
+    return true;
+  }
+
+  async setupTopic(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId: number,
+    replyToMessageId?: number,
+  ): Promise<boolean> {
+    const manager = this.profile().manager;
+    const existing = this.dependencies.store.managerTopic(chatId);
+    if (existing && existing.message_thread_id !== messageThreadId) {
+      return false;
+    }
+    await retireWorkTopicSetup(
+      this.dependencies.env,
+      this.dependencies.store,
+      chatId,
+      ownerUserId,
+      messageThreadId,
+      "manager",
+      { detach: !existing },
+    );
+    const row = this.dependencies.store.registerManagerTopic(
+      chatId,
+      ownerUserId,
+      messageThreadId,
     );
     const pane = await this.ensureRowAttached(row);
     if (!pane) {
@@ -111,16 +168,20 @@ export class ManagerController {
         chatId,
         `⚠️ ${escapeTelegramHtml(manager.name)} could not wake yet. ` +
           "Try again in a moment.",
-        message.message_id,
+        replyToMessageId,
+        undefined,
+        messageThreadId,
       );
-      return true;
+      return false;
     }
-    await this.syncIdentity(chatId, threadId, pane);
+    await this.syncIdentity(chatId, messageThreadId, pane);
     await tgSendRichHtml(
       this.dependencies.env,
       chatId,
       formatManagerWelcome(this.profile()),
-      message.message_id,
+      replyToMessageId,
+      undefined,
+      messageThreadId,
     );
     return true;
   }

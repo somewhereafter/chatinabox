@@ -41,22 +41,26 @@ Use a dedicated Debian or Ubuntu VPS with systemd.
 
 Required:
 
-- Node.js 22 or newer
-- a recent Codex CLI, logged in for `root`
-- tmux
-- a Telegram bot token and your numeric Telegram user ID
+- Node.js 22.13 or newer, with npm
+- git and tmux
+- a recent Codex CLI, installed and logged in for `root`
+- a Telegram bot token from [@BotFather](https://t.me/BotFather)
 
 ImageMagick and Chrome/Chromium are optional; both are only needed for
 `/screen`. ImageMagick is also used when setup prepares custom profile photos.
 
 ```sh
-npm install -g @openai/codex
+sudo npm install -g @openai/codex
 sudo codex login
 
 git clone https://github.com/somewhereafter/chatinabox.git
 cd chatinabox
 sudo ./scripts/install.sh
 ```
+
+The installer asks for the bot token, then shows a one-time `/claim` message.
+Send that message to the bot in private and Chatinabox will confirm your
+Telegram account automatically. You do not need a separate user-ID bot.
 
 The installer checks the host and runs the test suite before changing anything.
 It keeps existing tokens, settings, profiles, and session state during
@@ -85,25 +89,27 @@ Setup happens through ordinary conversation. It can help you choose:
 - the Telegram bot name and photo;
 - the forum group name and photo;
 - the dashboard and manager identities;
-- default models, reasoning level, speed, workspaces, and idle policy.
+- default models, reasoning level, speed, and idle policy.
 
 You get a preview before anything changes. Your choices are stored in
 `/etc/chatinabox/profile.json` and survive upgrades.
 
 For a forum, create a private supergroup, enable Topics, and add the bot as an
 administrator. It needs permission to manage topics, pin and delete messages,
-and change group info. Then create:
+and change group info. In General, send:
 
-1. an overview topic and send `/overview setup`;
-2. a manager topic and send `/manager setup`;
-3. a work topic and send `/setup`.
+```text
+/forum setup
+```
 
-Creating a work topic also opens its setup card automatically. It can start a
-new Codex chat, connect an unbound running session, or resume a saved one. The
-manager can handle the same setup in plain language.
+General becomes the Overview, and Chatinabox creates and connects the Manager
+topic itself. Pin the Manager topic in Telegram's forum list.
 
-Pin the overview and manager topics in Telegram's forum list. Chatinabox pins
-final responses inside each work topic as its checkpoint history.
+Now create a topic for your first task. Its setup card opens automatically and
+can start a new Codex chat, connect a running session, or resume a saved one.
+You can also ask the Manager to create and coordinate work in plain language.
+Chatinabox pins final responses inside each work topic as its checkpoint
+history.
 
 ## Optional extras
 
@@ -130,18 +136,18 @@ without it. If you want to set it up, see
 
 ## Profile
 
-The profile can also be changed directly:
+The profile can also be changed directly from the host:
 
 ```sh
-chatinabox profile show --json
-chatinabox profile set \
+sudo chatinabox profile show --json
+sudo chatinabox profile set \
   --assistant-name "mori" \
   --assistant-photo /path/to/bot-photo.png \
   --group-name "night shift" \
   --group-photo /path/to/group-photo.png \
   --json
-chatinabox profile set --idle-minutes 45 --complete --json
-chatinabox profile sync --json
+sudo chatinabox profile set --idle-minutes 45 --complete --json
+sudo chatinabox profile sync --json
 ```
 
 Photos are normalized to square JPEG assets under
@@ -157,9 +163,10 @@ The default profile is in
 | --- | --- |
 | `/start` | Enter setup or open the session picker |
 | `/settings` | Revisit the private profile |
-| `/setup` | Configure the current work topic |
-| `/overview setup` | Register the overview topic |
-| `/manager setup` | Register the manager topic |
+| `/forum setup` | Prepare Overview and Manager from General |
+| `/setup` | Reopen setup for the current work topic |
+| `/overview setup` | Manually reserve this topic as Overview |
+| `/manager setup` | Manually reserve this topic as Manager |
 | `/codex` | List active and recent sessions |
 | `/codex new [name]` | Start a worker in a new linked topic |
 | `/codex rename name` | Rename the attached session |
@@ -175,13 +182,20 @@ The default profile is in
 
 ## Local control
 
-The same session controls are available to local scripts:
+Host-level commands should run as root. Creating a session here does not attach
+it to Telegram by itself:
 
 ```sh
-chatinabox catalog --json
-chatinabox new "Investigate build" --cwd /root/project --json
+sudo chatinabox catalog --json
+sudo chatinabox new "Investigate build" --cwd /root/project --json
+```
+
+The following commands are for agents running inside an attached Codex
+session. Chatinabox uses that session to find the correct Telegram topic:
+
+```sh
 chatinabox self rename "Build investigation" --json
-chatinabox handoff %4 --json
+chatinabox new-and-handoff "New task" --cwd /root/project --json
 chatinabox self lobby --json
 chatinabox send-image /tmp/chart.png "Latest result" --json
 ```
@@ -193,12 +207,15 @@ automatically.
 ## Operations
 
 ```sh
-chatinabox doctor
+sudo chatinabox doctor
 systemctl status chatinabox chatinabox-bridge
+git pull --ff-only
 sudo ./scripts/install.sh
 ```
 
-Running the installer again creates and activates a new immutable release.
+Pulling and running the installer creates and activates a new immutable
+release. Running the installer without pulling simply reinstalls the current
+checkout.
 
 ```sh
 sudo ./scripts/uninstall.sh          # keep state and secrets
