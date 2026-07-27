@@ -4,6 +4,15 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.0.2 — 2026-07-27
+
+- Quarantined Codex memory-maintenance turns so their prompt, transient
+  activity, reasoning, and final report stay out of Telegram.
+- Bounded unknown local prompt relays to prevent one oversized event from
+  flooding Telegram and rate-limiting unrelated topics.
+- Prevented the persistent Lobby identity and internal workspace from becoming
+  a normal topic's launch defaults, with launch-time repair for stale rows.
+
 ## 2.0.1 — 2026-07-27
 
 - Extended first-run personalization to the actual Telegram bot name/photo and

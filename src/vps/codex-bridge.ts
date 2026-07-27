@@ -48,6 +48,7 @@ import {
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_PROMPT_BYTES = 256 * 1024;
+const MAX_LOCAL_PROMPT_RELAY_BYTES = 16 * 1024;
 const MAX_STOP_BYTES = 512 * 1024;
 const MAX_EVENTS = 100;
 const TRANSCRIPT_DISCOVERY_TAIL_BYTES = 1024 * 1024;
@@ -139,6 +140,7 @@ interface TranscriptBindingRow {
   readonly pending_agent: string | null;
   readonly pending_key: string | null;
   readonly pending_at: number | null;
+  readonly internal_turn_id: string | null;
 }
 
 interface TurnActivity {
@@ -218,6 +220,7 @@ export class CodexBridge {
         pending_agent TEXT,
         pending_key TEXT,
         pending_at INTEGER,
+        internal_turn_id TEXT,
         updated_at INTEGER NOT NULL,
         PRIMARY KEY (server_pid, pane_id, pane_pid)
       );
@@ -246,6 +249,18 @@ export class CodexBridge {
         prompt_hash TEXT NOT NULL,
         prompt TEXT NOT NULL,
         created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS internal_turns (
+        server_pid INTEGER NOT NULL,
+        pane_id TEXT NOT NULL,
+        pane_pid INTEGER NOT NULL,
+        session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        completed_at INTEGER,
+        PRIMARY KEY (
+          server_pid, pane_id, pane_pid, session_id, turn_id
+        )
       );
       CREATE TABLE IF NOT EXISTS turn_activity (
         server_pid INTEGER NOT NULL,
@@ -306,6 +321,7 @@ export class CodexBridge {
     `);
     this.migrateHookSessions();
     this.migrateEvents();
+    this.migrateTranscriptBindings();
     this.migrateTurnActivity();
     this.server = net.createServer(
       { allowHalfOpen: true },
@@ -1717,13 +1733,22 @@ export class CodexBridge {
       if (prompt !== null) {
         const telegramOrigin = this.consumePromptOrigin(pane, prompt);
         this.recordTranscriptSuppression(pane, prompt);
+        if (isInternalMaintenancePrompt(prompt)) {
+          this.recordInternalTurn(pane, sessionId, turnId, now);
+          this.deleteTurnActivity(pane);
+          this.db.prepare(`
+            UPDATE hook_sessions SET busy = 0, updated_at = ?
+            WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+          `).run(now, pane.serverPid, pane.paneId, pane.panePid);
+          return { ok: true, accepted: true };
+        }
         if (!telegramOrigin && !isInternalCodexPrompt(prompt)) {
           this.insertMessageEvent(
             "user_local",
             pane,
             sessionId,
             turnId,
-            prompt,
+            localPromptRelayText(prompt),
             `hook-user:${sessionId}:${turnId}`,
           );
         }
@@ -1735,6 +1760,15 @@ export class CodexBridge {
     const message = stringField(payload, "last_assistant_message", MAX_STOP_BYTES);
     if (!turnId || message === null) {
       return failure("BAD_HOOK", "Stop hook is missing its result.");
+    }
+    if (this.isInternalTurn(pane, sessionId, turnId)) {
+      this.completeInternalTurn(pane, sessionId, turnId, now);
+      this.deleteTurnActivity(pane);
+      this.db.prepare(`
+        UPDATE hook_sessions SET busy = 0, updated_at = ?
+        WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+      `).run(now, pane.serverPid, pane.paneId, pane.panePid);
+      return { ok: true, accepted: true };
     }
     const eventKey = `${sessionId}\u001f${turnId}`;
     this.insertMessageEvent(
@@ -2054,11 +2088,111 @@ export class CodexBridge {
     return true;
   }
 
+  private recordInternalTurn(
+    target: CodexPaneIdentity,
+    sessionId: string,
+    turnId: string,
+    now = Date.now(),
+  ): void {
+    this.db.prepare(`
+      INSERT INTO internal_turns (
+        server_pid, pane_id, pane_pid, session_id, turn_id,
+        created_at, completed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, NULL)
+      ON CONFLICT (
+        server_pid, pane_id, pane_pid, session_id, turn_id
+      ) DO UPDATE SET
+        created_at = excluded.created_at,
+        completed_at = NULL
+    `).run(
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      sessionId,
+      turnId,
+      now,
+    );
+    // A transcript can reveal task_started a few records before its user
+    // envelope. Remove any provisional activity event created in that same
+    // mirror pass once the turn is identified as internal.
+    this.db.prepare(`
+      DELETE FROM stop_events
+      WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+        AND session_id = ? AND turn_id = ?
+    `).run(
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      sessionId,
+      turnId,
+    );
+    this.db.prepare(`
+      DELETE FROM stop_events
+      WHERE id = (
+        SELECT id FROM stop_events
+        WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+          AND session_id = ? AND kind = 'state_working'
+          AND created_at >= ?
+        ORDER BY id DESC
+        LIMIT 1
+      )
+    `).run(
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      sessionId,
+      Date.now() - 5_000,
+    );
+    this.prunePromptTracking();
+  }
+
+  private isInternalTurn(
+    target: CodexPaneIdentity,
+    sessionId: string,
+    turnId: string,
+  ): boolean {
+    return Boolean(this.db.prepare(`
+      SELECT 1 FROM internal_turns
+      WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+        AND session_id = ? AND turn_id = ?
+        AND created_at >= ?
+    `).get(
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      sessionId,
+      turnId,
+      Date.now() - 24 * 60 * 60 * 1_000,
+    ));
+  }
+
+  private completeInternalTurn(
+    target: CodexPaneIdentity,
+    sessionId: string,
+    turnId: string,
+    now = Date.now(),
+  ): void {
+    this.db.prepare(`
+      UPDATE internal_turns SET completed_at = ?
+      WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+        AND session_id = ? AND turn_id = ?
+    `).run(
+      now,
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      sessionId,
+      turnId,
+    );
+  }
+
   private prunePromptTracking(): void {
     const cutoff = Date.now() - 24 * 60 * 60 * 1_000;
     this.db.prepare(`DELETE FROM prompt_origins WHERE created_at < ?`).run(cutoff);
     this.db
       .prepare(`DELETE FROM transcript_suppressions WHERE created_at < ?`)
+      .run(cutoff);
+    this.db.prepare(`DELETE FROM internal_turns WHERE created_at < ?`)
       .run(cutoff);
   }
 
@@ -2297,6 +2431,7 @@ export class CodexBridge {
     let pendingAgent = binding.pending_agent;
     let pendingKey = binding.pending_key;
     let pendingAt = binding.pending_at;
+    let internalTurnId = binding.internal_turn_id;
     let activity = this.readTurnActivity(target, binding.session_id);
     let activityDirty = false;
     const flushActivity = (recordOffset: number): void => {
@@ -2320,6 +2455,7 @@ export class CodexBridge {
       pendingAgent &&
       pendingKey &&
       pendingAt &&
+      internalTurnId === null &&
       Date.now() - pendingAt >= 1_500
     ) {
       this.insertMessageEvent(
@@ -2339,6 +2475,7 @@ export class CodexBridge {
         pendingAgent,
         pendingKey,
         pendingAt,
+        internalTurnId,
       });
       return;
     }
@@ -2355,7 +2492,7 @@ export class CodexBridge {
     }
     const chunk = splitCompleteTranscriptChunk(buffer);
     if (chunk.complete.byteLength === 0) {
-      if (isCompactedTranscriptPrefix(buffer)) {
+      if (internalTurnId === null && isCompactedTranscriptPrefix(buffer)) {
         this.insertMessageEvent(
           "state_compacting",
           target,
@@ -2372,7 +2509,7 @@ export class CodexBridge {
       this.updateBindingCursor(
         binding,
         binding.cursor + chunk.consumedBytes,
-        { pendingAgent, pendingKey, pendingAt },
+        { pendingAgent, pendingKey, pendingAt, internalTurnId },
       );
       return;
     }
@@ -2412,6 +2549,83 @@ export class CodexBridge {
       }
       const compactionSignal = transcriptCompactionSignal(record);
       const turnEndSignal = transcriptTurnEndSignal(record);
+      const transcriptPrompt = transcriptUserPrompt(record, payload);
+      if (
+        transcriptPrompt !== null &&
+        isInternalMaintenancePrompt(transcriptPrompt)
+      ) {
+        const turnId = activity?.turnId ??
+          stringField(payload, "turn_id", 200) ??
+          "transcript-maintenance";
+        internalTurnId = turnId;
+        this.recordInternalTurn(
+          target,
+          binding.session_id,
+          turnId,
+          transcriptRecordTime(record) ?? Date.now(),
+        );
+        pendingAgent = null;
+        pendingKey = null;
+        pendingAt = null;
+        this.deleteTurnActivity(target);
+        activity = null;
+        activityDirty = false;
+        continue;
+      }
+      if (
+        record.type === "event_msg" &&
+        payload.type === "task_started"
+      ) {
+        const turnId =
+          typeof payload.turn_id === "string" && payload.turn_id.length <= 200
+            ? payload.turn_id
+            : `transcript-${recordOffset}`;
+        if (
+          internalTurnId !== null ||
+          this.isInternalTurn(target, binding.session_id, turnId)
+        ) {
+          if (internalTurnId === "transcript-maintenance") {
+            this.completeInternalTurn(
+              target,
+              binding.session_id,
+              internalTurnId,
+            );
+          }
+          internalTurnId = turnId;
+          this.recordInternalTurn(
+            target,
+            binding.session_id,
+            turnId,
+            transcriptRecordTime(record) ?? Date.now(),
+          );
+        }
+      }
+      if (internalTurnId !== null) {
+        if (turnEndSignal !== null) {
+          this.completeInternalTurn(
+            target,
+            binding.session_id,
+            internalTurnId,
+          );
+          this.db.prepare(`
+            UPDATE hook_sessions SET busy = 0, updated_at = ?
+            WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+          `).run(
+            Date.now(),
+            target.serverPid,
+            target.paneId,
+            target.panePid,
+          );
+          internalTurnId = null;
+        }
+        pendingAgent = null;
+        pendingKey = null;
+        pendingAt = null;
+        this.deleteTurnActivity(target);
+        activity = null;
+        activityDirty = false;
+        continue;
+      }
       if (compactionSignal === "started") {
         this.insertMessageEvent(
           "state_compacting",
@@ -2701,7 +2915,7 @@ export class CodexBridge {
             target,
             binding.session_id,
             eventKey,
-            prompt,
+            localPromptRelayText(prompt),
             eventKey,
           );
         }
@@ -2767,7 +2981,7 @@ export class CodexBridge {
     this.updateBindingCursor(
       binding,
       binding.cursor + completeBuffer.byteLength,
-      { pendingAgent, pendingKey, pendingAt },
+      { pendingAgent, pendingKey, pendingAt, internalTurnId },
     );
   }
 
@@ -2778,18 +2992,20 @@ export class CodexBridge {
       readonly pendingAgent: string | null;
       readonly pendingKey: string | null;
       readonly pendingAt: number | null;
+      readonly internalTurnId: string | null;
     },
   ): void {
     this.db.prepare(`
       UPDATE transcript_bindings
       SET cursor = ?, pending_agent = ?, pending_key = ?, pending_at = ?,
-        updated_at = ?
+        internal_turn_id = ?, updated_at = ?
       WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
     `).run(
       cursor,
       pending.pendingAgent,
       pending.pendingKey,
       pending.pendingAt,
+      pending.internalTurnId,
       Date.now(),
       binding.server_pid,
       binding.pane_id,
@@ -3022,6 +3238,18 @@ export class CodexBridge {
         ALTER TABLE stop_events
         ADD COLUMN turn_started_at INTEGER NOT NULL DEFAULT 0
       `);
+    }
+  }
+
+  private migrateTranscriptBindings(): void {
+    const columns = new Set(
+      (this.db.prepare(`PRAGMA table_info(transcript_bindings)`).all() as
+        unknown as Array<{ name: string }>).map((column) => column.name),
+    );
+    if (!columns.has("internal_turn_id")) {
+      this.db.exec(
+        `ALTER TABLE transcript_bindings ADD COLUMN internal_turn_id TEXT`,
+      );
     }
   }
 
@@ -4300,7 +4528,8 @@ export function transcriptReasoningSummaries(record: unknown): string[] {
  */
 export function isInternalCodexPrompt(value: string): boolean {
   const prompt = value.trimStart();
-  return prompt.startsWith("# AGENTS.md instructions\n") ||
+  return isInternalMaintenancePrompt(prompt) ||
+    prompt.startsWith("# AGENTS.md instructions\n") ||
     prompt.startsWith("<environment_context>") ||
     prompt.startsWith("<permissions instructions>") ||
     prompt.startsWith("<collaboration_mode>") ||
@@ -4312,6 +4541,45 @@ export function isInternalCodexPrompt(value: string): boolean {
     prompt.startsWith(
       "You are `/root`, the primary agent in a team of agents collaborating",
     );
+}
+
+/**
+ * Codex memory maintenance is a background turn in an existing CLI session.
+ * Its prompt, activity, reasoning, and final report are implementation detail,
+ * not conversation content. Match the structured envelope rather than a loose
+ * keyword so a user can still discuss the feature normally.
+ */
+export function isInternalMaintenancePrompt(value: string): boolean {
+  const prompt = value.trimStart().replaceAll("\r\n", "\n");
+  return /^#?\s*Memory Writing Agent:\s*Phase\s+(?:1|2)\b[^\n]*\n+You are a Memory Writing Agent\b/iu
+    .test(prompt);
+}
+
+export function localPromptRelayText(value: string): string {
+  const bytes = Buffer.byteLength(value);
+  if (bytes <= MAX_LOCAL_PROMPT_RELAY_BYTES) return value;
+  return `[local VPS prompt omitted · ${bytes.toLocaleString("en-US")} bytes]`;
+}
+
+function transcriptUserPrompt(
+  record: Record<string, unknown>,
+  payload: Record<string, unknown>,
+): string | null {
+  if (
+    record.type === "event_msg" &&
+    payload.type === "user_message" &&
+    typeof payload.message === "string"
+  ) {
+    return payload.message;
+  }
+  if (
+    record.type === "response_item" &&
+    payload.type === "message" &&
+    payload.role === "user"
+  ) {
+    return transcriptMessageText(payload);
+  }
+  return null;
 }
 
 function parseCodexUsageLimit(value: unknown): CodexUsageLimit | null {

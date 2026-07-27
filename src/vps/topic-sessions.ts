@@ -22,6 +22,8 @@ import type {
   TelegramMessage,
 } from "../telegram-types";
 import {
+  CHATINABOX_LOBBY_NAME,
+  DEFAULT_CHATINABOX_LOBBY_CWD,
   isPaneIdentity,
   normalizeAssistantName,
   samePaneIdentity,
@@ -105,6 +107,11 @@ export class TopicSessionController {
       }
       const manager = this.dependencies.store.managerTopic(attachment.chat_id);
       if (manager?.message_thread_id === attachment.message_thread_id) {
+        continue;
+      }
+      // Lobby may be handed through a forum topic temporarily, but it is not a
+      // worker. Its reserved identity must never seed that topic's setup.
+      if (attachment.assistant_name === "Lobby") {
         continue;
       }
       const pane = panes.find((candidate) =>
@@ -631,7 +638,7 @@ export class TopicSessionController {
       );
       return;
     }
-    const current = this.dependencies.store.ensureTopicSetup(
+    let current = this.dependencies.store.ensureTopicSetup(
       identity.chatId,
       identity.ownerUserId,
       identity.messageThreadId,
@@ -639,6 +646,18 @@ export class TopicSessionController {
       this.dependencies.env.DEFAULT_CWD,
       sessionDefaults(this.profile()),
     );
+    if (isReservedLobbySetup(current)) {
+      current = this.dependencies.store.updateTopicSetup(
+        identity.chatId,
+        identity.ownerUserId,
+        identity.messageThreadId,
+        {
+          topic_name: "new codex chat",
+          cwd: this.dependencies.env.DEFAULT_CWD,
+          awaiting: "",
+        },
+      ) ?? current;
+    }
     if (current.closed_at) {
       const sent = await tgSendRichHtml(
         this.dependencies.env,
@@ -1141,6 +1160,28 @@ export class TopicSessionController {
         messageThreadId,
       );
       if (!row) return;
+      if (isReservedLobbySetup(row)) {
+        const repaired = this.dependencies.store.updateTopicSetup(
+          chatId,
+          ownerUserId,
+          messageThreadId,
+          {
+            topic_name: "new codex chat",
+            cwd: this.dependencies.env.DEFAULT_CWD,
+            awaiting: "",
+          },
+        );
+        await this.editSetupCard(
+          chatId,
+          ownerUserId,
+          messageThreadId,
+          messageId,
+          repaired
+            ? "Lobby is reserved. Pick a name or repository, then start the chat."
+            : "Lobby is reserved and cannot be launched as a worker.",
+        );
+        return;
+      }
       await tgEditRichHtml(
         this.dependencies.env,
         chatId,
@@ -1578,6 +1619,14 @@ export function normalizeWorkspace(value: unknown): string | null {
   const trimmed = value.trim();
   if (!path.posix.isAbsolute(trimmed)) return null;
   return path.posix.normalize(trimmed);
+}
+
+export function isReservedLobbySetup(
+  row: Pick<TopicSetupRow, "topic_name" | "cwd">,
+): boolean {
+  return row.topic_name.trim() === CHATINABOX_LOBBY_NAME ||
+    path.posix.normalize(row.cwd) ===
+      path.posix.normalize(DEFAULT_CHATINABOX_LOBBY_CWD);
 }
 
 export function formatSetupCard(

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +10,9 @@ import {
   discoverCodexWorkspaces,
   fullAccessCodexCommand,
   isInternalCodexPrompt,
+  isInternalMaintenancePrompt,
   isCompactedTranscriptPrefix,
+  localPromptRelayText,
   managedCodexStartupState,
   renderAnsiTerminalSvg,
   parseCodexUsageFromTranscriptTail,
@@ -69,6 +71,120 @@ describe("Codex bridge", () => {
     expect(isInternalCodexPrompt(
       "Can you explain what the memory message was?",
     )).toBe(false);
+  });
+
+  it("recognizes structured memory jobs without matching ordinary discussion", () => {
+    expect(isInternalMaintenancePrompt(
+      "Memory Writing Agent: Phase 2 (Consolidation)\n\n" +
+        "You are a Memory Writing Agent. Consolidate the supplied memories.",
+    )).toBe(true);
+    expect(isInternalMaintenancePrompt(
+      "# Memory Writing Agent: Phase 1\r\n\r\n" +
+        "You are a Memory Writing Agent working in a background session.",
+    )).toBe(true);
+    expect(isInternalMaintenancePrompt(
+      "Why did a Memory Writing Agent: Phase 2 message appear?",
+    )).toBe(false);
+  });
+
+  it("bounds unknown local prompt relays before Telegram sees them", () => {
+    const oversized = "x".repeat(17 * 1024);
+    expect(localPromptRelayText("normal local prompt")).toBe(
+      "normal local prompt",
+    );
+    expect(localPromptRelayText(oversized)).toBe(
+      "[local VPS prompt omitted · 17,408 bytes]",
+    );
+  });
+
+  it("quarantines a complete memory-maintenance transcript turn", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-bridge-"));
+    const databasePath = path.join(directory, "bridge.sqlite");
+    const transcriptPath = path.join(directory, "rollout.jsonl");
+    const bridge = new CodexBridge({
+      socketPath: path.join(directory, "bridge.sock"),
+      databasePath,
+    });
+    await bridge.listen();
+    try {
+      writeFileSync(
+        transcriptPath,
+        line({
+          timestamp: "2026-07-27T10:00:00.000Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: "maintenance-turn" },
+        }) +
+          line({
+            timestamp: "2026-07-27T10:00:00.100Z",
+            type: "event_msg",
+            payload: {
+              type: "user_message",
+              message: "Memory Writing Agent: Phase 2 (Consolidation)\n\n" +
+                "You are a Memory Writing Agent. Consolidate memories.",
+            },
+          }) +
+          line({
+            timestamp: "2026-07-27T10:00:01.000Z",
+            type: "response_item",
+            payload: {
+              type: "reasoning",
+              summary: [{ type: "summary_text", text: "Inspecting memory" }],
+            },
+          }) +
+          line({
+            timestamp: "2026-07-27T10:00:02.000Z",
+            type: "response_item",
+            payload: {
+              type: "message",
+              role: "assistant",
+              content: [{
+                type: "output_text",
+                text: "Consolidation is complete.",
+              }],
+            },
+          }) +
+          line({
+            timestamp: "2026-07-27T10:00:03.000Z",
+            type: "event_msg",
+            payload: { type: "task_complete", turn_id: "maintenance-turn" },
+          }),
+      );
+      const db = new DatabaseSync(databasePath);
+      db.prepare(`
+        INSERT INTO transcript_bindings (
+          server_pid, pane_id, pane_pid, session_id, transcript_path,
+          cursor, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, ?)
+      `).run(
+        100,
+        "%4",
+        200,
+        "maintenance-session",
+        transcriptPath,
+        Date.now(),
+      );
+      db.close();
+
+      await (
+        bridge as unknown as {
+          mirrorTranscriptsOnce(): Promise<void>;
+        }
+      ).mirrorTranscriptsOnce();
+
+      await expect(bridge.dispatch({ op: "events", limit: 100 }))
+        .resolves.toMatchObject({ ok: true, events: [] });
+      const verification = new DatabaseSync(databasePath);
+      expect(
+        verification.prepare(`
+          SELECT completed_at FROM internal_turns
+          WHERE session_id = ? AND turn_id = ?
+        `).get("maintenance-session", "maintenance-turn"),
+      ).toMatchObject({ completed_at: expect.any(Number) });
+      verification.close();
+    } finally {
+      await bridge.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("reads the newest trustworthy Codex usage snapshot", () => {

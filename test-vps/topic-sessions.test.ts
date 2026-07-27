@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatinaboxStore } from "../src/vps/store";
 import {
   formatSetupCard,
+  isReservedLobbySetup,
   normalizeTopicName,
   normalizeWorkspace,
   TopicSessionController,
@@ -105,6 +106,114 @@ describe("Topic session setup", () => {
     expect(normalizeTopicName("")).toBeNull();
     expect(normalizeWorkspace("/root/project/../app")).toBe("/root/app");
     expect(normalizeWorkspace("relative/project")).toBeNull();
+    expect(isReservedLobbySetup({
+      topic_name: "🪄 Lobby",
+      cwd: "/root",
+    })).toBe(true);
+    expect(isReservedLobbySetup({
+      topic_name: "review",
+      cwd: "/var/lib/chatinabox-bridge/lobby",
+    })).toBe(true);
+    expect(isReservedLobbySetup({
+      topic_name: "review",
+      cwd: "/root/chatinabox",
+    })).toBe(false);
+  });
+
+  it("never lets a temporarily attached Lobby overwrite topic setup", async () => {
+    const { controller, store } = setup();
+    store.rememberTopic(
+      -10042,
+      42,
+      7,
+      "review",
+      "/root/chatinabox",
+      { model: "sol", reasoningEffort: "high", fast: false },
+    );
+    store.attachCodex(-10042, 42, {
+      serverPid: 100,
+      paneId: "%17",
+      panePid: 217,
+      sessionName: "codex",
+      windowName: "🪄 Lobby",
+      windowIndex: 0,
+      cwd: "/var/lib/chatinabox-bridge/lobby",
+      active: true,
+      busy: false,
+      codexPid: 317,
+      assistantName: "Lobby",
+      sessionId: "lobby-session",
+    }, 7);
+
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.includes("getForumTopicIconStickers")) {
+        return {
+          json: async () => ({
+            ok: true,
+            result: [
+              { emoji: "🧪", custom_emoji_id: "working-id" },
+              { emoji: "✅", custom_emoji_id: "done-id" },
+              { emoji: "📁", custom_emoji_id: "closed-id" },
+            ],
+          }),
+        };
+      }
+      return { json: async () => ({ ok: true, result: true }) };
+    }));
+
+    await controller.refreshPresence();
+    expect(store.topicSetup(-10042, 42, 7)).toMatchObject({
+      topic_name: "review",
+      cwd: "/root/chatinabox",
+    });
+    store.close();
+  });
+
+  it("repairs stale Lobby defaults instead of launching a duplicate", async () => {
+    const { controller, store, requests, sends } = setup();
+    const topic = {
+      message_id: 10,
+      chat: { id: -10042, type: "supergroup" as const },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      forum_topic_created: { name: "review", icon_color: 1 },
+      date: 1,
+    };
+    await controller.handleMessage(topic, null);
+    await controller.handleMessage({
+      ...topic,
+      message_id: 11,
+      text: "/setup",
+      forum_topic_created: undefined,
+    }, { name: "setup", argument: "" });
+    const startCallback = callbackByLabel(sends, "new chat");
+    expect(startCallback).toBeTruthy();
+    store.updateTopicSetup(-10042, 42, 7, {
+      topic_name: "🪄 Lobby",
+      cwd: "/var/lib/chatinabox-bridge/lobby",
+    });
+
+    await controller.handleCallback({
+      id: "start-polluted",
+      from: { id: 42 },
+      message: {
+        message_id: 100,
+        message_thread_id: 7,
+        chat: { id: -10042, type: "supergroup" },
+      },
+      data: startCallback,
+    });
+
+    expect(requests.some((request) =>
+      (request as { op?: string }).op === "new"
+    )).toBe(false);
+    expect(store.topicSetup(-10042, 42, 7)).toMatchObject({
+      topic_name: "new codex chat",
+      cwd: "/root",
+    });
+    expect(JSON.stringify(sends.at(-1))).toContain("Lobby is reserved");
+    store.close();
   });
 
   it("inherits a new forum topic name and launches its configured chat", async () => {
