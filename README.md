@@ -2,18 +2,17 @@
   <img src="assets/chatinabox.svg" alt="Chatinabox — Codex sessions through Telegram" width="100%">
 </p>
 
-Chatinabox carries the Codex CLI already running on your server into a private
-Telegram chat or forum. One work topic holds one real Codex session: the same
-process, thread, workspace, tools, and terminal when you come back.
+Chatinabox lets you use the Codex CLI running on your server from Telegram.
+Each work topic is tied to a real Codex session, so you can leave, come back,
+and carry on with the same thread, workspace, tools, and terminal.
 
 [Quick start](#quick-start) · [First run](#first-run) ·
-[Artifacts](#session-artifacts) · [Architecture](docs/ARCHITECTURE.md) ·
-[Security](SECURITY.md) ·
-[Changelog](CHANGELOG.md)
+[Commands](#telegram-controls) · [Architecture](docs/ARCHITECTURE.md) ·
+[Security](SECURITY.md) · [Changelog](CHANGELOG.md)
 
-Codex still owns the model conversation, authentication, tools, compaction, and
-terminal UI. Chatinabox handles discovery, routing, Telegram presentation, and
-continuity around it.
+Codex still does the actual work. Chatinabox takes care of finding sessions,
+routing messages, and making the command-line experience comfortable inside
+Telegram.
 
 Chatinabox is an independent open-source project, not an OpenAI product.
 
@@ -24,22 +23,17 @@ Chatinabox is an independent open-source project, not an OpenAI product.
 
 ## What it does
 
-- Relays prompts, progress, reasoning summaries, final responses, files, and
-  generated images.
-- Collects native files and independently deployed apps behind an optional
-  session artifact shelf.
-- Transcribes optional Telegram voice notes with ElevenLabs Scribe v2.
-- Keeps live work in one transient message and groups reasoning into an
-  expandable thinking section.
-- Discovers, creates, resumes, renames, interrupts, and switches Codex sessions.
-- Gives forum topics working, ready, and sleeping states.
-- Preserves native Codex goals, steering, context compaction, and queued turns.
-- Maintains an overview topic and a persistent manager topic for session work.
-- Pins completed final responses as per-topic checkpoints.
-- Provides `/screen` and safe terminal key controls when its optional display
-  dependencies are installed.
-
-There is no second assistant backend and no copied conversation state.
+- Send prompts and receive progress, thinking, final replies, files, and images.
+- Keep one Codex session attached to each Telegram topic.
+- Create, resume, rename, interrupt, and switch sessions without opening a
+  terminal.
+- See which topics are working, ready, or sleeping from one overview.
+- Use a manager topic to start work and move between sessions.
+- Keep completed replies pinned as checkpoints in each topic.
+- Queue follow-up messages, send safe terminal keys, and post terminal
+  screenshots.
+- Optionally transcribe voice notes with ElevenLabs Scribe v2.
+- Optionally collect files and web apps from a session in one artifact shelf.
 
 ## Quick start
 
@@ -64,12 +58,9 @@ cd chatinabox
 sudo ./scripts/install.sh
 ```
 
-The installer runs the full verification suite before changing the host. It
-also checks Codex authentication and the full-access/trusted-hook flags, merges
-its lifecycle hooks without replacing unrelated hooks, installs an immutable
-release, and runs `chatinabox doctor`. On upgrades it preserves the existing
-token, paths, defaults, profile, and state. A failed activation restores the
-previous release.
+The installer checks the host and runs the test suite before changing anything.
+It keeps existing tokens, settings, profiles, and session state during
+upgrades, and rolls back if the new release does not start cleanly.
 
 Non-interactive install:
 
@@ -79,80 +70,25 @@ sudo CHATINABOX_TG_BOT_TOKEN='123:secret' \
   ./scripts/install.sh
 ```
 
-### Optional voice notes
-
-Configure an ElevenLabs API key during installation:
-
-```sh
-sudo ELEVENLABS_API_KEY='your-key' \
-  ./scripts/install.sh
-```
-
-Telegram voice notes and audio uploads then reach Codex like typed messages.
-Chatinabox replies to the voice note with the exact Scribe transcript before
-relaying it, so the recognized prompt stays visible. Audio is sent to Scribe v2
-in memory and is not added to the local attachment store.
-`CHATINABOX_SCRIBE_LANGUAGE` defaults to `eng`; optional comma-separated
-`CHATINABOX_SCRIBE_KEYTERMS` can improve technical-term recognition.
-
 Check the host and source without installing:
 
 ```sh
 sudo ./scripts/install.sh --dry-run
 ```
 
-### Session artifacts
-
-Agents get one simple sharing surface without losing control over how rich
-artifacts are made:
-
-```sh
-# Native Telegram delivery
-chatinabox share ./diagram.png "Architecture diagram" --json
-
-# A full app deployed through any suitable hosting route
-chatinabox share 'https://artifact.example/app' \
-  "Interactive architecture" \
-  --title "Architecture explorer" \
-  --kind "interactive-app" \
-  --json
-```
-
-Each call registers another output against the current Codex session. Local
-files still arrive natively in Telegram. Websites, visualizations, Mini Apps,
-and other complex outputs stay free to use any framework, deployment process,
-and host their requirements call for; Chatinabox only maintains navigation.
-
-Native sharing needs no extra setup. To add the session-level web or Telegram
-Mini App shelf, configure any compatible publisher during installation:
-
-```sh
-sudo \
-  CHATINABOX_ARTIFACTS_API_URL='https://artifacts.example.com/api/' \
-  CHATINABOX_ARTIFACTS_API_TOKEN='a-long-random-publisher-secret' \
-  ./scripts/install.sh
-```
-
-The repository includes a production reference Mini App in
-[`artifact-shelf/`](artifact-shelf/). The open publisher contract, deployment
-setup, security requirements, and full agent workflow are in
-[Artifact shelf publisher](docs/ARTIFACT-PUBLISHER.md).
-
 ## First run
 
 Open the bot in a private chat and send `/start`.
 
-The setup guide works from ordinary conversation. It can propose and apply:
+Setup happens through ordinary conversation. It can help you choose:
 
 - the Telegram bot name and photo;
 - the forum group name and photo;
 - the dashboard and manager identities;
 - default models, reasoning level, speed, workspaces, and idle policy.
 
-It shows a compact preview before changing anything. The result is stored in
-`/etc/chatinabox/profile.json`, outside the repository, and survives upgrades.
-Fresh installs use neutral names; none of the maintainer's personal identity is
-part of the product defaults.
+You get a preview before anything changes. Your choices are stored in
+`/etc/chatinabox/profile.json` and survive upgrades.
 
 For a forum, create a private supergroup, enable Topics, and add the bot as an
 administrator. It needs permission to manage topics, pin and delete messages,
@@ -168,6 +104,29 @@ manager can handle the same setup in plain language.
 
 Pin the overview and manager topics in Telegram's forum list. Chatinabox pins
 final responses inside each work topic as its checkpoint history.
+
+## Optional extras
+
+### Voice notes
+
+Add an ElevenLabs API key during installation:
+
+```sh
+sudo ELEVENLABS_API_KEY='your-key' ./scripts/install.sh
+```
+
+Telegram voice notes and audio uploads will then be transcribed with Scribe v2
+before they are sent to Codex. Chatinabox replies to the original message with
+the transcript, so you can see exactly what was heard. The language defaults to
+English; `CHATINABOX_SCRIBE_LANGUAGE` and `CHATINABOX_SCRIBE_KEYTERMS` can be
+used for other languages or technical terms.
+
+### Artifact shelf
+
+`chatinabox share` can send a file or link to Telegram and add it to the current
+session's shelf. The shelf is optional; normal file and image delivery works
+without it. If you want to set it up, see
+[Artifact shelf setup](docs/ARTIFACT-PUBLISHER.md).
 
 ## Profile
 
@@ -189,7 +148,7 @@ Photos are normalized to square JPEG assets under
 `/var/lib/chatinabox/profile-assets`. `profile sync` reapplies the configured
 bot and forum identity after permissions change.
 
-The complete neutral schema is in
+The default profile is in
 [`ops/chatinabox-profile.json`](ops/chatinabox-profile.json).
 
 ## Telegram controls
@@ -205,7 +164,7 @@ The complete neutral schema is in
 | `/codex new [name]` | Start a worker in a new linked topic |
 | `/codex rename name` | Rename the attached session |
 | `/codex interrupt` | Interrupt the current turn |
-| `/codex detach` | Open the Nox manager topic |
+| `/codex detach` | Open the manager topic |
 | `/queue text` | Hold a message for the next turn |
 | Voice note | Transcribe with Scribe v2 and send it as a prompt |
 | `/screen` | Post the current terminal view |
@@ -216,7 +175,7 @@ The complete neutral schema is in
 
 ## Local control
 
-Codex and host scripts use a small typed command surface:
+The same session controls are available to local scripts:
 
 ```sh
 chatinabox catalog --json
@@ -227,10 +186,9 @@ chatinabox self lobby --json
 chatinabox send-image /tmp/chart.png "Latest result" --json
 ```
 
-Session mutations use tmux server PID, pane ID, and pane PID rather than display
-names alone. Media commands prefer the current worker's attached Telegram
-group and topic. Images created by Codex for a Telegram-originated turn are
-forwarded to that same topic automatically.
+Files and images are sent back to the Telegram topic attached to the current
+session. Images created during a Telegram turn are forwarded there
+automatically.
 
 ## Operations
 
