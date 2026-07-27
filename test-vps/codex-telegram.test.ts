@@ -19,6 +19,7 @@ import {
   parseArrowShortcut,
   sanitizeAttachmentFileName,
   selectTelegramMedia,
+  visibleCodexGoal,
 } from "../src/vps/codex-telegram";
 import type { TelegramMessage } from "../src/telegram-types";
 import {
@@ -162,6 +163,27 @@ describe("Codex Telegram attachments", () => {
     expect(prompt).toContain(
       "Keep this objective until replacement succeeds",
     );
+  });
+
+  it("keeps completed goals out of later live transients", () => {
+    const complete = {
+      chat_id: -10042,
+      owner_user_id: 42,
+      message_thread_id: 7,
+      thread_id: "thread",
+      objective: "Already finished",
+      status: "complete" as const,
+      token_budget: null,
+      tokens_used: 1_000,
+      time_used_seconds: 20,
+      goal_created_at: 100,
+      goal_updated_at: 200,
+      observed_at: 300,
+      awaiting_edit: 0,
+    };
+    expect(visibleCodexGoal(complete)).toBeNull();
+    expect(visibleCodexGoal({ ...complete, status: "paused" }))
+      .toMatchObject({ status: "paused" });
   });
 
   it("selects the largest Telegram photo variant", () => {
@@ -567,10 +589,33 @@ describe("Codex Telegram attachments", () => {
       JSON.stringify(call.body).includes("Ship native goals")
     )).toBe(true);
 
+    const firstTransient = store.clearCodexStatus(
+      -10042,
+      42,
+      { serverPid: 100, paneId: "%4", panePid: 200 },
+    );
+    expect(firstTransient).not.toBeNull();
+    const sendsBeforeResync = calls.filter(
+      (call) => call.method === "sendRichMessage",
+    ).length;
+    await controller.syncGoalsOnce();
+    expect(store.codexStatus(
+      -10042,
+      42,
+      { serverPid: 100, paneId: "%4", panePid: 200 },
+    )).toMatchObject({ status_kind: "state_goal" });
+    expect(calls.filter((call) => call.method === "sendRichMessage").length)
+      .toBe(sendsBeforeResync + 1);
+
     status = "complete";
     await controller.syncGoalsOnce();
     expect(store.pendingCodexGoalCompletions()).toHaveLength(0);
     expect(store.recentCompletedCodexGoals(-10042)).toHaveLength(1);
+    expect(store.codexStatus(
+      -10042,
+      42,
+      { serverPid: 100, paneId: "%4", panePid: 200 },
+    )).toBeNull();
     expect(calls.some((call) =>
       JSON.stringify(call.body).includes("goal complete")
     )).toBe(true);

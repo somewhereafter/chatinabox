@@ -1312,7 +1312,13 @@ export class CodexTelegramController {
           await this.removeGoalOnlyTransient(attachment);
           continue;
         }
+        const transient = this.dependencies.store.codexStatus(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          attachmentTarget(attachment),
+        );
         if (
+          !transient ||
           !previous ||
           previous.goal_updated_at !== current?.goal_updated_at ||
           previous.status !== current?.status ||
@@ -2026,11 +2032,12 @@ export class CodexTelegramController {
     if (!previous) return;
     const mutation = this.beginTransientMutation(attachment, target);
     const snapshot = statusSnapshotFromRow(previous, null);
-    const goal = this.dependencies.store.codexGoal(
+    const storedGoal = this.dependencies.store.codexGoal(
       attachment.chat_id,
       attachment.owner_user_id,
       attachment.message_thread_id,
     );
+    const goal = visibleCodexGoal(storedGoal);
     const html = formatCodexTransientRichHtml(
       snapshot,
       this.now(),
@@ -2108,11 +2115,12 @@ export class CodexTelegramController {
       replyToMessageId,
       Date.now(),
     );
-    const goal = this.dependencies.store.codexGoal(
+    const storedGoal = this.dependencies.store.codexGoal(
       attachment.chat_id,
       attachment.owner_user_id,
       attachment.message_thread_id,
     );
+    const goal = visibleCodexGoal(storedGoal);
     const html = formatCodexTransientRichHtml(
       snapshot,
       Date.now(),
@@ -2250,11 +2258,12 @@ export class CodexTelegramController {
   ): Promise<void> {
     const mutation = this.beginTransientMutation(attachment, target);
     const snapshot = statusSnapshotFromRow(previous, null);
-    const goal = this.dependencies.store.codexGoal(
+    const storedGoal = this.dependencies.store.codexGoal(
       attachment.chat_id,
       attachment.owner_user_id,
       attachment.message_thread_id,
     );
+    const goal = visibleCodexGoal(storedGoal);
     const html = formatCodexTransientRichHtml(
       snapshot,
       Date.now(),
@@ -3816,6 +3825,12 @@ export function formatGoalEditPrompt(goal: CodexGoalRow): string {
       truncateVisible(goal.objective, 700),
     )}</p>`
   );
+}
+
+export function visibleCodexGoal(
+  goal: CodexGoalRow | null,
+): CodexGoalRow | null {
+  return goal?.status === "complete" ? null : goal;
 }
 
 function threadGoalFromRow(goal: CodexGoalRow): CodexThreadGoal {
