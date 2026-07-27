@@ -4,6 +4,24 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.3.0 — 2026-07-27
+
+- Added provider-neutral session artifact shelves: agents can share native
+  Telegram files or register independently deployed HTTPS apps without being
+  constrained to one format, framework, output directory, or host.
+- Added a production reference Telegram Mini App with durable manifest
+  storage, an authenticated publisher API, opaque session links, a compact
+  glass sidebar, and full-viewport artifact rendering.
+- Added typed `chatinabox share` and `artifact` commands, installer-managed
+  publisher settings, health diagnostics, agent guidance, and an open
+  publisher contract.
+- Coalesced Telegram progress across active topics, kept thinking attached to
+  the output it precedes, and rate-limited overview, goal, and usage refreshes
+  without reducing Codex work or context.
+- Prevented Spark telemetry from replacing the normal Codex allowance, reaped
+  app-server helpers reliably, and disabled MCP tools in internal goal
+  inspection turns to avoid background load and process buildup.
+
 ## 2.2.2 — 2026-07-27
 
 - Kept established forum topics bound to their own workers: handoffs and

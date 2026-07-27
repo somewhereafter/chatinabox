@@ -56,6 +56,17 @@ The typed local API is available through `chatinabox`:
   the Lobby unless the user explicitly requests it.
 - `chatinabox send-image FILE CAPTION --json` and `send-file` — deliver
   local artifacts to the user.
+- `chatinabox share SOURCE CAPTION --title TITLE --kind KIND --json` —
+  deliver and register one artifact on the current session shelf.
+- `chatinabox artifact list --json` and `artifact sync` — inspect or
+  republish the current session shelf.
+
+Artifact navigation must not constrain artifact creation. Use native delivery
+for simple local files. For a substantial website, application, interactive
+visualization, or other rich output, use whatever build and deployment route
+best fits the work, then register its HTTPS URL with `chatinabox share`.
+Multiple calls collect multiple outputs under the same session. Chatinabox
+does not require one framework, format, output directory, or hosting provider.
 
 The canonical `name` in `catalog` is the user-visible session name. Never call a
 tmux server/session container (for example `webterm`) the session name. Do not

@@ -27,6 +27,8 @@ fi
 provided_scribe_api_key="${ELEVENLABS_API_KEY:-}"
 provided_scribe_language="${CHATINABOX_SCRIBE_LANGUAGE:-}"
 provided_scribe_keyterms="${CHATINABOX_SCRIBE_KEYTERMS:-}"
+provided_artifact_api_url="${CHATINABOX_ARTIFACTS_API_URL:-}"
+provided_artifact_api_token="${CHATINABOX_ARTIFACTS_API_TOKEN:-}"
 
 env_file=/etc/chatinabox/chatinabox.env
 if [[ -f "$env_file" ]]; then
@@ -108,6 +110,19 @@ fi
 scribe_api_key="${provided_scribe_api_key:-${ELEVENLABS_API_KEY:-}}"
 scribe_language="${provided_scribe_language:-${CHATINABOX_SCRIBE_LANGUAGE:-eng}}"
 scribe_keyterms="${provided_scribe_keyterms:-${CHATINABOX_SCRIBE_KEYTERMS:-}}"
+artifact_api_url="${provided_artifact_api_url:-${CHATINABOX_ARTIFACTS_API_URL:-}}"
+artifact_api_token="${provided_artifact_api_token:-${CHATINABOX_ARTIFACTS_API_TOKEN:-}}"
+if [[ -n "$artifact_api_url" || -n "$artifact_api_token" ]]; then
+  if [[ -z "$artifact_api_url" || -z "$artifact_api_token" ]]; then
+    echo "Artifact shelves require both CHATINABOX_ARTIFACTS_API_URL and CHATINABOX_ARTIFACTS_API_TOKEN." >&2
+    exit 1
+  fi
+  if [[ ! "$artifact_api_url" =~ ^https://[^[:space:]]+$ ]] ||
+      [[ "$artifact_api_token" == *$'\n'* || "$artifact_api_token" == *$'\r'* ]]; then
+    echo "Artifact shelf API URL or token is invalid." >&2
+    exit 1
+  fi
+fi
 
 printf '\n› Building and testing Chatinabox\n'
 (
@@ -185,6 +200,7 @@ install -o root -g chatinabox -m 0640 /dev/null "$env_file"
   printf 'CHATINABOX_DATA_DIR=%s\n' "${CHATINABOX_DATA_DIR:-/var/lib/chatinabox}"
   printf 'CHATINABOX_BRIDGE_SOCKET=%s\n' "${CHATINABOX_BRIDGE_SOCKET:-/run/chatinabox/bridge.sock}"
   printf 'CHATINABOX_BRIDGE_DB=%s\n' "${CHATINABOX_BRIDGE_DB:-/var/lib/chatinabox-bridge/bridge.sqlite}"
+  printf 'CHATINABOX_ARTIFACT_DB=%s\n' "${CHATINABOX_ARTIFACT_DB:-/var/lib/chatinabox-bridge/artifacts.sqlite}"
   printf 'CHATINABOX_DEFAULT_CWD=%s\n' "${CHATINABOX_DEFAULT_CWD:-/root}"
   printf 'CHATINABOX_WORKSPACE_ROOTS=%s\n' "${CHATINABOX_WORKSPACE_ROOTS:-/root}"
   printf 'CHATINABOX_LOBBY_CWD=%s\n' "${CHATINABOX_LOBBY_CWD:-/var/lib/chatinabox-bridge/lobby}"
@@ -193,6 +209,10 @@ install -o root -g chatinabox -m 0640 /dev/null "$env_file"
   printf 'CHATINABOX_TMUX_PATH=%s\n' "$tmux_path"
   printf 'CHATINABOX_CONVERT_PATH=%s\n' "$convert_path"
   printf 'CHATINABOX_CHROME_PATH=%s\n' "$chrome_path"
+  if [[ -n "$artifact_api_url" ]]; then
+    printf 'CHATINABOX_ARTIFACTS_API_URL=%s\n' "$artifact_api_url"
+    printf 'CHATINABOX_ARTIFACTS_API_TOKEN=%s\n' "$artifact_api_token"
+  fi
   if [[ -n "$scribe_api_key" ]]; then
     printf 'ELEVENLABS_API_KEY=%s\n' "$scribe_api_key"
     printf 'CHATINABOX_SCRIBE_LANGUAGE=%s\n' "$scribe_language"

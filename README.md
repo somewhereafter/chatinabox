@@ -7,7 +7,8 @@ Telegram chat or forum. One work topic holds one real Codex session: the same
 process, thread, workspace, tools, and terminal when you come back.
 
 [Quick start](#quick-start) · [First run](#first-run) ·
-[Architecture](docs/ARCHITECTURE.md) · [Security](SECURITY.md) ·
+[Artifacts](#session-artifacts) · [Architecture](docs/ARCHITECTURE.md) ·
+[Security](SECURITY.md) ·
 [Changelog](CHANGELOG.md)
 
 Codex still owns the model conversation, authentication, tools, compaction, and
@@ -25,6 +26,8 @@ Chatinabox is an independent open-source project, not an OpenAI product.
 
 - Relays prompts, progress, reasoning summaries, final responses, files, and
   generated images.
+- Collects native files and independently deployed apps behind an optional
+  session artifact shelf.
 - Transcribes optional Telegram voice notes with ElevenLabs Scribe v2.
 - Keeps live work in one transient message and groups reasoning into an
   expandable thinking section.
@@ -97,6 +100,43 @@ Check the host and source without installing:
 ```sh
 sudo ./scripts/install.sh --dry-run
 ```
+
+### Session artifacts
+
+Agents get one simple sharing surface without losing control over how rich
+artifacts are made:
+
+```sh
+# Native Telegram delivery
+chatinabox share ./diagram.png "Architecture diagram" --json
+
+# A full app deployed through any suitable hosting route
+chatinabox share 'https://artifact.example/app' \
+  "Interactive architecture" \
+  --title "Architecture explorer" \
+  --kind "interactive-app" \
+  --json
+```
+
+Each call registers another output against the current Codex session. Local
+files still arrive natively in Telegram. Websites, visualizations, Mini Apps,
+and other complex outputs stay free to use any framework, deployment process,
+and host their requirements call for; Chatinabox only maintains navigation.
+
+Native sharing needs no extra setup. To add the session-level web or Telegram
+Mini App shelf, configure any compatible publisher during installation:
+
+```sh
+sudo \
+  CHATINABOX_ARTIFACTS_API_URL='https://artifacts.example.com/api/' \
+  CHATINABOX_ARTIFACTS_API_TOKEN='a-long-random-publisher-secret' \
+  ./scripts/install.sh
+```
+
+The repository includes a production reference Mini App in
+[`artifact-shelf/`](artifact-shelf/). The open publisher contract, deployment
+setup, security requirements, and full agent workflow are in
+[Artifact shelf publisher](docs/ARTIFACT-PUBLISHER.md).
 
 ## First run
 

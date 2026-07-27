@@ -1,0 +1,613 @@
+@import "tailwindcss";
+
+/* ==========================================================================
+   Artifact shelf — a black canvas, one glass control, one drawer.
+   The shell owns the chrome. Artifacts own everything else.
+   ========================================================================== */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  color-scheme: dark;
+
+  --void: #000000;
+  --bone: #e7e2d6;
+  --fg: var(--bone);
+  --fg-dim: rgba(231, 226, 214, 0.58);
+  --fg-faint: rgba(231, 226, 214, 0.34);
+  --hairline: rgba(231, 226, 214, 0.1);
+  --hairline-soft: rgba(231, 226, 214, 0.06);
+  --accent: #7fb9b4;
+  --accent-dim: rgba(127, 185, 180, 0.4);
+
+  --shelf-w: min(19.5rem, 84vw);
+  --inset-top: env(safe-area-inset-top, 0px);
+  --inset-right: env(safe-area-inset-right, 0px);
+  --inset-bottom: env(safe-area-inset-bottom, 0px);
+  --inset-left: env(safe-area-inset-left, 0px);
+
+  /* Artifacts can reserve this much top-left space to clear the floating
+     menu control. Everything else on the canvas is theirs. */
+  --trigger-inset: calc(var(--inset-top) + 4.5rem);
+
+  --ease: cubic-bezier(0.22, 0.68, 0.16, 1);
+  --dur: 240ms;
+}
+
+html {
+  height: 100%;
+  background: var(--void);
+}
+
+body {
+  height: 100%;
+  background: var(--void);
+  color: var(--fg);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  /* The canvas scrolls; the document never does. */
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+button {
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+}
+
+:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------------------------
+   Canvas — the whole viewport, no assumptions imposed on its contents.
+   -------------------------------------------------------------------------- */
+
+.canvas {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--app-h, 100dvh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+.canvas:focus {
+  outline: none;
+}
+
+/* --------------------------------------------------------------------------
+   Empty state — deliberately near-black, with a horizon of dithered light.
+   -------------------------------------------------------------------------- */
+
+.empty {
+  position: relative;
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: var(--trigger-inset) calc(var(--inset-right) + 1.5rem)
+    calc(var(--inset-bottom) + 1.5rem) calc(var(--inset-left) + 1.5rem);
+}
+
+/* A horizon and its dithered reflection — the whole ornament of this page. */
+.empty::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 66%;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent 6%,
+    rgba(127, 185, 180, 0.16),
+    transparent 94%
+  );
+  pointer-events: none;
+}
+
+.empty::after {
+  content: "";
+  position: absolute;
+  inset: 66% 0 0 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(127, 185, 180, 0.08) 0 1px,
+    transparent 1px 3px
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent,
+    #000 14%,
+    transparent 78%
+  );
+  mask-image: linear-gradient(to bottom, transparent, #000 14%, transparent 78%);
+  pointer-events: none;
+}
+
+.empty-inner {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  gap: 0.875rem;
+  text-align: center;
+}
+
+.empty-rule {
+  width: 3.5rem;
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    var(--accent-dim),
+    transparent
+  );
+}
+
+.empty-title,
+.empty-sub,
+.shelf-eyebrow,
+.shelf-count,
+.row-name,
+.row-kind,
+.row-meta,
+.shelf-foot {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+}
+
+.empty-title {
+  font-size: 0.6875rem;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.empty-sub {
+  font-size: 0.625rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+/* --------------------------------------------------------------------------
+   Trigger — the only permanent control on the page.
+   -------------------------------------------------------------------------- */
+
+.trigger {
+  position: fixed;
+  z-index: 60;
+  top: calc(var(--inset-top) + 0.75rem);
+  left: calc(var(--inset-left) + 0.75rem);
+  width: 2.5rem;
+  height: 2.5rem;
+  border-radius: 0.6875rem;
+  border: 1px solid rgba(231, 226, 214, 0.13);
+  background: rgba(16, 16, 16, 0.52);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
+  box-shadow:
+    inset 0 1px 0 rgba(231, 226, 214, 0.08),
+    0 10px 30px rgba(0, 0, 0, 0.55);
+  transition:
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
+}
+
+/* Comfortable touch target without a bulky visual. */
+.trigger::before {
+  content: "";
+  position: absolute;
+  inset: -0.375rem;
+}
+
+/* Quiet accent while the canvas is empty: the one thing worth finding. */
+.trigger[data-idle="true"] {
+  border-color: rgba(127, 185, 180, 0.26);
+  box-shadow:
+    inset 0 1px 0 rgba(231, 226, 214, 0.08),
+    0 0 22px -12px var(--accent);
+}
+
+.trigger-glyph {
+  position: absolute;
+  inset: 0;
+}
+
+.bar {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 0.875rem;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--fg);
+  transition:
+    transform var(--dur) var(--ease),
+    opacity 140ms linear;
+}
+
+.bar:nth-child(1) {
+  transform: translate(-50%, calc(-50% - 4.5px));
+}
+
+.bar:nth-child(2) {
+  transform: translate(-50%, -50%);
+}
+
+.bar:nth-child(3) {
+  transform: translate(-50%, calc(-50% + 4.5px));
+}
+
+.trigger[data-open="true"] .bar:nth-child(1) {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.trigger[data-open="true"] .bar:nth-child(2) {
+  opacity: 0;
+  transform: translate(-50%, -50%) scaleX(0.4);
+}
+
+.trigger[data-open="true"] .bar:nth-child(3) {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+/* --------------------------------------------------------------------------
+   Shelf — compact, dark, functional.
+   -------------------------------------------------------------------------- */
+
+.shelf {
+  position: fixed;
+  z-index: 50;
+  top: 0;
+  left: 0;
+  width: var(--shelf-w);
+  height: var(--app-h, 100dvh);
+  display: flex;
+  flex-direction: column;
+  background: rgba(0, 0, 0, 0.9);
+  backdrop-filter: blur(22px) saturate(130%);
+  -webkit-backdrop-filter: blur(22px) saturate(130%);
+  border-right: 1px solid var(--hairline);
+  transform: translate3d(-101%, 0, 0);
+  transition: transform var(--dur) var(--ease);
+  will-change: transform;
+}
+
+.shelf[data-open="true"] {
+  transform: translate3d(0, 0, 0);
+}
+
+/* Faint scanline grain, echoing the artwork this shell is dressed after. */
+.shelf::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(231, 226, 214, 0.016) 0 1px,
+    transparent 1px 3px
+  );
+  pointer-events: none;
+}
+
+.shelf-head {
+  display: grid;
+  gap: 0.3125rem;
+  padding: var(--trigger-inset) 1rem 0.875rem calc(var(--inset-left) + 1rem);
+  border-bottom: 1px solid var(--hairline-soft);
+}
+
+.shelf-eyebrow {
+  font-size: 0.5625rem;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--accent);
+  opacity: 0.75;
+}
+
+.shelf-title {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+}
+
+.shelf-count {
+  display: flex;
+  align-items: center;
+  gap: 0.4375rem;
+  font-size: 0.625rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-faint);
+}
+
+.dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-dim);
+}
+
+.shelf-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.5rem 0.375rem;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(231, 226, 214, 0.16) transparent;
+}
+
+.shelf-message {
+  padding: 0.75rem;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.6875rem;
+  line-height: 1.55;
+  color: var(--fg-faint);
+}
+
+.shelf-list {
+  display: grid;
+  gap: 1px;
+  list-style: none;
+}
+
+.row {
+  position: relative;
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.125rem 0.5rem;
+  padding: 0.5rem 0.5rem 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  text-align: left;
+  transition:
+    background var(--dur) var(--ease),
+    color var(--dur) var(--ease);
+}
+
+.row::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0.1875rem;
+  width: 2px;
+  height: 0;
+  border-radius: 1px;
+  background: var(--accent);
+  transform: translateY(-50%);
+  transition: height var(--dur) var(--ease);
+}
+
+.row-name {
+  min-width: 0;
+  font-size: 0.75rem;
+  letter-spacing: -0.005em;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: color var(--dur) var(--ease);
+}
+
+.row-kind {
+  padding: 0.0625rem 0.25rem;
+  border: 1px solid var(--hairline);
+  border-radius: 0.25rem;
+  font-size: 0.5625rem;
+  letter-spacing: 0.12em;
+  color: var(--fg-faint);
+}
+
+.row-meta {
+  grid-column: 1 / -1;
+  font-size: 0.625rem;
+  letter-spacing: 0.02em;
+  color: var(--fg-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (hover: hover) {
+  .row:hover {
+    background: rgba(231, 226, 214, 0.04);
+  }
+
+  .row:hover .row-name {
+    color: var(--fg);
+  }
+
+  .trigger:hover {
+    background: rgba(28, 28, 28, 0.62);
+    border-color: rgba(231, 226, 214, 0.2);
+  }
+}
+
+.row[aria-current="true"] {
+  background: rgba(231, 226, 214, 0.055);
+}
+
+.row[aria-current="true"]::before {
+  height: 1.125rem;
+}
+
+.row[aria-current="true"] .row-name {
+  color: var(--fg);
+}
+
+.row[aria-current="true"] .row-kind {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.shelf-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem calc(var(--inset-bottom) + 0.75rem)
+    calc(var(--inset-left) + 1rem);
+  border-top: 1px solid var(--hairline-soft);
+  font-size: 0.5625rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* Buttons do not inherit text-transform from the UA sheet. */
+.foot-action {
+  color: var(--fg-dim);
+  text-transform: uppercase;
+  text-decoration: none;
+  transition: color var(--dur) var(--ease);
+}
+
+.foot-action:hover {
+  color: var(--accent);
+}
+
+.foot-note {
+  color: var(--fg-faint);
+}
+
+/* --------------------------------------------------------------------------
+   Scrim
+   -------------------------------------------------------------------------- */
+
+.scrim {
+  position: fixed;
+  z-index: 40;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--app-h, 100dvh);
+  background: rgba(0, 0, 0, 0.62);
+  opacity: 0;
+  visibility: hidden;
+  transition:
+    opacity var(--dur) var(--ease),
+    visibility var(--dur) var(--ease);
+}
+
+.scrim[data-open="true"] {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* ==========================================================================
+   Artifact surfaces. The iframe owns the full canvas; the notice is used only
+   when an artifact explicitly asks to open externally or exists in Telegram.
+   ========================================================================== */
+
+.artifact-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: transparent;
+}
+
+.artifact-notice {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: var(--trigger-inset) calc(var(--inset-right) + 1.5rem)
+    calc(var(--inset-bottom) + 2rem) calc(var(--inset-left) + 1.5rem);
+  background: #020202;
+}
+
+.artifact-notice-inner {
+  width: min(30rem, 100%);
+  display: grid;
+  gap: 0.875rem;
+}
+
+.artifact-notice-eyebrow {
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.625rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.artifact-notice h2 {
+  font-size: clamp(1.875rem, 7vw, 2.75rem);
+  font-weight: 500;
+  line-height: 1.02;
+  letter-spacing: -0.035em;
+  color: var(--bone);
+}
+
+.artifact-notice p {
+  font-size: 0.875rem;
+  line-height: 1.6;
+  color: var(--fg-dim);
+}
+
+.artifact-notice-action {
+  margin-top: 0.5rem;
+}
+
+.artifact-notice-action a {
+  display: inline-flex;
+  min-height: 2.5rem;
+  align-items: center;
+  padding: 0 0.875rem;
+  border: 1px solid var(--accent-dim);
+  border-radius: 0.5rem;
+  font-family: var(--font-geist-mono), ui-monospace, monospace;
+  font-size: 0.6875rem;
+  letter-spacing: 0.12em;
+  text-decoration: none;
+  text-transform: uppercase;
+  color: var(--bone);
+}
+
+/* --------------------------------------------------------------------------
+   Motion
+   -------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+  }
+}
