@@ -128,11 +128,16 @@ topics in the forum list so the two control surfaces stay easy to reach. In work
 topics, the bot pins each completed final response as a navigable checkpoint;
 Telegram keeps the topic's checkpoint pins in its native order.
 
-In each work topic, `/setup` opens a compact starter for topic name, model,
-reasoning effort, speed, and workspace. Telegram topic renames remain synced to
-the live Codex/tmux session. If an idle topic has gone to sleep, its next
-ordinary message resumes the saved Codex chat, shows a short wake-up notice,
-waits for the worker to settle, and then relays that original message.
+Creating a work topic opens a compact starter automatically. Pick a detected
+Git repository (or enter a path), tune the topic name/model/reasoning/speed, and
+either start a fresh chat, connect an unbound running Codex session, or resume a
+recent saved Codex chat. The configured manager can also join that one topic as
+a temporary natural-language setup guide and hand it over to the real worker;
+the permanent manager session stays in place. `/setup` reopens the starter.
+Telegram topic renames remain synced to the live Codex/tmux session. If an idle
+topic has gone to sleep, its next ordinary message resumes the saved Codex
+chat, shows a short wake-up notice, waits for the worker to settle, and then
+relays that original message.
 
 Visible Codex thought summaries are grouped into one expandable **show
 thinking** section per uninterrupted reasoning run. The section is updated at a

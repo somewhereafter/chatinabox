@@ -34,6 +34,7 @@ import {
   type CodexPane,
   type CodexPaneIdentity,
   type CodexRecentSession,
+  type CodexWorkspace,
   type CodexUsage,
   type CodexUsageLimit,
   type CodexEvent,
@@ -112,6 +113,7 @@ interface BridgeOptions {
   readonly defaultCwd?: string;
   readonly lobbyCwd?: string;
   readonly managerCwd?: string;
+  readonly workspaceRoots?: readonly string[];
 }
 
 interface ProcessRow {
@@ -353,6 +355,14 @@ export class CodexBridge {
           usage: await this.latestCodexUsage(),
         };
         }
+      case "workspaces":
+        return {
+          ok: true,
+          workspaces: await discoverCodexWorkspaces(
+            this.options.workspaceRoots ??
+              [this.options.defaultCwd ?? homedir()],
+          ),
+        };
       case "send":
         return this.sendPrompt(request);
       case "interrupt":
@@ -3116,6 +3126,83 @@ function normalizeLabel(value: string, max: number): string {
 
 function normalizeCwd(value: string): string {
   return value.includes("\u0000") ? "/" : value.slice(0, 4_096);
+}
+
+const WORKSPACE_SCAN_LIMIT = 32;
+const WORKSPACE_SCAN_DEPTH = 3;
+const WORKSPACE_DIRECTORY_VISIT_LIMIT = 384;
+const WORKSPACE_IGNORED_DIRECTORIES = new Set([
+  ".cache",
+  ".codex",
+  ".config",
+  ".local",
+  ".npm",
+  ".rustup",
+  ".ssh",
+  ".tmux",
+  ".venv",
+  "build",
+  "dist",
+  "node_modules",
+  "target",
+  "vendor",
+]);
+
+export async function discoverCodexWorkspaces(
+  configuredRoots: readonly string[],
+): Promise<CodexWorkspace[]> {
+  const roots = [...new Set(configuredRoots
+    .map((root) => root.trim())
+    .filter((root) => root && path.isAbsolute(root))
+    .map((root) => path.resolve(root)))];
+  const workspaces = new Map<string, CodexWorkspace>();
+  let visitedDirectories = 0;
+
+  const visit = async (
+    directory: string,
+    depth: number,
+    configuredRoot: boolean,
+  ): Promise<void> => {
+    if (
+      workspaces.size >= WORKSPACE_SCAN_LIMIT ||
+      visitedDirectories >= WORKSPACE_DIRECTORY_VISIT_LIMIT
+    ) return;
+    visitedDirectories += 1;
+    const entries = await readdir(directory, { withFileTypes: true }).catch(
+      () => [],
+    );
+    const isRepository = entries.some((entry) => entry.name === ".git");
+    if (isRepository) {
+      const canonical = await realpath(directory).catch(() => directory);
+      workspaces.set(canonical, {
+        path: canonical,
+        name: path.basename(canonical) || canonical,
+      });
+      if (!configuredRoot) return;
+    }
+    if (depth >= WORKSPACE_SCAN_DEPTH) return;
+    const children = entries
+      .filter((entry) =>
+        entry.isDirectory() &&
+        !WORKSPACE_IGNORED_DIRECTORIES.has(entry.name) &&
+        !entry.name.startsWith("."))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    for (const child of children) {
+      await visit(path.join(directory, child.name), depth + 1, false);
+      if (
+        workspaces.size >= WORKSPACE_SCAN_LIMIT ||
+        visitedDirectories >= WORKSPACE_DIRECTORY_VISIT_LIMIT
+      ) break;
+    }
+  };
+
+  for (const root of roots) {
+    await visit(root, 0, true);
+    if (workspaces.size >= WORKSPACE_SCAN_LIMIT) break;
+  }
+  return [...workspaces.values()].sort((left, right) =>
+    left.name.localeCompare(right.name) || left.path.localeCompare(right.path)
+  );
 }
 
 function normalizeRequestedName(value: unknown): string {

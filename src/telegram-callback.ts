@@ -29,6 +29,13 @@ export const CALLBACK_ACTIONS = [
   "topic_setup.speed",
   "topic_setup.name",
   "topic_setup.cwd",
+  "topic_setup.repositories",
+  "topic_setup.workspace_select",
+  "topic_setup.sessions",
+  "topic_setup.attach",
+  "topic_setup.resume",
+  "topic_setup.nox",
+  "topic_setup.back",
   "topic_setup.start",
   "topic_setup.restart",
 ] as const;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +7,7 @@ import {
   CodexBridge,
   buildClarityTerminalHtml,
   consumeTranscriptLines,
+  discoverCodexWorkspaces,
   fullAccessCodexCommand,
   isInternalCodexPrompt,
   isCompactedTranscriptPrefix,
@@ -37,6 +38,21 @@ function line(record: unknown): string {
 }
 
 describe("Codex bridge", () => {
+  it("discovers bounded Git workspaces beneath configured roots", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-workspaces-"));
+    mkdirSync(path.join(root, "alpha", ".git"), { recursive: true });
+    mkdirSync(path.join(root, "group", "beta", ".git"), { recursive: true });
+    mkdirSync(path.join(root, ".cache", "hidden", ".git"), { recursive: true });
+    try {
+      expect(await discoverCodexWorkspaces([root])).toEqual([
+        { name: "alpha", path: path.join(root, "alpha") },
+        { name: "beta", path: path.join(root, "group", "beta") },
+      ]);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not mirror Codex runtime envelopes as VPS-authored messages", () => {
     expect(isInternalCodexPrompt(
       "# AGENTS.md instructions\n\n<INSTRUCTIONS>private runtime</INSTRUCTIONS>",

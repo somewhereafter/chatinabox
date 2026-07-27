@@ -66,6 +66,11 @@ export interface CodexRecentSession {
   readonly updatedAt: string;
 }
 
+export interface CodexWorkspace {
+  readonly path: string;
+  readonly name: string;
+}
+
 export interface CodexUsageLimit {
   readonly usedPercent: number;
   readonly windowMinutes: number;
@@ -108,6 +113,7 @@ export interface CodexGoalObservation {
 export type CodexBridgeRequest =
   | { readonly op: "ping" }
   | { readonly op: "list" }
+  | { readonly op: "workspaces" }
   | {
       readonly op: "send";
       readonly target: CodexPaneIdentity;
@@ -189,6 +195,10 @@ export type CodexBridgeResponse =
       readonly recent: readonly CodexRecentSession[];
       readonly totalSessions: number;
       readonly usage: CodexUsage | null;
+    }
+  | {
+      readonly ok: true;
+      readonly workspaces: readonly CodexWorkspace[];
     }
   | { readonly ok: true; readonly pane: CodexPane }
   | {

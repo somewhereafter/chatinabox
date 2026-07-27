@@ -22,6 +22,14 @@ const bridge = new CodexBridge({
   managerCwd:
     process.env.CHATINABOX_MANAGER_CWD ??
     profile.manager.cwd,
+  workspaceRoots: (
+    process.env.CHATINABOX_WORKSPACE_ROOTS ??
+      process.env.CHATINABOX_DEFAULT_CWD ??
+      "/root"
+  )
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
 });
 
 let stopping = false;

@@ -140,6 +140,7 @@ install -o root -g chatinabox -m 0640 /dev/null "$env_file"
   printf 'CHATINABOX_BRIDGE_SOCKET=/run/chatinabox/bridge.sock\n'
   printf 'CHATINABOX_BRIDGE_DB=/var/lib/chatinabox-bridge/bridge.sqlite\n'
   printf 'CHATINABOX_DEFAULT_CWD=/root\n'
+  printf 'CHATINABOX_WORKSPACE_ROOTS=/root\n'
   printf 'CHATINABOX_LOBBY_CWD=/var/lib/chatinabox-bridge/lobby\n'
   printf 'CHATINABOX_PROFILE_PATH=%s\n' "$profile_path"
   printf 'CHATINABOX_CODEX_PATH=%s\n' "$codex_path"

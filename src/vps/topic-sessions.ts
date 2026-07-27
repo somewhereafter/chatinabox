@@ -22,9 +22,12 @@ import type {
   TelegramMessage,
 } from "../telegram-types";
 import {
+  isPaneIdentity,
   normalizeAssistantName,
   samePaneIdentity,
   type CodexPane,
+  type CodexRecentSession,
+  type CodexWorkspace,
 } from "./codex-bridge-protocol";
 import { CodexBridgeClient } from "./codex-bridge-client";
 import type { ChatinaboxEnv } from "./env";
@@ -69,6 +72,7 @@ export class TopicSessionController {
   private readonly readyBufferMs: number;
   private readonly profile: () => ExperienceProfile;
   private readonly starting = new Set<string>();
+  private readonly claimingSessions = new Set<string>();
   private statusIcons: StatusIcons | null | undefined;
   private statusIconEmojis = "";
 
@@ -474,6 +478,57 @@ export class TopicSessionController {
           messageThreadId,
         );
         return true;
+      case "topic_setup.repositories":
+        await this.showWorkspaceChooser(row, messageId!);
+        return true;
+      case "topic_setup.workspace_select": {
+        const cwd = callbackString(parsed.value.payload, "cwd");
+        const normalized = normalizeWorkspace(cwd);
+        if (!normalized) {
+          await this.editSetupCard(
+            chatId!,
+            ownerUserId,
+            messageThreadId,
+            messageId!,
+            "That workspace is no longer available.",
+          );
+          return true;
+        }
+        this.dependencies.store.updateTopicSetup(
+          chatId!,
+          ownerUserId,
+          messageThreadId,
+          { cwd: normalized, awaiting: "" },
+        );
+        break;
+      }
+      case "topic_setup.sessions":
+        await this.showSessionChooser(row, messageId!);
+        return true;
+      case "topic_setup.attach":
+        await this.runTopicSetupOperation(row, () =>
+          this.attachRunningSession(
+            row,
+            messageId!,
+            parsed.value.payload,
+          ));
+        return true;
+      case "topic_setup.resume":
+        await this.runTopicSetupOperation(row, () =>
+          this.resumeSavedSession(
+            row,
+            messageId!,
+            parsed.value.payload,
+          ));
+        return true;
+      case "topic_setup.nox":
+        await this.runTopicSetupOperation(
+          row,
+          () => this.startNoxGuide(row, messageId!),
+        );
+        return true;
+      case "topic_setup.back":
+        break;
       case "topic_setup.start":
         await this.startTopicSession(
           chatId!,
@@ -704,6 +759,363 @@ export class TopicSessionController {
       undefined,
       setup.message_thread_id,
     );
+  }
+
+  private async issueSetupButton(
+    row: TopicSetupRow,
+    label: string,
+    action:
+      | "topic_setup.model"
+      | "topic_setup.effort"
+      | "topic_setup.speed"
+      | "topic_setup.name"
+      | "topic_setup.cwd"
+      | "topic_setup.repositories"
+      | "topic_setup.workspace_select"
+      | "topic_setup.sessions"
+      | "topic_setup.attach"
+      | "topic_setup.resume"
+      | "topic_setup.nox"
+      | "topic_setup.back"
+      | "topic_setup.start",
+    payload: Record<string, unknown> = {},
+  ): Promise<InlineKeyboardButtonInput> {
+    const issued = await issueCallbackReference(
+      this.dependencies.store.callbackStore(),
+      {
+        action,
+        chatId: row.chat_id,
+        userId: row.owner_user_id,
+        payload,
+        ttlMs: SETUP_CALLBACK_TTL_MS,
+      },
+    );
+    return { label, callbackData: issued.callbackData };
+  }
+
+  private async runTopicSetupOperation(
+    row: TopicSetupRow,
+    operation: () => Promise<void>,
+  ): Promise<void> {
+    const key = `${row.chat_id}:${row.owner_user_id}:${row.message_thread_id}`;
+    if (this.starting.has(key)) return;
+    this.starting.add(key);
+    try {
+      await operation();
+    } finally {
+      this.starting.delete(key);
+    }
+  }
+
+  private async showWorkspaceChooser(
+    row: TopicSetupRow,
+    messageId: number,
+  ): Promise<void> {
+    const response = await this.bridge.request({ op: "workspaces" })
+      .catch(() => null);
+    if (!response?.ok || !("workspaces" in response)) {
+      await this.editSetupCard(
+        row.chat_id,
+        row.owner_user_id,
+        row.message_thread_id,
+        messageId,
+        "Could not scan workspaces. You can still enter a path manually.",
+      );
+      return;
+    }
+    const workspaces = response.workspaces.slice(0, 12);
+    const buttons: InlineKeyboardButtonInput[][] = [];
+    for (const workspace of workspaces) {
+      buttons.push([await this.issueSetupButton(
+        row,
+        workspaceButtonLabel(workspace),
+        "topic_setup.workspace_select",
+        { cwd: workspace.path },
+      )]);
+    }
+    buttons.push([
+      await this.issueSetupButton(row, "⌨️ enter path", "topic_setup.cwd"),
+      await this.issueSetupButton(row, "‹ back", "topic_setup.back"),
+    ]);
+    await tgEditRichHtml(
+      this.dependencies.env,
+      row.chat_id,
+      messageId,
+      formatWorkspaceChooser(row, workspaces),
+      buildInlineKeyboard(buttons),
+    ).catch(() => undefined);
+  }
+
+  private async showSessionChooser(
+    row: TopicSetupRow,
+    messageId: number,
+  ): Promise<void> {
+    const response = await this.bridge.request({ op: "list" })
+      .catch(() => null);
+    if (!response?.ok || !("panes" in response)) {
+      await this.editSetupCard(
+        row.chat_id,
+        row.owner_user_id,
+        row.message_thread_id,
+        messageId,
+        "Could not read Codex sessions. Try again in a moment.",
+      );
+      return;
+    }
+    const availablePanes = response.panes.filter((pane) =>
+      this.dependencies.store.codexAttachmentsForTarget(pane).length === 0
+    ).slice(0, 6);
+    const activeSessionIds = new Set(response.panes
+      .map((pane) => pane.sessionId)
+      .filter((sessionId): sessionId is string => Boolean(sessionId)));
+    const representedSessionIds = new Set(this.dependencies.store.topicSetups()
+      .map((setup) => setup.closed_session_id)
+      .filter((sessionId): sessionId is string => Boolean(sessionId)));
+    const availableRecent = response.recent.filter((session) =>
+      !activeSessionIds.has(session.id) &&
+      !representedSessionIds.has(session.id)
+    ).slice(0, 6);
+    const buttons: InlineKeyboardButtonInput[][] = [];
+    for (const pane of availablePanes) {
+      buttons.push([await this.issueSetupButton(
+        row,
+        `${pane.busy ? "◌" : "✓"} ${shortButtonLabel(pane.windowName)}`,
+        "topic_setup.attach",
+        {
+          serverPid: pane.serverPid,
+          paneId: pane.paneId,
+          panePid: pane.panePid,
+        },
+      )]);
+    }
+    for (const session of availableRecent) {
+      buttons.push([await this.issueSetupButton(
+        row,
+        `↻ ${shortButtonLabel(session.name)}`,
+        "topic_setup.resume",
+        { sessionId: session.id },
+      )]);
+    }
+    buttons.push([
+      await this.issueSetupButton(row, "‹ back", "topic_setup.back"),
+    ]);
+    await tgEditRichHtml(
+      this.dependencies.env,
+      row.chat_id,
+      messageId,
+      formatSessionChooser(row, availablePanes, availableRecent),
+      buildInlineKeyboard(buttons),
+    ).catch(() => undefined);
+  }
+
+  private async attachRunningSession(
+    row: TopicSetupRow,
+    messageId: number,
+    payload: unknown,
+  ): Promise<void> {
+    if (!isPaneIdentity(payload)) {
+      await this.editSetupCard(
+        row.chat_id,
+        row.owner_user_id,
+        row.message_thread_id,
+        messageId,
+        "That session selection expired.",
+      );
+      return;
+    }
+    const claim = `${payload.serverPid}:${payload.paneId}:${payload.panePid}`;
+    if (this.claimingSessions.has(claim)) return;
+    this.claimingSessions.add(claim);
+    try {
+      const listed = await this.bridge.request({ op: "list" }).catch(() => null);
+      const pane = listed?.ok && "panes" in listed
+        ? listed.panes.find((candidate) => samePaneIdentity(candidate, payload))
+        : undefined;
+      if (
+        !pane ||
+        this.dependencies.store.codexAttachmentsForTarget(pane).length > 0
+      ) {
+        await this.editSetupCard(
+          row.chat_id,
+          row.owner_user_id,
+          row.message_thread_id,
+          messageId,
+          "That Codex session is no longer available.",
+        );
+        return;
+      }
+      await this.adoptTopicSession(row, messageId, pane);
+    } finally {
+      this.claimingSessions.delete(claim);
+    }
+  }
+
+  private async resumeSavedSession(
+    row: TopicSetupRow,
+    messageId: number,
+    payload: unknown,
+  ): Promise<void> {
+    const sessionId = callbackString(payload, "sessionId");
+    if (!sessionId) {
+      await this.editSetupCard(
+        row.chat_id,
+        row.owner_user_id,
+        row.message_thread_id,
+        messageId,
+        "That saved chat selection expired.",
+      );
+      return;
+    }
+    const claim = `saved:${sessionId}`;
+    if (this.claimingSessions.has(claim)) return;
+    this.claimingSessions.add(claim);
+    try {
+      const listed = await this.bridge.request({ op: "list" }).catch(() => null);
+      const saved = listed?.ok && "recent" in listed
+        ? listed.recent.find((session) => session.id === sessionId)
+        : undefined;
+      const alreadyRunning = listed?.ok && "panes" in listed
+        ? listed.panes.some((pane) => pane.sessionId === sessionId)
+        : true;
+      const alreadyRepresented = this.dependencies.store.topicSetups()
+        .some((setup) => setup.closed_session_id === sessionId);
+      if (!saved || alreadyRunning || alreadyRepresented) {
+        await this.editSetupCard(
+          row.chat_id,
+          row.owner_user_id,
+          row.message_thread_id,
+          messageId,
+          "That saved Codex chat is no longer available.",
+        );
+        return;
+      }
+      await tgEditRichHtml(
+        this.dependencies.env,
+        row.chat_id,
+        messageId,
+        formatResumingSavedCard(saved),
+        emptyKeyboard(),
+      ).catch(() => undefined);
+      const resumed = await this.bridge.request({
+        op: "resume",
+        sessionId,
+        name: saved.name,
+        cwd: row.cwd,
+        model: row.model,
+        reasoningEffort: row.reasoning_effort,
+        fast: row.fast === 1,
+      }).catch(() => null);
+      if (!resumed?.ok || !("pane" in resumed)) {
+        await this.editSetupCard(
+          row.chat_id,
+          row.owner_user_id,
+          row.message_thread_id,
+          messageId,
+          resumed && !resumed.ok ? resumed.error : "Could not resume that chat.",
+        );
+        return;
+      }
+      await this.adoptTopicSession(row, messageId, resumed.pane, saved.name);
+    } finally {
+      this.claimingSessions.delete(claim);
+    }
+  }
+
+  private async startNoxGuide(
+    row: TopicSetupRow,
+    messageId: number,
+  ): Promise<void> {
+    const manager = this.profile().manager;
+    await tgEditRichHtml(
+      this.dependencies.env,
+      row.chat_id,
+      messageId,
+      formatStartingNoxCard(manager.name),
+      emptyKeyboard(),
+    ).catch(() => undefined);
+    const result = await this.bridge.request({
+      op: "new",
+      name: `${manager.name} · setup · ${row.topic_name}`,
+      cwd: manager.cwd,
+      model: manager.model,
+      reasoningEffort: manager.reasoningEffort,
+      fast: manager.fast,
+    }).catch(() => null);
+    if (!result?.ok || !("pane" in result)) {
+      await this.editSetupCard(
+        row.chat_id,
+        row.owner_user_id,
+        row.message_thread_id,
+        messageId,
+        result && !result.ok ? result.error : `${manager.name} could not start.`,
+      );
+      return;
+    }
+    await this.adoptTopicSession(row, messageId, result.pane, undefined, true);
+  }
+
+  private async adoptTopicSession(
+    row: TopicSetupRow,
+    messageId: number,
+    pane: CodexPane,
+    preferredTopicName?: string,
+    noxGuide = false,
+  ): Promise<void> {
+    let topicName = row.topic_name;
+    const candidateName = normalizeTopicName(preferredTopicName ?? pane.windowName);
+    if (candidateName) {
+      const renamed = await tgEditForumTopic(
+        this.dependencies.env,
+        row.chat_id,
+        row.message_thread_id,
+        candidateName,
+      ).catch(() => null);
+      if (renamed?.ok) topicName = candidateName;
+    }
+    this.dependencies.store.attachCodex(
+      row.chat_id,
+      row.owner_user_id,
+      pane,
+      row.message_thread_id,
+    );
+    this.dependencies.store.updateTopicSetup(
+      row.chat_id,
+      row.owner_user_id,
+      row.message_thread_id,
+      {
+        topic_name: topicName,
+        cwd: pane.cwd,
+        awaiting: "",
+        starter_message_id: messageId,
+        idle_since: this.now(),
+        closed_session_id: null,
+        closed_at: null,
+        resting_message_id: null,
+        last_icon_status: "",
+      },
+    );
+    const updated = this.dependencies.store.topicSetup(
+      row.chat_id,
+      row.owner_user_id,
+      row.message_thread_id,
+    ) ?? row;
+    const icons = await this.loadStatusIcons();
+    if (icons) {
+      await this.setTopicIconStatus(
+        updated,
+        pane.busy ? "working" : "done",
+        icons,
+      );
+    }
+    await tgEditRichHtml(
+      this.dependencies.env,
+      row.chat_id,
+      messageId,
+      noxGuide
+        ? formatNoxReadyCard(this.profile().manager.name, topicName)
+        : formatAdoptedCard(topicName, pane),
+      emptyKeyboard(),
+    ).catch(() => undefined);
   }
 
   private async startTopicSession(
@@ -989,41 +1401,58 @@ export class TopicSessionController {
   private async setupKeyboard(
     row: TopicSetupRow,
   ): Promise<TelegramInlineKeyboardMarkup> {
-    const button = async (
-      label: string,
-      action:
-        | "topic_setup.model"
-        | "topic_setup.effort"
-        | "topic_setup.speed"
-        | "topic_setup.name"
-        | "topic_setup.cwd"
-        | "topic_setup.start",
-    ): Promise<InlineKeyboardButtonInput> => ({
-      label,
-      callbackData: (
-        await issueCallbackReference(this.dependencies.store.callbackStore(), {
-          action,
-          chatId: row.chat_id,
-          userId: row.owner_user_id,
-          payload: {},
-          ttlMs: SETUP_CALLBACK_TTL_MS,
-        })
-      ).callbackData,
-    });
     return buildInlineKeyboard([
       [
-        await button(`☀️ ${row.model}`, "topic_setup.model"),
-        await button(`🧠 ${row.reasoning_effort}`, "topic_setup.effort"),
+        await this.issueSetupButton(row, `☀️ ${row.model}`, "topic_setup.model"),
+        await this.issueSetupButton(
+          row,
+          `🧠 ${row.reasoning_effort}`,
+          "topic_setup.effort",
+        ),
       ],
       [
-        await button(
+        await this.issueSetupButton(
+          row,
           row.fast === 1 ? "⚡ fast" : "◇ standard",
           "topic_setup.speed",
         ),
-        await button("📁 workspace", "topic_setup.cwd"),
+        await this.issueSetupButton(
+          row,
+          "🗂 choose repo",
+          "topic_setup.repositories",
+        ),
       ],
-      [await button("✏️ rename topic", "topic_setup.name")],
-      [await button("🚀 start chat", "topic_setup.start")],
+      [
+        await this.issueSetupButton(
+          row,
+          "✏️ rename",
+          "topic_setup.name",
+        ),
+        await this.issueSetupButton(
+          row,
+          "⌨️ path",
+          "topic_setup.cwd",
+        ),
+      ],
+      [
+        await this.issueSetupButton(
+          row,
+          "↗ existing Codex",
+          "topic_setup.sessions",
+        ),
+        await this.issueSetupButton(
+          row,
+          "🚀 new chat",
+          "topic_setup.start",
+        ),
+      ],
+      [
+        await this.issueSetupButton(
+          row,
+          `${this.profile().manager.emoji} ask ${this.profile().manager.name}`,
+          "topic_setup.nox",
+        ),
+      ],
     ]);
   }
 
@@ -1170,6 +1599,76 @@ export function formatSetupCard(
   );
 }
 
+function formatWorkspaceChooser(
+  row: TopicSetupRow,
+  workspaces: readonly CodexWorkspace[],
+): string {
+  return (
+    "<mark>new chat · choose repo</mark>\n\n" +
+    `<b>${escapeTelegramHtml(row.topic_name)}</b>\n` +
+    `<blockquote>current · <code>${escapeTelegramHtml(row.cwd)}</code></blockquote>\n\n` +
+    (workspaces.length > 0
+      ? "Pick a detected Git repository, or enter a path."
+      : "No Git repositories were detected. Enter a path instead.")
+  );
+}
+
+function formatSessionChooser(
+  row: TopicSetupRow,
+  panes: readonly CodexPane[],
+  recent: readonly CodexRecentSession[],
+): string {
+  const sections = [
+    panes.length > 0
+      ? `${panes.length} unbound running ${panes.length === 1 ? "session" : "sessions"}`
+      : "",
+    recent.length > 0
+      ? `${recent.length} recent saved ${recent.length === 1 ? "chat" : "chats"}`
+      : "",
+  ].filter(Boolean).join(" · ");
+  return (
+    "<mark>new topic · existing Codex</mark>\n\n" +
+    `<b>${escapeTelegramHtml(row.topic_name)}</b>\n\n` +
+    (sections || "No unbound or recent Codex chats are available.") +
+    "\n\n<blockquote>◌ working · ✓ ready · ↻ saved</blockquote>\n\n" +
+    "<footer>saved chats resume with the setup options and workspace you selected</footer>"
+  );
+}
+
+function formatResumingSavedCard(session: CodexRecentSession): string {
+  return (
+    "<mark>resuming saved chat…</mark>\n\n" +
+    `<b>${escapeTelegramHtml(session.name)}</b>`
+  );
+}
+
+function formatStartingNoxCard(name: string): string {
+  return (
+    `<mark>calling ${escapeTelegramHtml(name)}…</mark>\n\n` +
+    "Preparing a natural-language setup guide for this topic."
+  );
+}
+
+function formatNoxReadyCard(name: string, topicName: string): string {
+  return (
+    `<mark>${escapeTelegramHtml(name.toLowerCase())} · setup guide</mark>\n\n` +
+    `<b>${escapeTelegramHtml(topicName)}</b>\n\n` +
+    "Tell me what this chat is for, which repo to use, and any model or speed preferences. " +
+    "I’ll create the worker and hand this topic over when it’s ready."
+  );
+}
+
+function formatAdoptedCard(topicName: string, pane: CodexPane): string {
+  return (
+    `<mark>${normalizeAssistantName(pane.assistantName).toLowerCase()} · connected</mark>\n\n` +
+    `<b>${escapeTelegramHtml(topicName)}</b>\n` +
+    `<blockquote><code>${escapeTelegramHtml(pane.cwd)}</code></blockquote>\n\n` +
+    (pane.busy
+      ? "This session is already working. New messages will steer its active turn."
+      : "This Codex chat is ready for your next message.")
+  );
+}
+
 export function formatMessageWakeCard(row: TopicSetupRow): string {
   return (
     `↻ <b>Resuming ${escapeTelegramHtml(row.topic_name)}…</b>\n\n` +
@@ -1279,13 +1778,44 @@ function setupCallbackAnswer(action: string): string {
   switch (action) {
     case "topic_setup.start":
       return "Starting chat…";
+    case "topic_setup.nox":
+      return "Calling setup guide…";
     case "topic_setup.name":
       return "Send a new name";
     case "topic_setup.cwd":
       return "Send a workspace path";
+    case "topic_setup.repositories":
+      return "Finding repositories…";
+    case "topic_setup.sessions":
+      return "Finding Codex chats…";
+    case "topic_setup.attach":
+      return "Connecting session…";
+    case "topic_setup.resume":
+      return "Resuming chat…";
     case "topic_setup.restart":
       return "Waking session…";
     default:
       return "Updated";
   }
+}
+
+function callbackString(payload: unknown, key: string): string | null {
+  if (
+    typeof payload !== "object" ||
+    payload === null ||
+    Array.isArray(payload)
+  ) return null;
+  const value = (payload as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : null;
+}
+
+function shortButtonLabel(value: string): string {
+  return [...value.replace(/\s+/gu, " ").trim()].slice(0, 34).join("") ||
+    "Untitled Codex chat";
+}
+
+function workspaceButtonLabel(workspace: CodexWorkspace): string {
+  const parent = path.posix.dirname(workspace.path);
+  const hint = parent === "/" ? "/" : path.posix.basename(parent);
+  return `📁 ${shortButtonLabel(workspace.name)} · ${shortButtonLabel(hint)}`;
 }

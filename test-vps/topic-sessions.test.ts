@@ -82,6 +82,23 @@ function setup(
   return { controller, store, pane, requests, sends };
 }
 
+function callbackByLabel(
+  sends: readonly Record<string, unknown>[],
+  label: string,
+): string | undefined {
+  for (const body of [...sends].reverse()) {
+    const keyboard = body.reply_markup as
+      | { inline_keyboard?: Array<Array<{ text: string; callback_data: string }>> }
+      | undefined;
+    const callback = keyboard?.inline_keyboard
+      ?.flat()
+      .find((button) => button.text.includes(label))
+      ?.callback_data;
+    if (callback) return callback;
+  }
+  return undefined;
+}
+
 describe("Topic session setup", () => {
   it("normalizes names and absolute workspaces", () => {
     expect(normalizeTopicName("  🧪   experiment  ")).toBe("🧪 experiment");
@@ -119,11 +136,15 @@ describe("Topic session setup", () => {
       | undefined;
     expect(card?.message_thread_id).toBe(7);
     expect(JSON.stringify(card)).toContain("🧪 experiment");
+    expect(JSON.stringify(card)).toContain("ask orchestrator");
+    expect(JSON.stringify(card)).not.toContain("ask Nox");
     const keyboard = card?.reply_markup as {
-      inline_keyboard: Array<Array<{ callback_data: string }>>;
+      inline_keyboard: Array<Array<{ text: string; callback_data: string }>>;
     };
-    const startCallback =
-      keyboard.inline_keyboard.at(-1)?.[0]?.callback_data;
+    const startCallback = keyboard.inline_keyboard
+      .flat()
+      .find((button) => button.text.includes("new chat"))
+      ?.callback_data;
     expect(startCallback).toBeTruthy();
 
     await controller.handleCallback({
@@ -171,6 +192,261 @@ describe("Topic session setup", () => {
       reasoning_effort: "low",
       fast: 1,
     });
+    store.close();
+  });
+
+  it("chooses a detected repository from the new-topic setup", async () => {
+    const { controller, store, sends, requests } = setup(
+      undefined,
+      async (request) => {
+        if ((request as { op?: string }).op === "workspaces") {
+          return {
+            ok: true,
+            workspaces: [{ name: "chatinabox", path: "/root/chatinabox" }],
+          };
+        }
+        return { ok: false, error: "unexpected request" };
+      },
+    );
+    await controller.handleMessage({
+      message_id: 10,
+      chat: { id: -10042, type: "supergroup" },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      forum_topic_created: { name: "new work", icon_color: 1 },
+      date: 1,
+    }, null);
+    const repositories = callbackByLabel(sends, "choose repo");
+    expect(repositories).toBeTruthy();
+    await controller.handleCallback({
+      id: "repositories",
+      from: { id: 42 },
+      message: {
+        message_id: 100,
+        message_thread_id: 7,
+        chat: { id: -10042, type: "supergroup" },
+      },
+      data: repositories,
+    });
+    expect(requests).toContainEqual({ op: "workspaces" });
+    const repository = callbackByLabel(sends, "chatinabox");
+    expect(repository).toBeTruthy();
+    await controller.handleCallback({
+      id: "repository",
+      from: { id: 42 },
+      message: {
+        message_id: 100,
+        message_thread_id: 7,
+        chat: { id: -10042, type: "supergroup" },
+      },
+      data: repository,
+    });
+    expect(store.topicSetup(-10042, 42, 7)?.cwd).toBe("/root/chatinabox");
+    store.close();
+  });
+
+  it("starts a temporary natural-language manager guide in a new topic", async () => {
+    const profile = patchExperienceProfile(DEFAULT_EXPERIENCE_PROFILE, {
+      manager: {
+        name: "Nox",
+        emoji: "🪄",
+        cwd: "/var/lib/chatinabox-bridge/nox",
+        model: "terra",
+        reasoningEffort: "high",
+        fast: true,
+      },
+    });
+    const { controller, store, sends, requests, pane } = setup(
+      profile,
+      async () => ({
+        ok: true,
+        pane: {
+          ...pane,
+          windowName: "Nox · setup · new work",
+          cwd: "/var/lib/chatinabox-bridge/nox",
+          assistantName: "Terra",
+        },
+      }),
+    );
+    await controller.handleMessage({
+      message_id: 10,
+      chat: { id: -10042, type: "supergroup" },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      forum_topic_created: { name: "new work", icon_color: 1 },
+      date: 1,
+    }, null);
+    const askNox = callbackByLabel(sends, "ask Nox");
+    expect(askNox).toBeTruthy();
+    await controller.handleCallback({
+      id: "nox",
+      from: { id: 42 },
+      message: {
+        message_id: 100,
+        message_thread_id: 7,
+        chat: { id: -10042, type: "supergroup" },
+      },
+      data: askNox,
+    });
+    expect(requests).toContainEqual({
+      op: "new",
+      name: "Nox · setup · new work",
+      cwd: "/var/lib/chatinabox-bridge/nox",
+      model: "terra",
+      reasoningEffort: "high",
+      fast: true,
+    });
+    expect(store.codexAttachment(-10042, 42, 7)?.window_name)
+      .toBe("Nox · setup · new work");
+    expect(JSON.stringify(sends.at(-1))).toContain("setup guide");
+    store.close();
+  });
+
+  it("connects an unbound running Codex session from topic setup", async () => {
+    const unboundPane = {
+      serverPid: 101,
+      paneId: "%9",
+      panePid: 201,
+      sessionName: "codex",
+      windowName: "existing investigation",
+      windowIndex: 2,
+      cwd: "/root/investigation",
+      active: true,
+      busy: true,
+      codexPid: 301,
+      assistantName: "Sol" as const,
+      sessionId: "019d1234-1234-7123-8123-123456789abc",
+    };
+    const { controller, store, sends } = setup(
+      undefined,
+      async (request) =>
+        (request as { op?: string }).op === "list"
+          ? {
+              ok: true,
+              panes: [unboundPane],
+              recent: [],
+              totalSessions: 1,
+              usage: null,
+            }
+          : { ok: false, error: "unexpected request" },
+    );
+    await controller.handleMessage({
+      message_id: 10,
+      chat: { id: -10042, type: "supergroup" },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      forum_topic_created: { name: "new work", icon_color: 1 },
+      date: 1,
+    }, null);
+    await controller.handleCallback({
+      id: "sessions",
+      from: { id: 42 },
+      message: {
+        message_id: 100,
+        message_thread_id: 7,
+        chat: { id: -10042, type: "supergroup" },
+      },
+      data: callbackByLabel(sends, "existing Codex"),
+    });
+    const existing = callbackByLabel(sends, "existing investigation");
+    expect(existing).toBeTruthy();
+    await controller.handleCallback({
+      id: "attach",
+      from: { id: 42 },
+      message: {
+        message_id: 100,
+        message_thread_id: 7,
+        chat: { id: -10042, type: "supergroup" },
+      },
+      data: existing,
+    });
+    expect(store.codexAttachment(-10042, 42, 7)?.pane_id).toBe("%9");
+    store.close();
+  });
+
+  it("resumes an unrepresented saved Codex chat from topic setup", async () => {
+    const sessionId = "019d1234-1234-7123-8123-123456789abc";
+    const resumedPane = {
+      serverPid: 101,
+      paneId: "%9",
+      panePid: 201,
+      sessionName: "codex",
+      windowName: "saved investigation",
+      windowIndex: 2,
+      cwd: "/root",
+      active: true,
+      busy: false,
+      codexPid: 301,
+      assistantName: "Terra" as const,
+      sessionId,
+    };
+    const { controller, store, sends, requests } = setup(
+      undefined,
+      async (request) => {
+        if ((request as { op?: string }).op === "list") {
+          return {
+            ok: true,
+            panes: [],
+            recent: [{
+              id: sessionId,
+              name: "saved investigation",
+              updatedAt: "2026-07-27T09:00:00.000Z",
+            }],
+            totalSessions: 1,
+            usage: null,
+          };
+        }
+        if ((request as { op?: string }).op === "resume") {
+          return { ok: true, pane: resumedPane };
+        }
+        return { ok: false, error: "unexpected request" };
+      },
+    );
+    await controller.handleMessage({
+      message_id: 10,
+      chat: { id: -10042, type: "supergroup" },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      forum_topic_created: { name: "new work", icon_color: 1 },
+      date: 1,
+    }, null);
+    await controller.handleCallback({
+      id: "sessions",
+      from: { id: 42 },
+      message: {
+        message_id: 100,
+        message_thread_id: 7,
+        chat: { id: -10042, type: "supergroup" },
+      },
+      data: callbackByLabel(sends, "existing Codex"),
+    });
+    const saved = callbackByLabel(sends, "saved investigation");
+    expect(saved).toBeTruthy();
+    await controller.handleCallback({
+      id: "resume",
+      from: { id: 42 },
+      message: {
+        message_id: 100,
+        message_thread_id: 7,
+        chat: { id: -10042, type: "supergroup" },
+      },
+      data: saved,
+    });
+    expect(requests).toContainEqual({
+      op: "resume",
+      sessionId,
+      name: "saved investigation",
+      cwd: "/root",
+      model: "sol",
+      reasoningEffort: "high",
+      fast: false,
+    });
+    expect(store.codexAttachment(-10042, 42, 7)?.window_name)
+      .toBe("saved investigation");
     store.close();
   });
 
