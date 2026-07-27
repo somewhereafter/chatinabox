@@ -30,6 +30,8 @@ export interface TelegramMessage {
   media_group_id?: string;
   photo?: TelegramPhotoSize[];
   document?: TelegramDocument;
+  voice?: TelegramVoice;
+  audio?: TelegramAudio;
   reply_to_message?: TelegramMessage;
   forum_topic_created?: {
     name: string;
@@ -57,6 +59,20 @@ export interface TelegramDocument {
   file_name?: string;
   mime_type?: string;
   file_size?: number;
+}
+
+export interface TelegramVoice {
+  file_id: string;
+  file_unique_id: string;
+  duration: number;
+  mime_type?: string;
+  file_size?: number;
+}
+
+export interface TelegramAudio extends TelegramVoice {
+  file_name?: string;
+  title?: string;
+  performer?: string;
 }
 
 export interface TelegramFile {

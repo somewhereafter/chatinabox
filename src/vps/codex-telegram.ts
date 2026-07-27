@@ -38,6 +38,7 @@ import type {
   TelegramDocument,
   TelegramMessage,
   TelegramPhotoSize,
+  TelegramVoice,
 } from "../telegram-types";
 import { abortableSleep } from "./sleep";
 import { CodexBridgeClient } from "./codex-bridge-client";
@@ -70,6 +71,7 @@ import type {
   ChatinaboxStore,
 } from "./store";
 import { parseThinkingSummaries } from "./store";
+import { transcribeScribeV2 } from "./scribe";
 import {
   renderTelegramMarkdownChunks,
 } from "./telegram-markdown";
@@ -108,6 +110,13 @@ export interface TelegramInboundMedia {
   readonly mimeType: string;
   readonly declaredBytes?: number;
   readonly kind: "image" | "file";
+}
+
+export interface TelegramInboundVoice {
+  readonly fileId: string;
+  readonly fileName: string;
+  readonly mimeType: string;
+  readonly declaredBytes?: number;
 }
 
 export interface StoredCodexAttachment {
@@ -905,6 +914,88 @@ export class CodexTelegramController {
       message.caption ?? "",
       message.message_id,
     );
+    return true;
+  }
+
+  async routeAttachedVoice(message: TelegramMessage): Promise<boolean> {
+    const voice = selectTelegramVoice(message);
+    const chatId = message.chat.id;
+    const ownerUserId = message.from?.id;
+    if (
+      !voice ||
+      !isTelegramIdentity(chatId, false) ||
+      !isTelegramIdentity(ownerUserId, true)
+    ) {
+      return false;
+    }
+    const attachment = this.dependencies.store.codexAttachment(
+      chatId,
+      ownerUserId!,
+      telegramMessageThreadId(message),
+    );
+    if (!attachment) return false;
+    const target = attachmentTarget(attachment);
+
+    await this.setTransientStatus(
+      attachment,
+      target,
+      "state_working",
+      message.message_id,
+      undefined,
+      undefined,
+      true,
+    );
+
+    try {
+      if (
+        voice.declaredBytes !== undefined &&
+        voice.declaredBytes > CODEX_ATTACHMENT_MAX_BYTES
+      ) {
+        throw new Error("That voice note is too large. The limit is 20 MB.");
+      }
+      const apiKey = this.dependencies.env.ELEVENLABS_API_KEY;
+      if (!apiKey) {
+        throw new Error("Voice transcription is not configured yet.");
+      }
+      const telegramFile = await tgGetFile(
+        this.dependencies.env,
+        voice.fileId,
+      );
+      if (!telegramFile.file_path) {
+        throw new Error("Telegram did not return a voice-note path.");
+      }
+      const audio = await tgDownloadFile(
+        this.dependencies.env,
+        telegramFile.file_path,
+        CODEX_ATTACHMENT_MAX_BYTES,
+      );
+      const transcript = await transcribeScribeV2({
+        apiKey,
+        audio,
+        fileName: voice.fileName,
+        mimeType: voice.mimeType,
+        languageCode: this.dependencies.env.SCRIBE_LANGUAGE_CODE,
+        keyterms: this.dependencies.env.SCRIBE_KEYTERMS,
+      });
+      const promptText = message.caption?.trim()
+        ? `${transcript}\n\n${message.caption.trim()}`
+        : transcript;
+      await this.relayPrompt(
+        attachment,
+        target,
+        buildTelegramTextPrompt({ ...message, text: promptText }),
+        message.message_id,
+      );
+    } catch (error) {
+      await this.failMediaRelay(
+        attachment,
+        target,
+        message.message_id,
+        error instanceof Error
+          ? error.message
+          : "That voice note could not be transcribed.",
+      );
+    }
     return true;
   }
 
@@ -3837,6 +3928,51 @@ export function selectTelegramMedia(
     }),
     kind: "image",
   };
+}
+
+export function selectTelegramVoice(
+  message: TelegramMessage,
+): TelegramInboundVoice | null {
+  if (message.voice) {
+    return voiceMedia(message.voice);
+  }
+  if (message.audio) {
+    const mimeType = message.audio.mime_type?.trim() || "audio/mpeg";
+    return {
+      fileId: message.audio.file_id,
+      fileName: message.audio.file_name?.trim()
+        ? sanitizeAttachmentFileName(message.audio.file_name)
+        : audioFileName(mimeType),
+      mimeType,
+      ...(message.audio.file_size !== undefined && {
+        declaredBytes: message.audio.file_size,
+      }),
+    };
+  }
+  return null;
+}
+
+function voiceMedia(voice: TelegramVoice): TelegramInboundVoice {
+  const mimeType = voice.mime_type?.trim() || "audio/ogg";
+  return {
+    fileId: voice.file_id,
+    fileName: audioFileName(mimeType, true),
+    mimeType,
+    ...(voice.file_size !== undefined && {
+      declaredBytes: voice.file_size,
+    }),
+  };
+}
+
+function audioFileName(mimeType: string, voice = false): string {
+  const extension = mimeType.toLowerCase().includes("ogg")
+    ? "ogg"
+    : mimeType.toLowerCase().includes("wav")
+      ? "wav"
+      : mimeType.toLowerCase().includes("webm")
+        ? "webm"
+        : "mp3";
+  return `${voice ? "voice-note" : "audio"}.${extension}`;
 }
 
 function largestTelegramPhoto(

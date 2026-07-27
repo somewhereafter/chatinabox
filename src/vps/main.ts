@@ -150,6 +150,40 @@ async function handleClaimedUpdate(app: App, update: TelegramUpdate) {
     return;
   }
 
+  if (message.voice || message.audio) {
+    if (
+      !app.codex.isAttached(
+        message.chat.id,
+        ownerId!,
+        telegramMessageThreadId(message),
+      )
+    ) {
+      const attached = await app.codex.ensureLobbyAttached(
+        message.chat.id,
+        ownerId!,
+        telegramMessageThreadId(message),
+      );
+      if (!attached) {
+        await tgSend(
+          app.env,
+          message.chat.id,
+          "⚠️ The session bridge is still starting. Your voice note was not sent; try again in a moment.",
+          message.message_id,
+        );
+        return;
+      }
+    }
+    const routed = await app.codex.routeAttachedVoice(message);
+    if (!routed) {
+      await tgSend(
+        app.env,
+        message.chat.id,
+        "⚠️ That voice note could not be routed to the current session.",
+        message.message_id,
+      );
+    }
+    return;
+  }
   if (message.photo?.length || message.document) {
     if (
       !app.codex.isAttached(

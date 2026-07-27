@@ -98,6 +98,10 @@ if [[ -z "$convert_path" || ! -x "$convert_path" || -z "$chrome_path" ]]; then
   echo "Chat, sessions, setup, and deployment do not depend on it."
 fi
 
+scribe_api_key="${ELEVENLABS_API_KEY:-}"
+scribe_language="${CHATINABOX_SCRIBE_LANGUAGE:-eng}"
+scribe_keyterms="${CHATINABOX_SCRIBE_KEYTERMS:-}"
+
 printf '\n› Building and testing Chatinabox\n'
 (
   cd "$repo_dir"
@@ -182,6 +186,13 @@ install -o root -g chatinabox -m 0640 /dev/null "$env_file"
   printf 'CHATINABOX_TMUX_PATH=%s\n' "$tmux_path"
   printf 'CHATINABOX_CONVERT_PATH=%s\n' "$convert_path"
   printf 'CHATINABOX_CHROME_PATH=%s\n' "$chrome_path"
+  if [[ -n "$scribe_api_key" ]]; then
+    printf 'ELEVENLABS_API_KEY=%s\n' "$scribe_api_key"
+    printf 'CHATINABOX_SCRIBE_LANGUAGE=%s\n' "$scribe_language"
+    if [[ -n "$scribe_keyterms" ]]; then
+      printf 'CHATINABOX_SCRIBE_KEYTERMS=%s\n' "$scribe_keyterms"
+    fi
+  fi
 } > "$env_file"
 chown root:chatinabox "$env_file"
 chmod 0640 "$env_file"

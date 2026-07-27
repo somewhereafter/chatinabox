@@ -75,6 +75,26 @@ sudo CHATINABOX_TG_BOT_TOKEN='123:secret' \
   ./scripts/install.sh
 ```
 
+### Voice notes with Scribe v2
+
+Voice notes are optional. When `ELEVENLABS_API_KEY` is configured, Telegram
+voice notes and audio uploads are transcribed by ElevenLabs Scribe v2 and sent
+to the attached Codex session like typed messages. Chatinabox keeps the audio
+in memory only; it is sent to ElevenLabs but is not added to the local
+attachment store.
+
+```sh
+sudo ELEVENLABS_API_KEY='your-key' \
+  CHATINABOX_SCRIBE_LANGUAGE='eng' \
+  CHATINABOX_SCRIBE_KEYTERMS='Chatinabox,Codex,OpenAI,Telegram,tmux,VPS,GitHub' \
+  ./scripts/install.sh
+```
+
+The language hint defaults to English. Keyterms are optional, comma-separated,
+and improve product-name and technical-term recognition; ElevenLabs currently
+adds a 20% Scribe surcharge when they are supplied. Upgrades preserve all three
+settings in `/etc/chatinabox/chatinabox.env`.
+
 Check the host and source without installing:
 
 ```sh
@@ -150,6 +170,7 @@ The complete neutral schema is in
 | `/codex interrupt` | Interrupt the current turn |
 | `/codex detach` | Return to the Lobby |
 | `/queue text` | Hold a message for the next turn |
+| Voice note | Transcribe with Scribe v2 and send it as a prompt |
 | `/screen` | Post the current terminal view |
 | `/key KEY [KEY…]` | Send allowlisted terminal keys |
 | `/help` | Show the full in-Telegram guide |

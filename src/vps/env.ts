@@ -7,6 +7,9 @@ export interface ChatinaboxEnv {
   readonly CODEX_BRIDGE_SOCKET: string;
   readonly DEFAULT_CWD: string;
   readonly PROFILE_PATH?: string;
+  readonly ELEVENLABS_API_KEY?: string;
+  readonly SCRIBE_LANGUAGE_CODE?: string;
+  readonly SCRIBE_KEYTERMS?: readonly string[];
 }
 
 export function loadChatinaboxEnv(
@@ -39,5 +42,29 @@ export function loadChatinaboxEnv(
       source.CHATINABOX_PROFILE_PATH?.trim() ||
         "/etc/chatinabox/profile.json",
     ),
+    ELEVENLABS_API_KEY: source.ELEVENLABS_API_KEY?.trim() || undefined,
+    SCRIBE_LANGUAGE_CODE:
+      source.CHATINABOX_SCRIBE_LANGUAGE?.trim() || "eng",
+    SCRIBE_KEYTERMS: parseScribeKeyterms(
+      source.CHATINABOX_SCRIBE_KEYTERMS,
+    ),
   };
+}
+
+function parseScribeKeyterms(value: string | undefined): readonly string[] {
+  if (!value?.trim()) return [];
+  const unique = new Set<string>();
+  for (const raw of value.split(",")) {
+    const term = raw.trim();
+    if (
+      term.length > 0 &&
+      term.length < 50 &&
+      term.split(/\s+/u).length <= 5 &&
+      !/[<>{}[\]\\]/u.test(term)
+    ) {
+      unique.add(term);
+    }
+    if (unique.size >= 1_000) break;
+  }
+  return [...unique];
 }

@@ -9,7 +9,7 @@ Telegram Bot API
       ▼
 chatinabox service (unprivileged)
       │
-      ├── owner policy, menus, formatting, attachments
+      ├── owner policy, menus, formatting, attachments, voice transcription
       ├── forum routing, setup, presence, and delivery state
       ├── read-only private experience profile
       │
@@ -34,6 +34,11 @@ The Telegram process runs as the `chatinabox` system user. It can read its bot
 environment and private experience profile, and write only its own state and
 attachment tree. It cannot rewrite the root bridge environment, profile, Lobby
 instructions, bridge database, release files, or systemd units.
+
+When Scribe is configured, the Telegram process downloads each owner-authorized
+voice note with the same 20 MB bound used for attachments, holds it in memory,
+and sends it to ElevenLabs' synchronous Scribe v2 endpoint. Only the resulting
+text is handed to Codex; Chatinabox does not persist the source audio.
 
 The bridge runs as root because it controls root-owned tmux sessions and starts
 Codex in the project's deliberate full-access mode. Its only client surface is

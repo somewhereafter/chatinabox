@@ -20,6 +20,7 @@ import {
   parseArrowShortcut,
   sanitizeAttachmentFileName,
   selectTelegramMedia,
+  selectTelegramVoice,
   visibleCodexGoal,
   promptsReadByTurn,
 } from "../src/vps/codex-telegram";
@@ -237,6 +238,124 @@ describe("Codex Telegram attachments", () => {
       declaredBytes: 400_000,
       kind: "image",
     });
+  });
+
+  it("selects Telegram voice notes and audio uploads for transcription", () => {
+    expect(selectTelegramVoice(message({
+      voice: {
+        file_id: "voice-file",
+        file_unique_id: "voice-unique",
+        duration: 12,
+        mime_type: "audio/ogg",
+        file_size: 48_000,
+      },
+    }))).toEqual({
+      fileId: "voice-file",
+      fileName: "voice-note.ogg",
+      mimeType: "audio/ogg",
+      declaredBytes: 48_000,
+    });
+    expect(selectTelegramVoice(message({
+      audio: {
+        file_id: "audio-file",
+        file_unique_id: "audio-unique",
+        duration: 30,
+        mime_type: "audio/mpeg",
+        file_name: "../../meeting recap.mp3",
+      },
+    }))).toEqual({
+      fileId: "audio-file",
+      fileName: "_meeting_recap.mp3",
+      mimeType: "audio/mpeg",
+    });
+  });
+
+  it("transcribes a Telegram voice note and relays the text as one Codex prompt", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-voice-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "voice",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: false,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+    };
+    store.attachCodex(42, 42, pane);
+
+    vi.stubGlobal("fetch", vi.fn(async (url: string | URL | Request) => {
+      const href = String(url);
+      if (href.endsWith("/getFile")) {
+        return new Response(JSON.stringify({
+          ok: true,
+          result: {
+            file_id: "voice-file",
+            file_unique_id: "voice-unique",
+            file_path: "voice/file_1.oga",
+          },
+        }), { status: 200 });
+      }
+      if (href.includes("/file/bot")) {
+        return new Response(new Uint8Array([1, 2, 3]), {
+          status: 200,
+          headers: { "content-length": "3" },
+        });
+      }
+      if (href === "https://api.elevenlabs.io/v1/speech-to-text") {
+        return new Response(JSON.stringify({
+          text: "Please run the verification suite.",
+        }), { status: 200 });
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        result: { message_id: 900 },
+      }), { status: 200 });
+    }));
+    const bridge = {
+      request: vi.fn(async () => ({
+        ok: true,
+        queuedUntilNextToolCall: false,
+      })),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+        ELEVENLABS_API_KEY: "scribe-secret",
+        SCRIBE_LANGUAGE_CODE: "eng",
+        SCRIBE_KEYTERMS: ["Codex"],
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    await expect(controller.routeAttachedVoice(message({
+      message_id: 77,
+      chat: { id: 42 },
+      from: { id: 42 },
+      voice: {
+        file_id: "voice-file",
+        file_unique_id: "voice-unique",
+        duration: 3,
+        mime_type: "audio/ogg",
+        file_size: 3,
+      },
+    }))).resolves.toBe(true);
+    expect(bridge.request).toHaveBeenCalledWith(expect.objectContaining({
+      op: "send",
+      text: "Please run the verification suite.",
+      deliveryId: expect.stringContaining(":77"),
+    }));
+    store.close();
   });
 
   it("preserves useful filenames without allowing path traversal", () => {
