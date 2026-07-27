@@ -8,6 +8,7 @@ import {
 const MAX_RESPONSE_BYTES = 6 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 3_000;
 const SCREEN_REQUEST_TIMEOUT_MS = 20_000;
+const GOAL_REQUEST_TIMEOUT_MS = 20_000;
 
 export class CodexBridgeClient {
   constructor(
@@ -36,6 +37,11 @@ export class CodexBridgeClient {
       const timeoutMs =
         request.op === "screen"
           ? Math.max(this.timeoutMs, SCREEN_REQUEST_TIMEOUT_MS)
+          : request.op === "goals" ||
+              request.op === "goal_get" ||
+              request.op === "goal_set" ||
+              request.op === "goal_clear"
+            ? Math.max(this.timeoutMs, GOAL_REQUEST_TIMEOUT_MS)
           : this.timeoutMs;
       const timer = setTimeout(() => {
         finish(() => reject(new Error("Codex bridge timed out")));

@@ -42,6 +42,7 @@ import type {
 const SETUP_CALLBACK_TTL_MS = 24 * 60 * 60 * 1_000;
 const RESTART_CALLBACK_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const TOPIC_PRESENCE_POLL_MS = 30_000;
+const TOPIC_WAKE_READY_BUFFER_MS = 900;
 const MODELS = ["sol", "luna", "terra"] as const;
 const EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 
@@ -52,6 +53,7 @@ interface TopicSessionDependencies {
   readonly store: ChatinaboxStore;
   readonly bridge?: BridgeClient;
   readonly now?: () => number;
+  readonly readyBufferMs?: number;
   readonly profile?: () => ExperienceProfile;
 }
 
@@ -64,6 +66,7 @@ interface StatusIcons {
 export class TopicSessionController {
   private readonly bridge: BridgeClient;
   private readonly now: () => number;
+  private readonly readyBufferMs: number;
   private readonly profile: () => ExperienceProfile;
   private readonly starting = new Set<string>();
   private statusIcons: StatusIcons | null | undefined;
@@ -74,6 +77,8 @@ export class TopicSessionController {
       dependencies.bridge ??
       new CodexBridgeClient(dependencies.env.CODEX_BRIDGE_SOCKET);
     this.now = dependencies.now ?? Date.now;
+    this.readyBufferMs =
+      dependencies.readyBufferMs ?? TOPIC_WAKE_READY_BUFFER_MS;
     this.profile = dependencies.profile ?? (() => DEFAULT_EXPERIENCE_PROFILE);
   }
 
@@ -115,6 +120,11 @@ export class TopicSessionController {
             panePid: attachment.pane_pid,
           },
         ) !== null;
+      const activeGoal = this.dependencies.store.hasActiveCodexGoal(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        attachment.message_thread_id,
+      );
       let row = this.dependencies.store.ensureTopicSetup(
         attachment.chat_id,
         attachment.owner_user_id,
@@ -141,7 +151,7 @@ export class TopicSessionController {
           { topic_name: pane.windowName },
         ) ?? row;
       }
-      if (pane?.busy === true || activeTurn) {
+      if (pane?.busy === true || activeTurn || activeGoal) {
         if (row.idle_since !== 0) {
           row = this.dependencies.store.updateTopicSetup(
             row.chat_id,
@@ -233,7 +243,103 @@ export class TopicSessionController {
       await this.acceptSetupInput(message, setup);
       return true;
     }
+    if (
+      !attachment &&
+      setup?.closed_at &&
+      command === null &&
+      (
+        typeof message.text === "string" ||
+        Boolean(message.photo?.length) ||
+        Boolean(message.document)
+      )
+    ) {
+      // Returning false after a successful wake lets the normal Codex router
+      // relay this exact Telegram update. A failed wake consumes it after
+      // explicitly telling the user that it was not sent.
+      return !await this.wakeTopicForMessage(message, setup);
+    }
     return false;
+  }
+
+  private async wakeTopicForMessage(
+    message: TelegramMessage,
+    setup: TopicSetupRow,
+  ): Promise<boolean> {
+    let notice = await tgSendRichHtml(
+      this.dependencies.env,
+      setup.chat_id,
+      formatMessageWakeCard(setup),
+      message.message_id,
+      undefined,
+      setup.message_thread_id,
+    ).catch(() => null);
+    if (!notice?.ok) {
+      notice = await tgSend(
+        this.dependencies.env,
+        setup.chat_id,
+        `↻ <b>Resuming ${escapeTelegramHtml(setup.topic_name)}…</b>\n` +
+          "I’ll send your message as soon as the session is ready.",
+        message.message_id,
+        undefined,
+        setup.message_thread_id,
+      ).catch(() => null);
+    }
+    const noticeMessageId = notice?.ok
+      ? notice.result.message_id
+      : setup.resting_message_id ?? message.message_id;
+
+    await this.restartTopicSession(
+      setup.chat_id,
+      setup.owner_user_id,
+      setup.message_thread_id,
+      noticeMessageId,
+    );
+    const attachment = this.dependencies.store.codexAttachment(
+      setup.chat_id,
+      setup.owner_user_id,
+      setup.message_thread_id,
+    );
+    if (!attachment) {
+      const keyboard = await this.restartKeyboard(setup)
+        .catch(() => undefined);
+      const html = formatMessageWakeFailure(setup);
+      if (notice?.ok) {
+        await tgEditRichHtml(
+          this.dependencies.env,
+          setup.chat_id,
+          notice.result.message_id,
+          html,
+          keyboard,
+        ).catch(() => undefined);
+      } else {
+        await tgSendRichHtml(
+          this.dependencies.env,
+          setup.chat_id,
+          html,
+          message.message_id,
+          keyboard,
+          setup.message_thread_id,
+        ).catch(() => undefined);
+      }
+      return false;
+    }
+
+    if (this.readyBufferMs > 0) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, this.readyBufferMs);
+        timer.unref();
+      });
+    }
+    if (notice?.ok) {
+      await tgEditRichHtml(
+        this.dependencies.env,
+        setup.chat_id,
+        notice.result.message_id,
+        formatMessageWakeReady(setup),
+        emptyKeyboard(),
+      ).catch(() => undefined);
+    }
+    return true;
   }
 
   async handleCallback(callback: TelegramCallbackQuery): Promise<boolean> {
@@ -1040,6 +1146,27 @@ export function formatSetupCard(
     (error ? `⚠️ ${escapeTelegramHtml(error)}\n\n` : "") +
     "Tune anything below, then start.\n\n" +
     "<footer>the topic name becomes the chat name</footer>"
+  );
+}
+
+export function formatMessageWakeCard(row: TopicSetupRow): string {
+  return (
+    `↻ <b>Resuming ${escapeTelegramHtml(row.topic_name)}…</b>\n\n` +
+    "I’ll send your message as soon as the session is ready."
+  );
+}
+
+export function formatMessageWakeReady(row: TopicSetupRow): string {
+  return (
+    `✓ <b>${escapeTelegramHtml(row.topic_name)} is back online.</b>\n` +
+    "Sending your message now…"
+  );
+}
+
+export function formatMessageWakeFailure(row: TopicSetupRow): string {
+  return (
+    `⚠️ <b>${escapeTelegramHtml(row.topic_name)} could not resume.</b>\n\n` +
+    "Your message was not sent. Tap below to try again, then resend it."
   );
 }
 

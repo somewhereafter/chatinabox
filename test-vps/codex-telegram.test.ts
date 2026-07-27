@@ -14,6 +14,7 @@ import {
   formatCodexQueuedUntilToolStatus,
   formatCodexRichMarkdown,
   formatCodexTransientRichHtml,
+  formatThinkingSectionRichHtml,
   parseArrowShortcut,
   sanitizeAttachmentFileName,
   selectTelegramMedia,
@@ -92,10 +93,50 @@ describe("Codex Telegram attachments", () => {
     }, undefined, personalProfile)).toContain("<footer>cont.</footer>");
   });
 
-  it("renders agent reasoning as a permanent highlighted magic note", () => {
+  it("renders sequential reasoning inside one expandable thinking section", () => {
     expect(formatAgentReasoningRichMarkdown(
       "**Inspecting the queue state**",
     )).toBe("==*Inspecting the queue state... 🪄*==");
+    const thinking = formatThinkingSectionRichHtml({
+      summaries_json: JSON.stringify([
+        "**Inspecting the queue state**",
+        "Checking ordering...",
+      ]),
+      omitted_count: 1,
+    });
+    expect(thinking).toContain("<details><summary>show thinking</summary>");
+    expect(thinking).toContain("1 earlier thought omitted");
+    expect(thinking.match(/<mark>/gu)).toHaveLength(2);
+    expect(thinking).toContain(
+      "<p><mark><i>Inspecting the queue state</i></mark></p>",
+    );
+    expect(thinking).toContain(
+      "<p><mark><i>Checking ordering</i></mark></p>",
+    );
+    expect(thinking).not.toContain("•");
+  });
+
+  it("keeps native goal state inside the live transient", () => {
+    const html = formatCodexTransientRichHtml({
+      statusKind: "state_goal",
+      toolCalls: 0,
+      editedFiles: 0,
+      exploredThings: 0,
+      activeShells: 0,
+      queuedMessages: 0,
+      replyToMessageId: null,
+      startedAt: 1,
+    }, 2, personalProfile, {
+      objective: "Ship goal mode across Telegram and terminal",
+      status: "paused",
+      token_budget: 50_000,
+      tokens_used: 12_000,
+      time_used_seconds: 90,
+    });
+
+    expect(html).toContain("<mark>🎯 goal · paused</mark>");
+    expect(html).toContain("Ship goal mode across Telegram and terminal");
+    expect(html).toContain("12,000 / 50,000 tokens · 1m 30s");
   });
 
   it("selects the largest Telegram photo variant", () => {
@@ -310,6 +351,447 @@ describe("Codex Telegram attachments", () => {
     expect(await controller.ensureLobbyAttached(42, 42, 0, true)).toBe(true);
     expect(bridge.request).toHaveBeenCalledWith({ op: "lobby" });
     expect(store.codexAttachment(42, 42)?.assistant_name).toBe("Lobby");
+    store.close();
+  });
+
+  it("pins completed topic responses as ordered navigable checkpoints", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-pins-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "checkpoints",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: false,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(-10042, 42, pane, 7);
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    let nextMessageId = 900;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ method, body });
+      return {
+        json: async () => ({
+          ok: true,
+          result: method === "pinChatMessage"
+            ? true
+            : { message_id: nextMessageId++ },
+        }),
+      };
+    }));
+    const events = [
+      {
+        id: 1,
+        kind: "assistant_final" as const,
+        target: { serverPid: 100, paneId: "%4", panePid: 200 },
+        sessionId: "session",
+        turnId: "turn-1",
+        assistantName: "Sol" as const,
+        message: "First checkpoint.",
+        createdAt: 1_000,
+      },
+      {
+        id: 2,
+        kind: "assistant_final" as const,
+        target: { serverPid: 100, paneId: "%4", panePid: 200 },
+        sessionId: "session",
+        turnId: "turn-2",
+        assistantName: "Sol" as const,
+        message: "Second checkpoint.",
+        createdAt: 2_000,
+      },
+    ];
+    const acknowledged: number[] = [];
+    const bridge = {
+      request: vi.fn(async (request: { op: string; eventId?: number }) => {
+        if (request.op === "events") return { ok: true, events };
+        if (request.op === "ack") {
+          acknowledged.push(request.eventId!);
+          return { ok: true, acknowledged: true };
+        }
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    await controller.deliverEventsOnce();
+
+    expect(calls.filter((call) => call.method === "pinChatMessage"))
+      .toEqual([
+        {
+          method: "pinChatMessage",
+          body: {
+            chat_id: -10042,
+            message_id: 900,
+            disable_notification: true,
+          },
+        },
+        {
+          method: "pinChatMessage",
+          body: {
+            chat_id: -10042,
+            message_id: 901,
+            disable_notification: true,
+          },
+        },
+      ]);
+    expect(acknowledged).toEqual([1, 2]);
+    store.close();
+  });
+
+  it("syncs native goals into one transient and a durable completion event", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-goals-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "goals",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "thread-goal",
+    };
+    store.attachCodex(-10042, 42, pane, 7);
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    let nextMessageId = 1_200;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ method, body });
+      return {
+        json: async () => ({
+          ok: true,
+          result: method === "editMessageText" || method === "deleteMessage"
+            ? true
+            : { message_id: nextMessageId++ },
+        }),
+      };
+    }));
+    let status: "active" | "complete" = "active";
+    const bridge = {
+      request: vi.fn(async () => ({
+        ok: true,
+        goals: [{
+          target: {
+            serverPid: pane.serverPid,
+            paneId: pane.paneId,
+            panePid: pane.panePid,
+          },
+          threadId: "thread-goal",
+          goal: {
+            threadId: "thread-goal",
+            objective: "Ship native goals",
+            status,
+            tokenBudget: 50_000,
+            tokensUsed: status === "active" ? 12_000 : 24_000,
+            timeUsedSeconds: status === "active" ? 60 : 180,
+            createdAt: 100,
+            updatedAt: status === "active" ? 200 : 300,
+          },
+        }],
+      })),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    await controller.syncGoalsOnce();
+    expect(store.codexGoal(-10042, 42, 7)).toMatchObject({
+      status: "active",
+      objective: "Ship native goals",
+    });
+    expect(store.codexStatus(
+      -10042,
+      42,
+      { serverPid: 100, paneId: "%4", panePid: 200 },
+    )).toMatchObject({ status_kind: "state_goal" });
+    expect(calls.some((call) =>
+      JSON.stringify(call.body).includes("Ship native goals")
+    )).toBe(true);
+
+    status = "complete";
+    await controller.syncGoalsOnce();
+    expect(store.pendingCodexGoalCompletions()).toHaveLength(0);
+    expect(store.recentCompletedCodexGoals(-10042)).toHaveLength(1);
+    expect(calls.some((call) =>
+      JSON.stringify(call.body).includes("goal complete")
+    )).toBe(true);
+    store.close();
+  });
+
+  it("batches thoughts, then flushes them before continuation and final messages", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-thinking-"));
+    temporaryRoots.push(root);
+    let now = 1_800_000_000_000;
+    const store = new ChatinaboxStore(
+      path.join(root, "state.sqlite"),
+      () => now,
+    );
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "thinking-order",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(-10088, 42, pane, 7);
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    let nextMessageId = 1_000;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ method, body });
+      return {
+        json: async () => ({
+          ok: true,
+          result:
+            method === "editMessageText" ||
+              method === "deleteMessage" ||
+              method === "pinChatMessage"
+              ? true
+              : { message_id: nextMessageId++ },
+        }),
+      };
+    }));
+    const events: Array<{
+      id: number;
+      kind: "agent_reasoning" | "assistant_progress" | "assistant_final";
+      target: typeof pane;
+      sessionId: string;
+      turnId: string;
+      assistantName: "Sol";
+      message: string;
+      createdAt: number;
+    }> = [];
+    const acknowledged = new Set<number>();
+    const bridge = {
+      request: vi.fn(async (request: { op: string; eventId?: number }) => {
+        if (request.op === "events") {
+          return {
+            ok: true,
+            events: events.filter((event) => !acknowledged.has(event.id)),
+          };
+        }
+        if (request.op === "ack") {
+          acknowledged.add(request.eventId!);
+          return { ok: true, acknowledged: true };
+        }
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+      now: () => now,
+      thinkingFlushIntervalMs: 5_000,
+    });
+    const addEvent = (
+      kind: "agent_reasoning" | "assistant_progress" | "assistant_final",
+      message: string,
+    ) => {
+      events.push({
+        id: events.length + 1,
+        kind,
+        target: pane,
+        sessionId: "session",
+        turnId: "turn",
+        assistantName: "Sol",
+        message,
+        createdAt: now,
+      });
+    };
+
+    addEvent("agent_reasoning", "Inspecting state");
+    addEvent("agent_reasoning", "Checking ordering");
+    await controller.deliverEventsOnce();
+    expect(calls).toHaveLength(0);
+    expect(acknowledged).toEqual(new Set([1, 2]));
+
+    now += 5_000;
+    await controller.deliverEventsOnce();
+    const firstThinking = calls.find(
+      (call) =>
+        call.method === "sendRichMessage" &&
+        JSON.stringify(call.body).includes("show thinking"),
+    );
+    expect(JSON.stringify(firstThinking?.body)).toContain("Inspecting state");
+    expect(JSON.stringify(firstThinking?.body)).toContain("Checking ordering");
+
+    calls.length = 0;
+    addEvent("agent_reasoning", "Preparing continuation");
+    addEvent("assistant_progress", "The intermediate result.");
+    await controller.deliverEventsOnce();
+    expect(calls[0]?.method).toBe("editMessageText");
+    expect(JSON.stringify(calls[0]?.body)).toContain("Preparing continuation");
+    const continuationIndex = calls.findIndex(
+      (call) =>
+        call.method === "sendRichMessage" &&
+        JSON.stringify(call.body).includes("<footer>cont.</footer>"),
+    );
+    expect(continuationIndex).toBeGreaterThan(0);
+    expect(store.codexThinkingSection(-10088, 42, pane)).toBeNull();
+
+    calls.length = 0;
+    addEvent("agent_reasoning", "Preparing final");
+    addEvent("assistant_final", "The completed result.");
+    await controller.deliverEventsOnce();
+    const finalThinkingIndex = calls.findIndex(
+      (call) =>
+        call.method === "sendRichMessage" &&
+        JSON.stringify(call.body).includes("show thinking"),
+    );
+    const finalAnswerIndex = calls.findIndex(
+      (call) =>
+        call.method === "sendRichMessage" &&
+        JSON.stringify(call.body).includes("<footer>fin</footer>"),
+    );
+    expect(finalThinkingIndex).toBeGreaterThanOrEqual(0);
+    expect(finalAnswerIndex).toBeGreaterThan(finalThinkingIndex);
+    expect(calls.at(-1)?.method).toBe("pinChatMessage");
+    store.close();
+  });
+
+  it("reanchors a live transient once, then edits thinking in place", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-thinking-"));
+    temporaryRoots.push(root);
+    let now = 1_800_000_000_000;
+    const store = new ChatinaboxStore(
+      path.join(root, "state.sqlite"),
+      () => now,
+    );
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "thinking-status",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(-10089, 42, pane, 8);
+    store.setCodexStatus(-10089, 42, pane, 700, {
+      statusKind: "state_activity",
+      toolCalls: 2,
+      editedFiles: 1,
+      exploredThings: 3,
+      activeShells: 0,
+      queuedMessages: 0,
+      replyToMessageId: 650,
+      startedAt: now - 10_000,
+    });
+    store.appendCodexThinkingSummary(-10089, 42, pane, "First batch");
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    let nextMessageId = 1_000;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ method, body });
+      return {
+        json: async () => ({
+          ok: true,
+          result: method === "editMessageText" || method === "deleteMessage"
+            ? true
+            : { message_id: nextMessageId++ },
+        }),
+      };
+    }));
+    const bridge = {
+      request: vi.fn(async (request: { op: string }) => {
+        if (request.op === "events") return { ok: true, events: [] };
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+      now: () => now,
+      thinkingFlushIntervalMs: 5_000,
+    });
+
+    now += 5_000;
+    await controller.deliverEventsOnce();
+    expect(calls.map((call) => call.method)).toEqual([
+      "sendRichMessage",
+      "sendRichMessage",
+      "deleteMessage",
+    ]);
+    expect(calls[0]?.body).toMatchObject({
+      message_thread_id: 8,
+    });
+    expect(calls[2]?.body).toMatchObject({ message_id: 700 });
+    expect(store.codexThinkingSection(-10089, 42, pane)?.telegram_message_id)
+      .toBe(1_000);
+    expect(store.codexStatus(-10089, 42, pane)?.telegram_message_id)
+      .toBe(1_001);
+
+    calls.length = 0;
+    store.appendCodexThinkingSummary(-10089, 42, pane, "Second batch");
+    now += 5_000;
+    await controller.deliverEventsOnce();
+    expect(calls.map((call) => call.method)).toEqual(["editMessageText"]);
+    expect(calls[0]?.body).toMatchObject({ message_id: 1_000 });
+    expect(JSON.stringify(calls[0]?.body)).toContain("Second batch");
+    expect(store.codexStatus(-10089, 42, pane)?.telegram_message_id)
+      .toBe(1_001);
     store.close();
   });
 

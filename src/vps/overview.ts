@@ -27,7 +27,12 @@ import {
   type ExperienceProfile,
 } from "./experience-profile";
 import { abortableSleep } from "./sleep";
-import type { ChatinaboxStore, OverviewDashboardRow } from "./store";
+import type {
+  ChatinaboxStore,
+  CodexGoalHistoryRow,
+  CodexGoalRow,
+  OverviewDashboardRow,
+} from "./store";
 
 const NEXUS_POLL_MS = 5_000;
 const NEXUS_TIMESTAMP_REFRESH_MS = 60_000;
@@ -41,6 +46,13 @@ export interface OverviewStats {
   readonly idle: number;
   readonly bridgeOnline: boolean;
   readonly usage: CodexUsage | null;
+}
+
+export interface OverviewGoals {
+  readonly current: readonly (CodexGoalRow & {
+    readonly topic_name?: string;
+  })[];
+  readonly recent: readonly CodexGoalHistoryRow[];
 }
 
 interface OverviewDependencies {
@@ -195,8 +207,24 @@ export class OverviewController {
     if (!row) return;
     const response = await this.bridge.request({ op: "list" }).catch(() => null);
     const stats = overviewStatsFromBridge(response);
+    const goals: OverviewGoals = {
+      current: this.dependencies.store.codexGoalsForChat(chatId)
+        .filter((goal) => goal.status !== "complete")
+        .map((goal) => {
+          const topicName = this.dependencies.store.topicSetup(
+            goal.chat_id,
+            goal.owner_user_id,
+            goal.message_thread_id,
+          )?.topic_name;
+          return {
+            ...goal,
+            ...(topicName ? { topic_name: topicName } : {}),
+          };
+        }),
+      recent: this.dependencies.store.recentCompletedCodexGoals(chatId, 10),
+    };
     const profile = this.profile();
-    const signature = overviewRenderSignature(stats, profile);
+    const signature = overviewRenderSignature(stats, profile, goals);
     const timestampDue =
       this.now() - row.rendered_at >= NEXUS_TIMESTAMP_REFRESH_MS;
     if (
@@ -220,7 +248,7 @@ export class OverviewController {
     const keyboard = buildInlineKeyboard([
       [{ label: "↻  refresh", callbackData: refreshButton }],
     ]);
-    const text = formatOverviewDashboard(stats, this.now(), profile);
+    const text = formatOverviewDashboard(stats, this.now(), profile, goals);
     if (row.dashboard_message_id !== null) {
       const edited = await tgEditRichHtml(
         this.dependencies.env,
@@ -313,6 +341,7 @@ export function overviewStatsFromBridge(
 export function overviewRenderSignature(
   stats: OverviewStats,
   profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
+  goals: OverviewGoals = { current: [], recent: [] },
 ): string {
   return JSON.stringify({
     total: stats.total,
@@ -321,6 +350,25 @@ export function overviewRenderSignature(
     idle: stats.idle,
     bridgeOnline: stats.bridgeOnline,
     overview: profile.overview,
+    goals: {
+      current: goals.current.map((goal) => ({
+        threadId: goal.thread_id,
+        objective: goal.objective,
+        status: goal.status,
+        tokenBudget: goal.token_budget,
+        tokensUsed: goal.tokens_used,
+        timeUsedSeconds: goal.time_used_seconds,
+        updatedAt: goal.goal_updated_at,
+      })),
+      recent: goals.recent.map((goal) => ({
+        id: goal.id,
+        objective: goal.objective,
+        topicName: goal.topic_name,
+        tokensUsed: goal.tokens_used,
+        timeUsedSeconds: goal.time_used_seconds,
+        completedAt: goal.completed_at,
+      })),
+    },
     usage: stats.usage
       ? {
           creditsBalance: stats.usage.creditsBalance,
@@ -334,6 +382,7 @@ export function formatOverviewDashboard(
   stats: OverviewStats,
   refreshedAt: number = Date.now(),
   profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
+  goals: OverviewGoals = { current: [], recent: [] },
 ): string {
   const status = stats.bridgeOnline
     ? "🟢 live"
@@ -346,13 +395,92 @@ export function formatOverviewDashboard(
     `💤 <b>${stats.idle}</b> idle` +
     `</blockquote>`;
   const usage = formatUsage(stats.usage);
+  const goalState = formatOverviewGoals(goals);
   return (
     `<mark>${escapeTelegramHtml(profile.overview.name)} ` +
     `${escapeTelegramHtml(profile.overview.emoji)} · ${status}</mark>\n\n` +
     `<p><b>sessions</b></p>${sessions}\n\n` +
+    `<p><b>goals</b></p>${goalState}\n\n` +
     `<p><b>usage limits</b></p>${usage}\n\n` +
     `<footer>synced ${formatUtcDate(refreshedAt)}</footer>`
   );
+}
+
+function formatOverviewGoals(goals: OverviewGoals): string {
+  const current = goals.current.length === 0
+    ? "<blockquote>no active or paused goals</blockquote>"
+    : goals.current.slice(0, 10).map((goal) => {
+      const setupName = goal.topic_name || (
+        goal.message_thread_id > 0
+          ? `topic ${goal.message_thread_id}`
+          : "direct chat"
+      );
+      return (
+        `<blockquote><b>🎯 ${escapeTelegramHtml(
+          overviewGoalStatus(goal.status),
+        )}</b> · ${escapeTelegramHtml(setupName)}` +
+        `<br/>${escapeTelegramHtml(shortGoalText(goal.objective))}` +
+        `<br/><i>${formatGoalUsage(
+          goal.tokens_used,
+          goal.time_used_seconds,
+          goal.token_budget,
+        )}</i></blockquote>`
+      );
+    }).join("");
+  if (goals.recent.length === 0) return current;
+  const recent = goals.recent.map((goal) => {
+    const origin = goal.topic_name || (
+      goal.message_thread_id > 0
+        ? `topic ${goal.message_thread_id}`
+        : "direct chat"
+    );
+    return (
+      `<p><b>✓ ${escapeTelegramHtml(origin)}</b><br/>` +
+      `${escapeTelegramHtml(shortGoalText(goal.objective))}<br/>` +
+      `<i>${formatGoalUsage(
+        goal.tokens_used,
+        goal.time_used_seconds,
+        null,
+      )} · ${formatUtcDate(goal.completed_at)}</i></p>`
+    );
+  }).join("");
+  return (
+    `${current}<details><summary>recent completed goals</summary>` +
+    `${recent}</details>`
+  );
+}
+
+function overviewGoalStatus(status: CodexGoalRow["status"]): string {
+  if (status === "usageLimited") return "usage limited";
+  if (status === "budgetLimited") return "budget reached";
+  return status;
+}
+
+function shortGoalText(value: string): string {
+  const compact = value.replace(/\s+/gu, " ").trim();
+  return compact.length <= 180 ? compact : `${compact.slice(0, 179)}…`;
+}
+
+function formatGoalUsage(
+  tokensUsed: number,
+  timeUsedSeconds: number,
+  tokenBudget: number | null,
+): string {
+  const tokens = tokenBudget === null
+    ? `${tokensUsed.toLocaleString("en-US")} tokens`
+    : `${tokensUsed.toLocaleString("en-US")} / ` +
+      `${tokenBudget.toLocaleString("en-US")} tokens`;
+  return `${tokens} · ${formatCompactSeconds(timeUsedSeconds)}`;
+}
+
+function formatCompactSeconds(value: number): string {
+  const seconds = Math.max(0, Math.floor(value));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  const remainder = minutes % 60;
+  return remainder > 0 ? `${hours}h ${remainder}m` : `${hours}h`;
 }
 
 function formatUsage(usage: CodexUsage | null): string {

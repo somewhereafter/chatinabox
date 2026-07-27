@@ -40,6 +40,10 @@ import {
   type CodexEventKind,
   type CodexAssistantName,
 } from "./codex-bridge-protocol";
+import {
+  CodexAppServerGoalClient,
+  type CodexGoalStatus as AppServerGoalStatus,
+} from "./codex-app-server";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_PROMPT_BYTES = 256 * 1024;
@@ -159,6 +163,7 @@ export class CodexBridge {
   private usageCache:
     { readonly value: CodexUsage | null; readonly cachedAt: number } | null =
       null;
+  private readonly goalClient = new CodexAppServerGoalClient(CODEX);
 
   constructor(private readonly options: BridgeOptions) {
     mkdirSync(path.dirname(options.databasePath), {
@@ -348,6 +353,14 @@ export class CodexBridge {
         return this.captureScreen(request);
       case "close":
         return this.closeSession(request);
+      case "goals":
+        return this.listGoals();
+      case "goal_get":
+        return this.getGoal(request);
+      case "goal_set":
+        return this.setGoal(request);
+      case "goal_clear":
+        return this.clearGoal(request);
       case "new":
         return this.createSession(request);
       case "resume":
@@ -537,6 +550,14 @@ export class CodexBridge {
     ) {
       return failure("BAD_PROMPT", "Prompt is empty or too large.");
     }
+    if (
+      request.mode !== undefined &&
+      request.mode !== "steer" &&
+      request.mode !== "queue"
+    ) {
+      return failure("BAD_PROMPT", "Prompt delivery mode is invalid.");
+    }
+    const queueForNextTurn = request.mode === "queue" && target.busy;
     const bufferName = `codex-tg-${randomBytes(8).toString("hex")}`;
     const originId = this.recordPromptOrigin(target, request.text);
     let sent = false;
@@ -551,7 +572,12 @@ export class CodexBridge {
         "-t",
         target.paneId,
       ]);
-      await run(TMUX, ["send-keys", "-t", target.paneId, "Enter"]);
+      await run(TMUX, [
+        "send-keys",
+        "-t",
+        target.paneId,
+        queueForNextTurn ? "Tab" : "Enter",
+      ]);
       sent = true;
       if (!this.hasHookRegistration(target)) {
         void this.watchTranscriptFallback(
@@ -563,7 +589,7 @@ export class CodexBridge {
       return {
         ok: true,
         sent: true,
-        queuedUntilNextToolCall: target.busy,
+        queuedUntilNextToolCall: queueForNextTurn,
       };
     } finally {
       if (!sent) this.deletePromptOrigin(originId);
@@ -867,7 +893,12 @@ export class CodexBridge {
   ): Promise<CodexBridgeResponse> {
     const target = await this.requireTarget(request.target);
     if (!target) {
-      return failure("STALE_TARGET", "That Codex session is no longer available.");
+      if (!isPaneIdentity(request.target)) {
+        return failure("BAD_TARGET", "Invalid Codex session target.");
+      }
+      const recovered = this.recoverClosedSession(request.target);
+      return recovered ??
+        failure("STALE_TARGET", "That Codex session is no longer available.");
     }
     if (target.busy) {
       return failure("SESSION_BUSY", "A working Codex session cannot be closed.");
@@ -893,6 +924,165 @@ export class CodexBridge {
     }
     await run(TMUX, ["kill-pane", "-t", target.paneId]);
     return { ok: true, closed: true, sessionId, profile };
+  }
+
+  private async listGoals(): Promise<CodexBridgeResponse> {
+    const panes = (await this.listCodexPanes()).filter((pane) => pane.sessionId);
+    const observations = await this.goalClient.getGoals(
+      panes.map((pane) => ({
+        threadId: pane.sessionId!,
+        cwd: pane.cwd,
+      })),
+    );
+    return {
+      ok: true,
+      goals: observations.map((observation, index) => ({
+        target: panes[index]!,
+        threadId: observation.threadId,
+        goal: observation.goal,
+        ...(observation.error ? { error: observation.error } : {}),
+      })),
+    };
+  }
+
+  private async getGoal(
+    request: Record<string, unknown>,
+  ): Promise<CodexBridgeResponse> {
+    const target = await this.requireGoalTarget(request.target);
+    if (!target.ok) return target.response;
+    const [observation] = await this.goalClient.getGoals([target.thread]);
+    if (!observation || observation.error) {
+      return failure(
+        "GOAL_UNAVAILABLE",
+        observation?.error ?? "Codex goal state is unavailable.",
+      );
+    }
+    return { ok: true, goal: observation.goal };
+  }
+
+  private async setGoal(
+    request: Record<string, unknown>,
+  ): Promise<CodexBridgeResponse> {
+    const target = await this.requireGoalTarget(request.target);
+    if (!target.ok) return target.response;
+    const objective = request.objective;
+    const status = request.status;
+    const tokenBudget = request.tokenBudget;
+    if (
+      objective !== undefined &&
+      (typeof objective !== "string" || objective.trim().length === 0)
+    ) {
+      return failure("BAD_GOAL", "Goal objective must not be empty.");
+    }
+    if (
+      status !== undefined &&
+      !isCodexGoalStatus(status)
+    ) {
+      return failure("BAD_GOAL", "Goal status is invalid.");
+    }
+    if (
+      tokenBudget !== undefined &&
+      tokenBudget !== null &&
+      (!Number.isSafeInteger(tokenBudget) || Number(tokenBudget) <= 0)
+    ) {
+      return failure("BAD_GOAL", "Goal token budget must be positive.");
+    }
+    if (
+      objective === undefined &&
+      status === undefined &&
+      tokenBudget === undefined
+    ) {
+      return failure("BAD_GOAL", "Goal update is empty.");
+    }
+    try {
+      const goal = await this.goalClient.setGoal(target.thread, {
+        ...(typeof objective === "string"
+          ? { objective: objective.trim() }
+          : {}),
+        ...(isCodexGoalStatus(status) ? { status } : {}),
+        ...(tokenBudget !== undefined
+          ? { tokenBudget: tokenBudget === null ? null : Number(tokenBudget) }
+          : {}),
+      });
+      return { ok: true, goal };
+    } catch (error) {
+      return failure("GOAL_UNAVAILABLE", errorMessage(error));
+    }
+  }
+
+  private async clearGoal(
+    request: Record<string, unknown>,
+  ): Promise<CodexBridgeResponse> {
+    const target = await this.requireGoalTarget(request.target);
+    if (!target.ok) return target.response;
+    try {
+      await this.goalClient.clearGoal(target.thread);
+      return { ok: true, goalCleared: true };
+    } catch (error) {
+      return failure("GOAL_UNAVAILABLE", errorMessage(error));
+    }
+  }
+
+  private async requireGoalTarget(
+    value: unknown,
+  ): Promise<
+    | {
+      readonly ok: true;
+      readonly thread: { readonly threadId: string; readonly cwd: string };
+    }
+    | { readonly ok: false; readonly response: CodexBridgeResponse }
+  > {
+    const pane = await this.requireTarget(value);
+    if (!pane) {
+      return {
+        ok: false,
+        response: failure(
+          "STALE_TARGET",
+          "That Codex session is no longer available.",
+        ),
+      };
+    }
+    if (!pane.sessionId) {
+      return {
+        ok: false,
+        response: failure(
+          "GOAL_UNAVAILABLE",
+          "That Codex thread has not been identified yet.",
+        ),
+      };
+    }
+    return {
+      ok: true,
+      thread: { threadId: pane.sessionId, cwd: pane.cwd },
+    };
+  }
+
+  private recoverClosedSession(
+    target: CodexPaneIdentity,
+  ): CodexBridgeResponse | null {
+    const binding = this.db.prepare(`
+      SELECT session_id
+      FROM transcript_bindings
+      WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+    `).get(
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+    ) as { session_id: string } | undefined;
+    const saved = this.paneProfile(target);
+    if (!binding && !saved) return null;
+    const assistant = this.assistantNameForTarget(target);
+    return {
+      ok: true,
+      closed: true,
+      sessionId: binding?.session_id ?? null,
+      profile: {
+        model: profileModelFamily(saved?.model, assistant),
+        reasoningEffort: saved?.reasoningEffort ?? "high",
+        fast: saved?.fast ?? false,
+        cwd: saved?.cwd ?? this.options.defaultCwd ?? homedir(),
+      },
+    };
   }
 
   private async startTmuxCodex(input: {
@@ -1330,7 +1520,7 @@ export class CodexBridge {
       if (prompt !== null) {
         const telegramOrigin = this.consumePromptOrigin(pane, prompt);
         this.recordTranscriptSuppression(pane, prompt);
-        if (!telegramOrigin) {
+        if (!telegramOrigin && !isInternalCodexPrompt(prompt)) {
           this.insertMessageEvent(
             "user_local",
             pane,
@@ -2303,6 +2493,7 @@ export class CodexBridge {
         const prompt = transcriptMessageText(payload);
         if (
           prompt &&
+          !isInternalCodexPrompt(prompt) &&
           !this.consumeTranscriptSuppression(target, prompt) &&
           !this.consumePromptOrigin(target, prompt)
         ) {
@@ -3792,6 +3983,26 @@ export function transcriptReasoningSummaries(record: unknown): string[] {
     .slice(0, 20);
 }
 
+/**
+ * Codex records a few runtime/developer context envelopes as user-role
+ * transcript items. They are not authored chat messages and must never be
+ * mirrored back into Telegram as if the user sent them from a VPS terminal.
+ */
+export function isInternalCodexPrompt(value: string): boolean {
+  const prompt = value.trimStart();
+  return prompt.startsWith("# AGENTS.md instructions\n") ||
+    prompt.startsWith("<environment_context>") ||
+    prompt.startsWith("<permissions instructions>") ||
+    prompt.startsWith("<collaboration_mode>") ||
+    prompt.startsWith("<apps_instructions>") ||
+    prompt.startsWith("<plugins_instructions>") ||
+    prompt.startsWith("<skills_instructions>") ||
+    prompt.startsWith("## Memory\n\nYou have access to a memory folder") ||
+    prompt.startsWith(
+      "You are `/root`, the primary agent in a team of agents collaborating",
+    );
+}
+
 function parseCodexUsageLimit(value: unknown): CodexUsageLimit | null {
   if (!isPlainRecord(value)) return null;
   const usedPercent = Number(value.used_percent);
@@ -3868,4 +4079,17 @@ function delay(milliseconds: number): Promise<void> {
     const timer = setTimeout(resolve, milliseconds);
     timer.unref();
   });
+}
+
+function isCodexGoalStatus(value: unknown): value is AppServerGoalStatus {
+  return value === "active" ||
+    value === "paused" ||
+    value === "blocked" ||
+    value === "usageLimited" ||
+    value === "budgetLimited" ||
+    value === "complete";
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

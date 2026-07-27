@@ -90,6 +90,59 @@ describe("Overview dashboard", () => {
       usage: { ...stats.usage, observedAt: stats.usage.observedAt + 5_000 },
     }));
   });
+
+  it("renders current goals and expandable recent completions", () => {
+    const now = Date.parse("2026-07-26T19:00:00.000Z");
+    const card = formatOverviewDashboard(
+      {
+        total: 2,
+        active: 1,
+        working: 1,
+        idle: 0,
+        bridgeOnline: true,
+        usage: null,
+      },
+      now,
+      customProfile,
+      {
+        current: [{
+          chat_id: -10042,
+          owner_user_id: 42,
+          message_thread_id: 20,
+          thread_id: "thread-1",
+          objective: "Ship native goal sync",
+          status: "paused",
+          token_budget: 50_000,
+          tokens_used: 12_000,
+          time_used_seconds: 90,
+          goal_created_at: 100,
+          goal_updated_at: 200,
+          observed_at: now,
+          awaiting_edit: 0,
+        }],
+        recent: [{
+          id: 1,
+          chat_id: -10042,
+          owner_user_id: 42,
+          message_thread_id: 21,
+          thread_id: "thread-2",
+          topic_name: "Review",
+          objective: "Finish review",
+          tokens_used: 8_000,
+          time_used_seconds: 60,
+          goal_created_at: 300,
+          completed_at: now,
+          telegram_message_id: 99,
+        }],
+      },
+    );
+
+    expect(card).toContain("<p><b>goals</b></p>");
+    expect(card).toContain("🎯 paused");
+    expect(card).toContain("Ship native goal sync");
+    expect(card).toContain("<details><summary>recent completed goals</summary>");
+    expect(card).toContain("✓ Review");
+  });
 });
 
 function pane(

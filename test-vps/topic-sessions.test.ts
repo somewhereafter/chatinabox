@@ -24,7 +24,10 @@ afterEach(() => {
   }
 });
 
-function setup(profile?: ExperienceProfile) {
+function setup(
+  profile?: ExperienceProfile,
+  bridgeHandler?: (request: unknown) => Promise<Record<string, unknown>>,
+) {
   const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-topic-"));
   roots.push(root);
   const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
@@ -46,6 +49,7 @@ function setup(profile?: ExperienceProfile) {
   const bridge = {
     request: vi.fn(async (request: unknown) => {
       requests.push(request);
+      if (bridgeHandler) return bridgeHandler(request);
       return { ok: true, pane };
     }),
   };
@@ -72,6 +76,7 @@ function setup(profile?: ExperienceProfile) {
     },
     store,
     bridge: bridge as never,
+    readyBufferMs: 0,
     ...(profile ? { profile: () => profile } : {}),
   });
   return { controller, store, pane, requests, sends };
@@ -166,6 +171,87 @@ describe("Topic session setup", () => {
       reasoning_effort: "low",
       fast: 1,
     });
+    store.close();
+  });
+
+  it("resumes a resting topic from its next message before routing it", async () => {
+    const { controller, store, pane, requests, sends } = setup();
+    const sessionId = "019f9ce4-aceb-75e1-bf3a-84e1495098fb";
+    store.rememberTopic(
+      -10042,
+      42,
+      7,
+      "🧪 experiment",
+      "/root/project",
+    );
+    store.updateTopicSetup(-10042, 42, 7, {
+      closed_session_id: sessionId,
+      closed_at: 1_000,
+    });
+
+    const consumed = await controller.handleMessage({
+      message_id: 77,
+      chat: { id: -10042, type: "supergroup" },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      text: "Continue from the last checkpoint.",
+      date: 1,
+    }, null);
+
+    expect(consumed).toBe(false);
+    expect(requests[0]).toEqual({
+      op: "resume",
+      sessionId,
+      name: "🧪 experiment",
+      cwd: "/root/project",
+      model: "sol",
+      reasoningEffort: "high",
+      fast: false,
+    });
+    expect(store.codexAttachment(-10042, 42, 7)?.pane_id).toBe(pane.paneId);
+    expect(store.topicSetup(-10042, 42, 7)).toMatchObject({
+      closed_session_id: null,
+      closed_at: null,
+    });
+    expect(JSON.stringify(sends[0])).toContain("Resuming 🧪 experiment");
+    expect(JSON.stringify(sends.at(-1))).toContain("Sending your message now");
+    store.close();
+  });
+
+  it("keeps a failed wake message visible and does not consume it silently", async () => {
+    const { controller, store, requests, sends } = setup(
+      undefined,
+      async () => ({
+        ok: false,
+        code: "START_FAILED",
+        error: "Codex session did not become ready.",
+      }),
+    );
+    const sessionId = "019f9ce4-aceb-75e1-bf3a-84e1495098fb";
+    store.rememberTopic(-10042, 42, 7, "sleeping chat", "/root");
+    store.updateTopicSetup(-10042, 42, 7, {
+      closed_session_id: sessionId,
+      closed_at: 1_000,
+    });
+
+    const consumed = await controller.handleMessage({
+      message_id: 78,
+      chat: { id: -10042, type: "supergroup" },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      text: "Are you there?",
+      date: 1,
+    }, null);
+
+    expect(consumed).toBe(true);
+    expect(requests.map((request) => (
+      request as { op?: string }
+    ).op)).toEqual(["resume", "new"]);
+    expect(store.codexAttachment(-10042, 42, 7)).toBeNull();
+    expect(JSON.stringify(sends.at(-1))).toContain("Your message was not sent");
+    expect(JSON.stringify(sends.at(-1))).toContain("restart session");
     store.close();
   });
 

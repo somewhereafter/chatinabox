@@ -6,19 +6,96 @@ import type {
 import type { TelegramInlineKeyboardMarkup } from "./telegram-callback";
 
 const API = "https://api.telegram.org";
+let telegramRetryAfterUntil = 0;
+const nextChatSendAt = new Map<number, number>();
+const pacedChatUntil = new Map<number, number>();
+const GROUP_SEND_INTERVAL_MS = 3_100;
+const PRIVATE_SEND_INTERVAL_MS = 1_100;
+const RATE_LIMIT_RECOVERY_MS = 5 * 60 * 1_000;
+const PACED_SEND_METHODS = new Set(["sendMessage", "sendRichMessage"]);
 
 async function tgCall<T>(
   env: BotEnv,
   method: string,
   body: Record<string, unknown>,
 ): Promise<TelegramResponse<T>> {
+  const now = Date.now();
+  if (now < telegramRetryAfterUntil) {
+    return {
+      ok: false,
+      result: undefined as T,
+      description: "Telegram rate-limit backoff is active.",
+      error_code: 429,
+      parameters: {
+        retry_after: Math.max(
+          1,
+          Math.ceil((telegramRetryAfterUntil - now) / 1_000),
+        ),
+      },
+    };
+  }
+  const chatId = typeof body.chat_id === "number" ? body.chat_id : null;
+  if (
+    chatId !== null &&
+    (pacedChatUntil.get(chatId) ?? 0) <= now
+  ) {
+    pacedChatUntil.delete(chatId);
+    nextChatSendAt.delete(chatId);
+  }
+  if (
+    chatId !== null &&
+    PACED_SEND_METHODS.has(method) &&
+    pacedChatUntil.has(chatId) &&
+    now < (nextChatSendAt.get(chatId) ?? 0)
+  ) {
+    return {
+      ok: false,
+      result: undefined as T,
+      description: "Telegram per-chat send pacing is active.",
+      error_code: 429,
+      parameters: {
+        retry_after: Math.max(
+          1,
+          Math.ceil(((nextChatSendAt.get(chatId) ?? now) - now) / 1_000),
+        ),
+      },
+    };
+  }
   const resp = await fetch(`${API}/bot${env.TG_BOT_TOKEN}/${method}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   const data = (await resp.json()) as TelegramResponse<T>;
+  if (
+    data.ok &&
+    chatId !== null &&
+    PACED_SEND_METHODS.has(method) &&
+    pacedChatUntil.has(chatId)
+  ) {
+    nextChatSendAt.set(
+      chatId,
+      Date.now() + (
+        chatId < 0 ? GROUP_SEND_INTERVAL_MS : PRIVATE_SEND_INTERVAL_MS
+      ),
+    );
+  }
   if (!data.ok) {
+    if (data.error_code === 429) {
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil(data.parameters?.retry_after ?? 1),
+      );
+      telegramRetryAfterUntil =
+        Date.now() + retryAfterSeconds * 1_000 + 250;
+      if (chatId !== null && PACED_SEND_METHODS.has(method)) {
+        pacedChatUntil.set(chatId, Date.now() + RATE_LIMIT_RECOVERY_MS);
+      }
+      console.error(
+        `[Telegram] rate limited; backing off for ${retryAfterSeconds}s.`,
+      );
+      return data;
+    }
     // "message is not modified" is a benign no-op from progress-polling edits.
     const desc = data.description ?? "";
     if (!/not modified/i.test(desc)) {

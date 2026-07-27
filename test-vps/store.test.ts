@@ -7,7 +7,10 @@ import {
   issueCallbackReference,
   parseCallbackReference,
 } from "../src/telegram-callback";
-import { ChatinaboxStore } from "../src/vps/store";
+import {
+  ChatinaboxStore,
+  parseThinkingSummaries,
+} from "../src/vps/store";
 
 const roots: string[] = [];
 
@@ -186,6 +189,73 @@ describe("ChatinaboxStore", () => {
     store.close();
   });
 
+  it("persists and batches sequential thinking summaries without duplicate refreshes", async () => {
+    const root = await temporaryRoot();
+    const databasePath = path.join(root, "state.sqlite");
+    let now = 1_800_000_000_000;
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "thinking",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: true,
+      codexPid: 300,
+    };
+    let store = new ChatinaboxStore(databasePath, () => now);
+    store.attachCodex(42, 42, pane);
+
+    const first = store.appendCodexThinkingSummary(
+      42,
+      42,
+      pane,
+      "Inspecting the current state",
+    );
+    const duplicate = store.appendCodexThinkingSummary(
+      42,
+      42,
+      pane,
+      "Inspecting the current state",
+    );
+    expect(duplicate.updated_at).toBe(first.updated_at);
+    store.appendCodexThinkingSummary(
+      42,
+      42,
+      pane,
+      "Checking message order",
+    );
+    store.close();
+
+    store = new ChatinaboxStore(databasePath, () => now);
+    expect(parseThinkingSummaries(
+      store.codexThinkingSection(42, 42, pane)?.summaries_json,
+    )).toEqual([
+      "Inspecting the current state",
+      "Checking message order",
+    ]);
+    expect(store.codexThinkingSectionsDue(now - 1)).toHaveLength(0);
+
+    now += 5_000;
+    expect(store.codexThinkingSectionsDue(now - 5_000)).toHaveLength(1);
+    store.markCodexThinkingSectionRendered(42, 42, pane, 900);
+    store.appendCodexThinkingSummary(
+      42,
+      42,
+      pane,
+      "Preparing the next checkpoint",
+    );
+    expect(store.codexThinkingSectionsDue(now - 5_000)).toHaveLength(0);
+    now += 5_000;
+    expect(store.codexThinkingSectionsDue(now - 5_000)).toHaveLength(1);
+
+    expect(store.detachCodex(42, 42)).toBe(true);
+    expect(store.codexThinkingSection(42, 42, pane)).toBeNull();
+    store.close();
+  });
+
   it("keeps an overview isolated from Codex routing and persists its card", async () => {
     const root = await temporaryRoot();
     const databasePath = path.join(root, "state.sqlite");
@@ -246,5 +316,72 @@ describe("ChatinaboxStore", () => {
     expect(reopened.overviewDashboard(-10042)?.dashboard_message_id).toBe(77);
     expect(reopened.managerTopic(-10042)?.message_thread_id).toBe(2);
     reopened.close();
+  });
+
+  it("tracks native goal state and emits each completion once", async () => {
+    const root = await temporaryRoot();
+    const databasePath = path.join(root, "state.sqlite");
+    let now = 1_800_000_000_000;
+    const store = new ChatinaboxStore(databasePath, () => now);
+    store.ensureTopicSetup(
+      -10042,
+      42,
+      20,
+      "Production",
+      "/root/chatinabox",
+      {
+        model: "sol",
+        reasoningEffort: "high",
+        fast: false,
+      },
+    );
+    const active = {
+      threadId: "thread-goal",
+      objective: "Productionize goal mode",
+      status: "active" as const,
+      tokenBudget: 50_000,
+      tokensUsed: 10_000,
+      timeUsedSeconds: 60,
+      createdAt: 100,
+      updatedAt: 200,
+    };
+    expect(store.observeCodexGoal(-10042, 42, 20, active)).toMatchObject({
+      status: "active",
+      objective: "Productionize goal mode",
+    });
+    expect(store.hasActiveCodexGoal(-10042, 42, 20)).toBe(true);
+    store.setCodexGoalAwaitingEdit(-10042, 42, 20, true);
+    expect(store.codexGoal(-10042, 42, 20)?.awaiting_edit).toBe(1);
+
+    now += 1_000;
+    store.observeCodexGoal(-10042, 42, 20, {
+      ...active,
+      status: "complete",
+      tokensUsed: 25_000,
+      timeUsedSeconds: 180,
+      updatedAt: 300,
+    });
+    store.observeCodexGoal(-10042, 42, 20, {
+      ...active,
+      status: "complete",
+      tokensUsed: 25_000,
+      timeUsedSeconds: 180,
+      updatedAt: 300,
+    });
+    expect(store.hasActiveCodexGoal(-10042, 42, 20)).toBe(false);
+    expect(store.pendingCodexGoalCompletions()).toHaveLength(1);
+    expect(store.recentCompletedCodexGoals(-10042)).toMatchObject([{
+      topic_name: "Production",
+      objective: "Productionize goal mode",
+      tokens_used: 25_000,
+    }]);
+    const completion = store.pendingCodexGoalCompletions()[0]!;
+    store.markCodexGoalCompletionAnnounced(completion.id, 900);
+    expect(store.pendingCodexGoalCompletions()).toHaveLength(0);
+
+    store.observeCodexGoal(-10042, 42, 20, null);
+    expect(store.codexGoal(-10042, 42, 20)).toBeNull();
+    expect(store.recentCompletedCodexGoals(-10042)).toHaveLength(1);
+    store.close();
   });
 });

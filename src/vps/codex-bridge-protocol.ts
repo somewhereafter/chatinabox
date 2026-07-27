@@ -79,6 +79,32 @@ export interface CodexUsage {
   readonly limits: readonly CodexUsageLimit[];
 }
 
+export type CodexGoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usageLimited"
+  | "budgetLimited"
+  | "complete";
+
+export interface CodexThreadGoal {
+  readonly threadId: string;
+  readonly objective: string;
+  readonly status: CodexGoalStatus;
+  readonly tokenBudget: number | null;
+  readonly tokensUsed: number;
+  readonly timeUsedSeconds: number;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface CodexGoalObservation {
+  readonly target: CodexPaneIdentity;
+  readonly threadId: string;
+  readonly goal: CodexThreadGoal | null;
+  readonly error?: string;
+}
+
 export type CodexBridgeRequest =
   | { readonly op: "ping" }
   | { readonly op: "list" }
@@ -86,6 +112,7 @@ export type CodexBridgeRequest =
       readonly op: "send";
       readonly target: CodexPaneIdentity;
       readonly text: string;
+      readonly mode?: "steer" | "queue";
     }
   | { readonly op: "interrupt"; readonly target: CodexPaneIdentity }
   | {
@@ -95,6 +122,16 @@ export type CodexBridgeRequest =
     }
   | { readonly op: "screen"; readonly target: CodexPaneIdentity }
   | { readonly op: "close"; readonly target: CodexPaneIdentity }
+  | { readonly op: "goals" }
+  | { readonly op: "goal_get"; readonly target: CodexPaneIdentity }
+  | {
+      readonly op: "goal_set";
+      readonly target: CodexPaneIdentity;
+      readonly objective?: string;
+      readonly status?: CodexGoalStatus;
+      readonly tokenBudget?: number | null;
+    }
+  | { readonly op: "goal_clear"; readonly target: CodexPaneIdentity }
   | {
       readonly op: "new";
       readonly name?: string;
@@ -161,6 +198,9 @@ export type CodexBridgeResponse =
     }
   | { readonly ok: true; readonly interrupted: true }
   | { readonly ok: true; readonly keysSent: true }
+  | { readonly ok: true; readonly goals: readonly CodexGoalObservation[] }
+  | { readonly ok: true; readonly goal: CodexThreadGoal | null }
+  | { readonly ok: true; readonly goalCleared: true }
   | {
       readonly ok: true;
       readonly closed: true;

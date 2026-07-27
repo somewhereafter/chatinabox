@@ -9,8 +9,10 @@ import {
 } from "../telegram-callback";
 import type {
   CodexAssistantName,
+  CodexGoalStatus,
   CodexPane,
   CodexPaneIdentity,
+  CodexThreadGoal,
 } from "./codex-bridge-protocol";
 
 export interface CodexAttachmentRow {
@@ -84,6 +86,51 @@ export interface CodexQueuedPromptRow {
   created_at: number;
 }
 
+export interface CodexThinkingSectionRow {
+  chat_id: number;
+  owner_user_id: number;
+  server_pid: number;
+  pane_id: string;
+  pane_pid: number;
+  summaries_json: string;
+  omitted_count: number;
+  telegram_message_id: number | null;
+  created_at: number;
+  updated_at: number;
+  rendered_at: number;
+}
+
+export interface CodexGoalRow {
+  chat_id: number;
+  owner_user_id: number;
+  message_thread_id: number;
+  thread_id: string;
+  objective: string;
+  status: CodexGoalStatus;
+  token_budget: number | null;
+  tokens_used: number;
+  time_used_seconds: number;
+  goal_created_at: number;
+  goal_updated_at: number;
+  observed_at: number;
+  awaiting_edit: number;
+}
+
+export interface CodexGoalHistoryRow {
+  id: number;
+  chat_id: number;
+  owner_user_id: number;
+  message_thread_id: number;
+  thread_id: string;
+  topic_name: string;
+  objective: string;
+  tokens_used: number;
+  time_used_seconds: number;
+  goal_created_at: number;
+  completed_at: number;
+  telegram_message_id: number | null;
+}
+
 export interface OverviewDashboardRow {
   chat_id: number;
   owner_user_id: number;
@@ -130,6 +177,9 @@ const CALLBACKS_PER_OWNER_CAP = 1_024;
 const CALLBACKS_GLOBAL_CAP = 4_096;
 const MAX_CALLBACK_RECORD_BYTES = MAX_CALLBACK_PAYLOAD_BYTES + 1_024;
 const TELEGRAM_UPDATE_RETENTION_MS = 48 * 60 * 60 * 1_000;
+const MAX_THINKING_SUMMARIES = 32;
+const MAX_THINKING_SUMMARY_CHARS = 1_000;
+const MAX_THINKING_SECTION_CHARS = 12_000;
 
 /**
  * Single-file state store for Telegram ownership, session routing, queued
@@ -263,6 +313,57 @@ export class ChatinaboxStore {
         ON codex_queued_prompts(
           server_pid, pane_id, pane_pid, created_at, id
         );
+      CREATE TABLE IF NOT EXISTS codex_thinking_sections (
+        chat_id INTEGER NOT NULL,
+        owner_user_id INTEGER NOT NULL,
+        server_pid INTEGER NOT NULL,
+        pane_id TEXT NOT NULL,
+        pane_pid INTEGER NOT NULL,
+        summaries_json TEXT NOT NULL DEFAULT '[]',
+        omitted_count INTEGER NOT NULL DEFAULT 0,
+        telegram_message_id INTEGER,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        rendered_at INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (
+          chat_id, owner_user_id, server_pid, pane_id, pane_pid
+        )
+      );
+      CREATE TABLE IF NOT EXISTS codex_goals (
+        chat_id INTEGER NOT NULL,
+        owner_user_id INTEGER NOT NULL,
+        message_thread_id INTEGER NOT NULL DEFAULT 0,
+        thread_id TEXT NOT NULL,
+        objective TEXT NOT NULL,
+        status TEXT NOT NULL,
+        token_budget INTEGER,
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        time_used_seconds INTEGER NOT NULL DEFAULT 0,
+        goal_created_at INTEGER NOT NULL,
+        goal_updated_at INTEGER NOT NULL,
+        observed_at INTEGER NOT NULL,
+        awaiting_edit INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (chat_id, owner_user_id, message_thread_id)
+      );
+      CREATE INDEX IF NOT EXISTS codex_goals_thread_idx
+        ON codex_goals(thread_id);
+      CREATE TABLE IF NOT EXISTS codex_goal_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        owner_user_id INTEGER NOT NULL,
+        message_thread_id INTEGER NOT NULL DEFAULT 0,
+        thread_id TEXT NOT NULL,
+        topic_name TEXT NOT NULL DEFAULT '',
+        objective TEXT NOT NULL,
+        tokens_used INTEGER NOT NULL DEFAULT 0,
+        time_used_seconds INTEGER NOT NULL DEFAULT 0,
+        goal_created_at INTEGER NOT NULL,
+        completed_at INTEGER NOT NULL,
+        telegram_message_id INTEGER,
+        UNIQUE(thread_id, goal_created_at)
+      );
+      CREATE INDEX IF NOT EXISTS codex_goal_history_chat_idx
+        ON codex_goal_history(chat_id, completed_at DESC);
       CREATE TABLE IF NOT EXISTS nexus_dashboards (
         chat_id INTEGER PRIMARY KEY,
         owner_user_id INTEGER NOT NULL,
@@ -491,6 +592,17 @@ export class ChatinaboxStore {
         attachment.pane_id,
         attachment.pane_pid,
       );
+      this.db.prepare(`
+        DELETE FROM codex_thinking_sections
+        WHERE chat_id = ? AND owner_user_id = ?
+          AND server_pid = ? AND pane_id = ? AND pane_pid = ?
+      `).run(
+        chatId,
+        ownerUserId,
+        attachment.server_pid,
+        attachment.pane_id,
+        attachment.pane_pid,
+      );
     }
     return detached;
   }
@@ -671,6 +783,333 @@ export class ChatinaboxStore {
       DELETE FROM codex_queued_prompts
       WHERE id IN (${placeholders})
     `).run(...ids);
+  }
+
+  codexThinkingSection(
+    chatId: number,
+    ownerUserId: number,
+    target: CodexPaneIdentity,
+  ): CodexThinkingSectionRow | null {
+    return (
+      (this.db.prepare(`
+        SELECT * FROM codex_thinking_sections
+        WHERE chat_id = ? AND owner_user_id = ?
+          AND server_pid = ? AND pane_id = ? AND pane_pid = ?
+      `).get(
+        chatId,
+        ownerUserId,
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+      ) as CodexThinkingSectionRow | undefined) ?? null
+    );
+  }
+
+  appendCodexThinkingSummary(
+    chatId: number,
+    ownerUserId: number,
+    target: CodexPaneIdentity,
+    summary: string,
+  ): CodexThinkingSectionRow {
+    const normalized = summary
+      .replace(/\u0000/gu, "�")
+      .trim()
+      .slice(0, MAX_THINKING_SUMMARY_CHARS);
+    if (!normalized) {
+      throw new Error("Thinking summary must not be empty");
+    }
+    const existing = this.codexThinkingSection(chatId, ownerUserId, target);
+    const summaries = parseThinkingSummaries(existing?.summaries_json);
+    let omittedCount = existing?.omitted_count ?? 0;
+    if (summaries[summaries.length - 1] === normalized && existing) {
+      return existing;
+    }
+    summaries.push(normalized);
+    while (
+      summaries.length > MAX_THINKING_SUMMARIES ||
+      summaries.reduce((total, value) => total + value.length, 0) >
+        MAX_THINKING_SECTION_CHARS
+    ) {
+      summaries.shift();
+      omittedCount += 1;
+    }
+    const now = Math.max(
+      this.now(),
+      (existing?.updated_at ?? 0) + 1,
+      (existing?.rendered_at ?? 0) + 1,
+    );
+    this.db.prepare(`
+      INSERT INTO codex_thinking_sections (
+        chat_id, owner_user_id, server_pid, pane_id, pane_pid,
+        summaries_json, omitted_count, telegram_message_id,
+        created_at, updated_at, rendered_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, 0)
+      ON CONFLICT(
+        chat_id, owner_user_id, server_pid, pane_id, pane_pid
+      ) DO UPDATE SET
+        summaries_json = excluded.summaries_json,
+        omitted_count = excluded.omitted_count,
+        updated_at = excluded.updated_at
+    `).run(
+      chatId,
+      ownerUserId,
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      JSON.stringify(summaries),
+      omittedCount,
+      now,
+      now,
+    );
+    return this.codexThinkingSection(chatId, ownerUserId, target)!;
+  }
+
+  codexThinkingSectionsDue(
+    updatedThrough: number,
+  ): CodexThinkingSectionRow[] {
+    return this.db.prepare(`
+      SELECT * FROM codex_thinking_sections
+      WHERE
+        (
+          telegram_message_id IS NULL
+          AND created_at <= ?
+        )
+        OR
+        (
+          telegram_message_id IS NOT NULL
+          AND updated_at > rendered_at
+          AND rendered_at <= ?
+        )
+      ORDER BY created_at, chat_id, owner_user_id
+      LIMIT 100
+    `).all(
+      updatedThrough,
+      updatedThrough,
+    ) as unknown as CodexThinkingSectionRow[];
+  }
+
+  markCodexThinkingSectionRendered(
+    chatId: number,
+    ownerUserId: number,
+    target: CodexPaneIdentity,
+    telegramMessageId: number,
+  ): CodexThinkingSectionRow | null {
+    const existing = this.codexThinkingSection(chatId, ownerUserId, target);
+    if (!existing) return null;
+    this.db.prepare(`
+      UPDATE codex_thinking_sections
+      SET telegram_message_id = ?, rendered_at = ?
+      WHERE chat_id = ? AND owner_user_id = ?
+        AND server_pid = ? AND pane_id = ? AND pane_pid = ?
+    `).run(
+      telegramMessageId,
+      Math.max(this.now(), existing.updated_at),
+      chatId,
+      ownerUserId,
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+    );
+    return this.codexThinkingSection(chatId, ownerUserId, target);
+  }
+
+  clearCodexThinkingSection(
+    chatId: number,
+    ownerUserId: number,
+    target: CodexPaneIdentity,
+  ): CodexThinkingSectionRow | null {
+    const existing = this.codexThinkingSection(chatId, ownerUserId, target);
+    if (!existing) return null;
+    this.db.prepare(`
+      DELETE FROM codex_thinking_sections
+      WHERE chat_id = ? AND owner_user_id = ?
+        AND server_pid = ? AND pane_id = ? AND pane_pid = ?
+    `).run(
+      chatId,
+      ownerUserId,
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+    );
+    return existing;
+  }
+
+  // ── Native Codex goals ────────────────────────────────
+  codexGoal(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId = 0,
+  ): CodexGoalRow | null {
+    return (
+      (this.db.prepare(`
+        SELECT * FROM codex_goals
+        WHERE chat_id = ? AND owner_user_id = ? AND message_thread_id = ?
+      `).get(
+        chatId,
+        ownerUserId,
+        messageThreadId,
+      ) as CodexGoalRow | undefined) ?? null
+    );
+  }
+
+  codexGoalsForChat(chatId: number): CodexGoalRow[] {
+    return this.db.prepare(`
+      SELECT * FROM codex_goals
+      WHERE chat_id = ?
+      ORDER BY
+        CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
+        goal_updated_at DESC
+    `).all(chatId) as unknown as CodexGoalRow[];
+  }
+
+  hasActiveCodexGoal(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId = 0,
+  ): boolean {
+    return this.db.prepare(`
+      SELECT 1 FROM codex_goals
+      WHERE chat_id = ? AND owner_user_id = ? AND message_thread_id = ?
+        AND status = 'active'
+    `).get(chatId, ownerUserId, messageThreadId) !== undefined;
+  }
+
+  observeCodexGoal(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId: number,
+    goal: CodexThreadGoal | null,
+  ): CodexGoalRow | null {
+    const existing = this.codexGoal(chatId, ownerUserId, messageThreadId);
+    if (!goal) {
+      this.db.prepare(`
+        DELETE FROM codex_goals
+        WHERE chat_id = ? AND owner_user_id = ? AND message_thread_id = ?
+      `).run(chatId, ownerUserId, messageThreadId);
+      return null;
+    }
+    const isNewIdentity =
+      existing?.thread_id !== goal.threadId ||
+      existing?.goal_created_at !== goal.createdAt;
+    if (
+      goal.status === "complete" &&
+      (isNewIdentity || existing?.status !== "complete")
+    ) {
+      const setup = this.topicSetup(chatId, ownerUserId, messageThreadId);
+      this.db.prepare(`
+        INSERT OR IGNORE INTO codex_goal_history (
+          chat_id, owner_user_id, message_thread_id, thread_id, topic_name,
+          objective, tokens_used, time_used_seconds, goal_created_at,
+          completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        chatId,
+        ownerUserId,
+        messageThreadId,
+        goal.threadId,
+        setup?.topic_name ?? "",
+        goal.objective,
+        goal.tokensUsed,
+        goal.timeUsedSeconds,
+        goal.createdAt,
+        this.now(),
+      );
+    }
+    this.db.prepare(`
+      INSERT INTO codex_goals (
+        chat_id, owner_user_id, message_thread_id, thread_id, objective,
+        status, token_budget, tokens_used, time_used_seconds, goal_created_at,
+        goal_updated_at, observed_at, awaiting_edit
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(chat_id, owner_user_id, message_thread_id) DO UPDATE SET
+        thread_id = excluded.thread_id,
+        objective = excluded.objective,
+        status = excluded.status,
+        token_budget = excluded.token_budget,
+        tokens_used = excluded.tokens_used,
+        time_used_seconds = excluded.time_used_seconds,
+        goal_created_at = excluded.goal_created_at,
+        goal_updated_at = excluded.goal_updated_at,
+        observed_at = excluded.observed_at,
+        awaiting_edit = CASE
+          WHEN codex_goals.thread_id = excluded.thread_id
+            AND codex_goals.goal_created_at = excluded.goal_created_at
+          THEN codex_goals.awaiting_edit
+          ELSE 0
+        END
+    `).run(
+      chatId,
+      ownerUserId,
+      messageThreadId,
+      goal.threadId,
+      goal.objective,
+      goal.status,
+      goal.tokenBudget,
+      goal.tokensUsed,
+      goal.timeUsedSeconds,
+      goal.createdAt,
+      goal.updatedAt,
+      this.now(),
+      isNewIdentity ? 0 : existing?.awaiting_edit ?? 0,
+    );
+    return this.codexGoal(chatId, ownerUserId, messageThreadId);
+  }
+
+  setCodexGoalAwaitingEdit(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId: number,
+    awaiting: boolean,
+  ): void {
+    this.db.prepare(`
+      UPDATE codex_goals
+      SET awaiting_edit = ?, observed_at = ?
+      WHERE chat_id = ? AND owner_user_id = ? AND message_thread_id = ?
+    `).run(
+      awaiting ? 1 : 0,
+      this.now(),
+      chatId,
+      ownerUserId,
+      messageThreadId,
+    );
+  }
+
+  recentCompletedCodexGoals(
+    chatId: number,
+    limit = 10,
+  ): CodexGoalHistoryRow[] {
+    const safeLimit = Number.isSafeInteger(limit)
+      ? Math.max(1, Math.min(50, limit))
+      : 10;
+    return this.db.prepare(`
+      SELECT * FROM codex_goal_history
+      WHERE chat_id = ?
+      ORDER BY completed_at DESC, id DESC
+      LIMIT ?
+    `).all(chatId, safeLimit) as unknown as CodexGoalHistoryRow[];
+  }
+
+  pendingCodexGoalCompletions(limit = 20): CodexGoalHistoryRow[] {
+    const safeLimit = Number.isSafeInteger(limit)
+      ? Math.max(1, Math.min(100, limit))
+      : 20;
+    return this.db.prepare(`
+      SELECT * FROM codex_goal_history
+      WHERE telegram_message_id IS NULL
+      ORDER BY completed_at, id
+      LIMIT ?
+    `).all(safeLimit) as unknown as CodexGoalHistoryRow[];
+  }
+
+  markCodexGoalCompletionAnnounced(
+    id: number,
+    telegramMessageId: number,
+  ): void {
+    this.db.prepare(`
+      UPDATE codex_goal_history
+      SET telegram_message_id = ?
+      WHERE id = ? AND telegram_message_id IS NULL
+    `).run(telegramMessageId, id);
   }
 
   codexStatus(
@@ -1441,6 +1880,21 @@ function positiveIntegerOrNull(value: number | null): number | null {
   return Number.isSafeInteger(value) && Number(value) > 0
     ? Number(value)
     : null;
+}
+
+export function parseThinkingSummaries(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed)
+      ? parsed.filter(
+        (item): item is string =>
+          typeof item === "string" && item.trim().length > 0,
+      ).slice(-MAX_THINKING_SUMMARIES)
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 /** CallbackReferenceStore adapter backed by the local SQLite database. */

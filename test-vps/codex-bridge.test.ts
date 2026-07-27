@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -7,6 +8,7 @@ import {
   buildClarityTerminalHtml,
   consumeTranscriptLines,
   fullAccessCodexCommand,
+  isInternalCodexPrompt,
   isCompactedTranscriptPrefix,
   renderAnsiTerminalSvg,
   parseCodexUsageFromTranscriptTail,
@@ -34,6 +36,21 @@ function line(record: unknown): string {
 }
 
 describe("Codex bridge", () => {
+  it("does not mirror Codex runtime envelopes as VPS-authored messages", () => {
+    expect(isInternalCodexPrompt(
+      "# AGENTS.md instructions\n\n<INSTRUCTIONS>private runtime</INSTRUCTIONS>",
+    )).toBe(true);
+    expect(isInternalCodexPrompt(
+      "<environment_context>\n  <cwd>/root</cwd>\n</environment_context>",
+    )).toBe(true);
+    expect(isInternalCodexPrompt(
+      "## Memory\n\nYou have access to a memory folder with prior guidance.",
+    )).toBe(true);
+    expect(isInternalCodexPrompt(
+      "Can you explain what the memory message was?",
+    )).toBe(false);
+  });
+
   it("reads the newest trustworthy Codex usage snapshot", () => {
     const contents =
       line({ type: "event_msg", payload: { type: "token_count" } }) +
@@ -152,6 +169,71 @@ describe("Codex bridge", () => {
       })).resolves.toMatchObject({
         ok: false,
         code: "BAD_PROFILE",
+      });
+    } finally {
+      await bridge.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("reconciles an already-gone pane as closed from its persisted binding", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-bridge-"));
+    const databasePath = path.join(directory, "bridge.sqlite");
+    const bridge = new CodexBridge({
+      socketPath: path.join(directory, "bridge.sock"),
+      databasePath,
+      defaultCwd: "/root",
+    });
+    await bridge.listen();
+    try {
+      const db = new DatabaseSync(databasePath);
+      db.prepare(`
+        INSERT INTO transcript_bindings (
+          server_pid, pane_id, pane_pid, session_id, transcript_path,
+          cursor, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, ?)
+      `).run(
+        999_991,
+        "%999",
+        999_992,
+        "saved-thread",
+        path.join(directory, "gone.jsonl"),
+        Date.now(),
+      );
+      db.prepare(`
+        INSERT INTO pane_profiles (
+          server_pid, pane_id, pane_pid, model, reasoning_effort,
+          fast, cwd, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        999_991,
+        "%999",
+        999_992,
+        "gpt-5.6-sol",
+        "high",
+        0,
+        "/root/chatinabox",
+        Date.now(),
+      );
+      db.close();
+
+      await expect(bridge.dispatch({
+        op: "close",
+        target: {
+          serverPid: 999_991,
+          paneId: "%999",
+          panePid: 999_992,
+        },
+      })).resolves.toEqual({
+        ok: true,
+        closed: true,
+        sessionId: "saved-thread",
+        profile: {
+          model: "sol",
+          reasoningEffort: "high",
+          fast: false,
+          cwd: "/root/chatinabox",
+        },
       });
     } finally {
       await bridge.close();

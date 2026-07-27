@@ -50,8 +50,11 @@ forum.
   responses, and context compaction.
 - Compact transient state for commands, edited files, explored items, active
   shells, queued messages, terminal waits, and elapsed turn time.
-- Ordered follow-ups while a turn is busy, flushed at the next safe tool
-  boundary.
+- Ordinary messages steer a busy turn immediately; `/queue your follow-up`
+  explicitly holds a message for the next turn.
+- Native Codex goals synchronized across Telegram and terminal sessions, with
+  transient Pause/Resume/Edit/Clear controls and completion history in the
+  overview dashboard.
 - Telegram-native headings, emphasis, links, lists, quotes, code blocks,
   tables, details, and long-message splitting.
 - Photos, albums, captions, files, generated images, and local file delivery.
@@ -112,7 +115,7 @@ validated private profile and walks you through the Telegram side.
 ## Forum setup
 
 Create a private Telegram supergroup, enable **Topics**, add the bot as an
-administrator, and allow it to manage topics.
+administrator, and allow it to manage topics and pin messages.
 
 Then make:
 
@@ -121,12 +124,28 @@ Then make:
 3. a normal work topic and send `/setup`.
 
 The manager keeps the 🔮 topic icon. Pin the manager and overview/dashboard
-topics in the forum list so the two control surfaces stay easy to reach. The bot
-does not pin messages.
+topics in the forum list so the two control surfaces stay easy to reach. In work
+topics, the bot pins each completed final response as a navigable checkpoint;
+Telegram keeps the topic's checkpoint pins in its native order.
 
 In each work topic, `/setup` opens a compact starter for topic name, model,
 reasoning effort, speed, and workspace. Telegram topic renames remain synced to
-the live Codex/tmux session.
+the live Codex/tmux session. If an idle topic has gone to sleep, its next
+ordinary message resumes the saved Codex chat, shows a short wake-up notice,
+waits for the worker to settle, and then relays that original message.
+
+Visible Codex thought summaries are grouped into one expandable **show
+thinking** section per uninterrupted reasoning run. The section is updated at a
+measured cadence and is always flushed before the next continuation or final
+answer, preserving Telegram message order without a stream of tiny thought
+messages.
+
+Native goal mode stays native: start or edit a goal with Codex in Telegram,
+tmux, or the web terminal and the same state appears everywhere. An active goal
+keeps its work topic awake. Pausing a goal does not interrupt the current turn;
+it lets that turn finish and stops automatic continuation afterward. Completed
+goals arrive as their own topic event and the latest ten remain available in
+the overview dashboard's expandable history.
 
 `/nexus` and `/wizard` remain compatibility aliases for existing installs.
 
