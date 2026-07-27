@@ -25,6 +25,7 @@ Chatinabox is an independent open-source project, not an OpenAI product.
 
 - Relays prompts, progress, reasoning summaries, final responses, files, and
   generated images.
+- Transcribes optional Telegram voice notes with ElevenLabs Scribe v2.
 - Keeps live work in one transient message and groups reasoning into an
   expandable thinking section.
 - Discovers, creates, resumes, renames, interrupts, and switches Codex sessions.
@@ -75,25 +76,19 @@ sudo CHATINABOX_TG_BOT_TOKEN='123:secret' \
   ./scripts/install.sh
 ```
 
-### Voice notes with Scribe v2
+### Optional voice notes
 
-Voice notes are optional. When `ELEVENLABS_API_KEY` is configured, Telegram
-voice notes and audio uploads are transcribed by ElevenLabs Scribe v2 and sent
-to the attached Codex session like typed messages. Chatinabox keeps the audio
-in memory only; it is sent to ElevenLabs but is not added to the local
-attachment store.
+Configure an ElevenLabs API key during installation:
 
 ```sh
 sudo ELEVENLABS_API_KEY='your-key' \
-  CHATINABOX_SCRIBE_LANGUAGE='eng' \
-  CHATINABOX_SCRIBE_KEYTERMS='Chatinabox,Codex,OpenAI,Telegram,tmux,VPS,GitHub' \
   ./scripts/install.sh
 ```
 
-The language hint defaults to English. Keyterms are optional, comma-separated,
-and improve product-name and technical-term recognition; ElevenLabs currently
-adds a 20% Scribe surcharge when they are supplied. Upgrades preserve all three
-settings in `/etc/chatinabox/chatinabox.env`.
+Telegram voice notes and audio uploads then reach Codex like typed messages.
+Audio is sent to Scribe v2 in memory and is not added to the local attachment
+store. `CHATINABOX_SCRIBE_LANGUAGE` defaults to `eng`; optional comma-separated
+`CHATINABOX_SCRIBE_KEYTERMS` can improve technical-term recognition.
 
 Check the host and source without installing:
 

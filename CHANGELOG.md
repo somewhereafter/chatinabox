@@ -4,6 +4,14 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.1.0 — 2026-07-27
+
+- Added optional Telegram voice-note and audio transcription through
+  ElevenLabs Scribe v2, delivered to Codex like ordinary typed prompts.
+- Added English language hints, optional technical keyterms, bounded in-memory
+  audio handling, safe provider errors, and upgrade-safe API-key rotation.
+- Verified the live Telegram → Scribe → Codex → Telegram path.
+
 ## 2.0.2 — 2026-07-27
 
 - Quarantined Codex memory-maintenance turns so their prompt, transient
