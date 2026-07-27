@@ -3997,6 +3997,7 @@ export function isInternalCodexPrompt(value: string): boolean {
     prompt.startsWith("<apps_instructions>") ||
     prompt.startsWith("<plugins_instructions>") ||
     prompt.startsWith("<skills_instructions>") ||
+    prompt.startsWith("<codex_internal_context source=\"goal\">") ||
     prompt.startsWith("## Memory\n\nYou have access to a memory folder") ||
     prompt.startsWith(
       "You are `/root`, the primary agent in a team of agents collaborating",

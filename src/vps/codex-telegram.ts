@@ -580,15 +580,54 @@ export class CodexTelegramController {
           messageThreadId,
           true,
         );
-        await tgSend(
-          this.dependencies.env,
+        const shown = await this.showGoalEditPrompt(
           chatId!,
-          "✏️ Send the replacement goal objective as your next message. " +
-            "Send <code>/cancel</code> to keep the current goal.",
+          ownerUserId,
+          messageThreadId,
           messageId!,
-          undefined,
-          messageThreadId || undefined,
+          goal,
         );
+        if (!shown) {
+          this.dependencies.store.setCodexGoalAwaitingEdit(
+            chatId!,
+            ownerUserId,
+            messageThreadId,
+            false,
+          );
+          await tgSend(
+            this.dependencies.env,
+            chatId!,
+            "⚠️ I couldn’t open the goal editor. The current goal was kept.",
+            messageId!,
+            undefined,
+            messageThreadId || undefined,
+          );
+        }
+        return true;
+      }
+      case "codex.goal_edit_cancel": {
+        const attachment = this.dependencies.store.codexAttachment(
+          chatId!,
+          ownerUserId,
+          messageThreadId,
+        );
+        const goal = this.dependencies.store.codexGoal(
+          chatId!,
+          ownerUserId,
+          messageThreadId,
+        );
+        this.dependencies.store.setCodexGoalAwaitingEdit(
+          chatId!,
+          ownerUserId,
+          messageThreadId,
+          false,
+        );
+        if (attachment && goal) {
+          await this.refreshGoalTransient(
+            attachment,
+            threadGoalFromRow(goal),
+          );
+        }
         return true;
       }
       case "codex.goal_clear":
@@ -678,6 +717,10 @@ export class CodexTelegramController {
         false,
       );
       if (message.text.trim().toLowerCase() === "/cancel") {
+        await this.refreshGoalTransient(
+          attachment,
+          threadGoalFromRow(goal),
+        );
         await tgSend(
           this.dependencies.env,
           chatId,
@@ -694,6 +737,10 @@ export class CodexTelegramController {
         objective: message.text.trim(),
       }).catch(() => null);
       if (!response?.ok || !("goal" in response) || !response.goal) {
+        await this.refreshGoalTransient(
+          attachment,
+          threadGoalFromRow(goal),
+        );
         await tgSend(
           this.dependencies.env,
           chatId,
@@ -1361,6 +1408,36 @@ export class CodexTelegramController {
       ]),
       messageThreadId || undefined,
     );
+  }
+
+  private async showGoalEditPrompt(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId: number,
+    messageId: number,
+    goal: CodexGoalRow,
+  ): Promise<boolean> {
+    const cancel = await issueCallbackReference(
+      this.dependencies.store.callbackStore(),
+      {
+        action: "codex.goal_edit_cancel",
+        chatId,
+        userId: ownerUserId,
+        payload: {},
+        ttlMs: 15 * 60 * 1_000,
+      },
+    );
+    const keyboard = buildInlineKeyboard([
+      [{ label: "Cancel edit", callbackData: cancel.callbackData }],
+    ]);
+    const edited = await tgEditRichHtml(
+      this.dependencies.env,
+      chatId,
+      messageId,
+      formatGoalEditPrompt(goal),
+      keyboard,
+    ).catch(() => null);
+    return telegramEditSucceeded(edited);
   }
 
   private async clearGoal(
@@ -3674,6 +3751,7 @@ function callbackAnswer(action: string): string {
     "codex.goal_pause": "Goal will pause after this turn…",
     "codex.goal_resume": "Resuming goal…",
     "codex.goal_edit": "Ready for the new objective…",
+    "codex.goal_edit_cancel": "Goal edit cancelled",
     "codex.goal_clear": "Confirm goal clearing…",
     "codex.goal_clear_confirm": "Clearing goal…",
     "codex.screen": "Capturing terminal…",
@@ -3726,6 +3804,31 @@ function formatGoalCompletion(completion: CodexGoalHistoryRow): string {
       formatCompactDuration(completion.time_used_seconds * 1_000)
     }</i></blockquote>`
   );
+}
+
+export function formatGoalEditPrompt(goal: CodexGoalRow): string {
+  return (
+    "<p><mark>✏️ editing goal</mark></p>" +
+    "<blockquote>Send the replacement objective as your next message." +
+    "<br/><i>Your current goal remains unchanged until that message succeeds." +
+    "</i></blockquote>" +
+    `<p><b>Current</b><br/>${escapeTelegramHtml(
+      truncateVisible(goal.objective, 700),
+    )}</p>`
+  );
+}
+
+function threadGoalFromRow(goal: CodexGoalRow): CodexThreadGoal {
+  return {
+    threadId: goal.thread_id,
+    objective: goal.objective,
+    status: goal.status,
+    tokenBudget: goal.token_budget,
+    tokensUsed: goal.tokens_used,
+    timeUsedSeconds: goal.time_used_seconds,
+    createdAt: goal.goal_created_at,
+    updatedAt: goal.goal_updated_at,
+  };
 }
 
 export function codexHelpText(

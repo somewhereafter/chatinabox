@@ -47,6 +47,9 @@ describe("Codex bridge", () => {
       "## Memory\n\nYou have access to a memory folder with prior guidance.",
     )).toBe(true);
     expect(isInternalCodexPrompt(
+      "<codex_internal_context source=\"goal\">\nContinue working toward the active thread goal.",
+    )).toBe(true);
+    expect(isInternalCodexPrompt(
       "Can you explain what the memory message was?",
     )).toBe(false);
   });

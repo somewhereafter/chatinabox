@@ -18,6 +18,7 @@ export const CALLBACK_ACTIONS = [
   "codex.goal_pause",
   "codex.goal_resume",
   "codex.goal_edit",
+  "codex.goal_edit_cancel",
   "codex.goal_clear",
   "codex.goal_clear_confirm",
   "codex.screen",

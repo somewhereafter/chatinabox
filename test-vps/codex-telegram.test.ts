@@ -11,6 +11,7 @@ import {
   formatCodexActivityStatus,
   formatAgentReasoningRichMarkdown,
   formatCodexEvent,
+  formatGoalEditPrompt,
   formatCodexQueuedUntilToolStatus,
   formatCodexRichMarkdown,
   formatCodexTransientRichHtml,
@@ -137,6 +138,30 @@ describe("Codex Telegram attachments", () => {
     expect(html).toContain("<mark>🎯 goal · paused</mark>");
     expect(html).toContain("Ship goal mode across Telegram and terminal");
     expect(html).toContain("12,000 / 50,000 tokens · 1m 30s");
+  });
+
+  it("makes goal edit mode visible and preserves the current objective", () => {
+    const prompt = formatGoalEditPrompt({
+      chat_id: -10042,
+      owner_user_id: 42,
+      message_thread_id: 7,
+      thread_id: "thread",
+      objective: "Keep this objective until replacement succeeds",
+      status: "paused",
+      token_budget: null,
+      tokens_used: 1_000,
+      time_used_seconds: 20,
+      goal_created_at: 100,
+      goal_updated_at: 200,
+      observed_at: 300,
+      awaiting_edit: 1,
+    });
+
+    expect(prompt).toContain("<mark>✏️ editing goal</mark>");
+    expect(prompt).toContain("Send the replacement objective");
+    expect(prompt).toContain(
+      "Keep this objective until replacement succeeds",
+    );
   });
 
   it("selects the largest Telegram photo variant", () => {
