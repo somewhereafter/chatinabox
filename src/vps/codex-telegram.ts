@@ -1426,6 +1426,24 @@ export class CodexTelegramController {
     messageId: number,
     goal: CodexGoalRow,
   ): Promise<boolean> {
+    const keyboard = await this.goalEditKeyboard(
+      chatId,
+      ownerUserId,
+    );
+    const edited = await tgEditRichHtml(
+      this.dependencies.env,
+      chatId,
+      messageId,
+      formatGoalEditPrompt(goal),
+      keyboard,
+    ).catch(() => null);
+    return telegramEditSucceeded(edited);
+  }
+
+  private async goalEditKeyboard(
+    chatId: number,
+    ownerUserId: number,
+  ): Promise<TelegramInlineKeyboardMarkup> {
     const cancel = await issueCallbackReference(
       this.dependencies.store.callbackStore(),
       {
@@ -1436,17 +1454,9 @@ export class CodexTelegramController {
         ttlMs: 15 * 60 * 1_000,
       },
     );
-    const keyboard = buildInlineKeyboard([
+    return buildInlineKeyboard([
       [{ label: "Cancel edit", callbackData: cancel.callbackData }],
     ]);
-    const edited = await tgEditRichHtml(
-      this.dependencies.env,
-      chatId,
-      messageId,
-      formatGoalEditPrompt(goal),
-      keyboard,
-    ).catch(() => null);
-    return telegramEditSucceeded(edited);
   }
 
   private async clearGoal(
@@ -1774,8 +1784,27 @@ export class CodexTelegramController {
         );
         continue;
       }
-      const transient = this.takeTransientStatus(attachment, event.target);
-      if (transient) {
+      const storedGoalBeforeOutput = visibleCodexGoal(
+        this.dependencies.store.codexGoal(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          attachment.message_thread_id,
+        ),
+      );
+      const preserveGoalTransient =
+        storedGoalBeforeOutput !== null &&
+        (
+          event.kind === "assistant_progress" ||
+          event.kind === "assistant_final"
+        );
+      const transient = preserveGoalTransient
+        ? this.dependencies.store.codexStatus(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          event.target,
+        )
+        : this.takeTransientStatus(attachment, event.target);
+      if (transient && !preserveGoalTransient) {
         await tgDeleteMessage(
           this.dependencies.env,
           attachment.chat_id,
@@ -1889,12 +1918,18 @@ export class CodexTelegramController {
             checkpointMessageId,
           ).catch(() => undefined);
         }
-      } else if (
-        (
-          event.kind === "assistant_progress"
-        ) &&
-        transient
-      ) {
+      }
+      if (preserveGoalTransient && transient) {
+        await this.reanchorTransientStatus(
+          attachment,
+          event.target,
+        );
+      } else if (preserveGoalTransient) {
+        await this.refreshGoalTransient(
+          attachment,
+          threadGoalFromRow(storedGoalBeforeOutput!),
+        );
+      } else if (event.kind === "assistant_progress" && transient) {
         await this.restoreTransientStatus(
           attachment,
           event.target,
@@ -2041,16 +2076,26 @@ export class CodexTelegramController {
       attachment.message_thread_id,
     );
     const goal = visibleCodexGoal(storedGoal);
-    const html = formatCodexTransientRichHtml(
-      snapshot,
-      this.now(),
-      this.profile(),
-      goal,
-    );
-    const keyboard = await this.transientControlKeyboard(
-      attachment,
-      goal,
-    ).catch(() => undefined);
+    const editingGoal = storedGoal?.awaiting_edit === 1
+      ? storedGoal
+      : null;
+    const html = editingGoal
+      ? formatGoalEditPrompt(editingGoal)
+      : formatCodexTransientRichHtml(
+        snapshot,
+        this.now(),
+        this.profile(),
+        goal,
+      );
+    const keyboard = editingGoal
+      ? await this.goalEditKeyboard(
+        attachment.chat_id,
+        attachment.owner_user_id,
+      ).catch(() => undefined)
+      : await this.transientControlKeyboard(
+        attachment,
+        goal,
+      ).catch(() => undefined);
     if (!this.isCurrentTransientMutation(mutation)) return;
     let sent = await tgSendRichHtml(
       this.dependencies.env,
@@ -2124,16 +2169,37 @@ export class CodexTelegramController {
       attachment.message_thread_id,
     );
     const goal = visibleCodexGoal(storedGoal);
-    const html = formatCodexTransientRichHtml(
-      snapshot,
-      Date.now(),
-      this.profile(),
-      goal,
-    );
-    const keyboard = await this.transientControlKeyboard(
-      attachment,
-      goal,
-    ).catch(() => undefined);
+    const editingGoal = storedGoal?.awaiting_edit === 1
+      ? storedGoal
+      : null;
+    if (editingGoal && existing) {
+      if (!this.isCurrentTransientMutation(mutation)) return;
+      this.dependencies.store.setCodexStatus(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        target,
+        existing.telegram_message_id,
+        snapshot,
+      );
+      return;
+    }
+    const html = editingGoal
+      ? formatGoalEditPrompt(editingGoal)
+      : formatCodexTransientRichHtml(
+        snapshot,
+        Date.now(),
+        this.profile(),
+        goal,
+      );
+    const keyboard = editingGoal
+      ? await this.goalEditKeyboard(
+        attachment.chat_id,
+        attachment.owner_user_id,
+      ).catch(() => undefined)
+      : await this.transientControlKeyboard(
+        attachment,
+        goal,
+      ).catch(() => undefined);
     if (!this.isCurrentTransientMutation(mutation)) return;
     const shouldReanchor =
       existing !== null &&
@@ -2267,16 +2333,26 @@ export class CodexTelegramController {
       attachment.message_thread_id,
     );
     const goal = visibleCodexGoal(storedGoal);
-    const html = formatCodexTransientRichHtml(
-      snapshot,
-      Date.now(),
-      this.profile(),
-      goal,
-    );
-    const keyboard = await this.transientControlKeyboard(
-      attachment,
-      goal,
-    ).catch(() => undefined);
+    const editingGoal = storedGoal?.awaiting_edit === 1
+      ? storedGoal
+      : null;
+    const html = editingGoal
+      ? formatGoalEditPrompt(editingGoal)
+      : formatCodexTransientRichHtml(
+        snapshot,
+        Date.now(),
+        this.profile(),
+        goal,
+      );
+    const keyboard = editingGoal
+      ? await this.goalEditKeyboard(
+        attachment.chat_id,
+        attachment.owner_user_id,
+      ).catch(() => undefined)
+      : await this.transientControlKeyboard(
+        attachment,
+        goal,
+      ).catch(() => undefined);
     if (!this.isCurrentTransientMutation(mutation)) return;
     let sent = await tgSendRichHtml(
       this.dependencies.env,

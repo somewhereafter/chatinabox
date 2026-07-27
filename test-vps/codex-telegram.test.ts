@@ -623,6 +623,128 @@ describe("Codex Telegram attachments", () => {
     store.close();
   });
 
+  it("keeps goal editing visible through activity and reanchors it after a final", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-goal-edit-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "goal-edit",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "thread-goal",
+    };
+    store.attachCodex(-10042, 42, pane, 7);
+    store.observeCodexGoal(-10042, 42, 7, {
+      threadId: "thread-goal",
+      objective: "Keep this editor open",
+      status: "paused",
+      tokenBudget: null,
+      tokensUsed: 12_000,
+      timeUsedSeconds: 60,
+      createdAt: 100,
+      updatedAt: 200,
+    });
+    store.setCodexGoalAwaitingEdit(-10042, 42, 7, true);
+    store.setCodexStatus(-10042, 42, pane, 700, {
+      statusKind: "state_working",
+      toolCalls: 0,
+      editedFiles: 0,
+      exploredThings: 0,
+      activeShells: 0,
+      queuedMessages: 0,
+      replyToMessageId: 650,
+      startedAt: 1_000,
+    });
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    let nextMessageId = 1_000;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ method, body });
+      return {
+        json: async () => ({
+          ok: true,
+          result:
+            method === "deleteMessage" || method === "pinChatMessage"
+              ? true
+              : { message_id: nextMessageId++ },
+        }),
+      };
+    }));
+    const events = [
+      {
+        id: 1,
+        kind: "state_activity" as const,
+        target: pane,
+        sessionId: "thread-goal",
+        turnId: "turn",
+        assistantName: "Sol" as const,
+        message: "4\u001f2\u001f3\u001f1",
+        createdAt: 2_000,
+      },
+      {
+        id: 2,
+        kind: "assistant_final" as const,
+        target: pane,
+        sessionId: "thread-goal",
+        turnId: "turn",
+        assistantName: "Sol" as const,
+        message: "Paused successfully.",
+        createdAt: 3_000,
+      },
+    ];
+    const bridge = {
+      request: vi.fn(async (request: { op: string }) => {
+        if (request.op === "events") return { ok: true, events };
+        if (request.op === "ack") return { ok: true, acknowledged: true };
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    await controller.deliverEventsOnce();
+
+    expect(calls.some((call) => call.method === "editMessageText")).toBe(false);
+    const richSends = calls.filter((call) => call.method === "sendRichMessage");
+    expect(richSends).toHaveLength(2);
+    expect(JSON.stringify(richSends[0]?.body)).toContain("Paused successfully.");
+    expect(JSON.stringify(richSends[1]?.body)).toContain("editing goal");
+    expect(JSON.stringify(richSends[1]?.body)).toContain(
+      "Keep this editor open",
+    );
+    expect(calls.at(-1)).toMatchObject({
+      method: "deleteMessage",
+      body: { message_id: 700 },
+    });
+    expect(store.codexStatus(-10042, 42, pane)).toMatchObject({
+      telegram_message_id: 1_001,
+      tool_calls: 4,
+      edited_files: 2,
+      explored_things: 3,
+      active_shells: 1,
+    });
+    expect(store.codexGoal(-10042, 42, 7)?.awaiting_edit).toBe(1);
+    store.close();
+  });
+
   it("batches thoughts, then flushes them before continuation and final messages", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-thinking-"));
     temporaryRoots.push(root);
