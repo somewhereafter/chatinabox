@@ -119,6 +119,7 @@ export type CodexBridgeRequest =
       readonly target: CodexPaneIdentity;
       readonly text: string;
       readonly mode?: "steer" | "queue";
+      readonly deliveryId?: string;
     }
   | { readonly op: "interrupt"; readonly target: CodexPaneIdentity }
   | {

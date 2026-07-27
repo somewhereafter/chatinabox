@@ -224,6 +224,48 @@ gpt-5.6-sol high
     }
   });
 
+  it("deduplicates an accepted prompt even after its pane has gone away", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-bridge-"));
+    const databasePath = path.join(directory, "bridge.sqlite");
+    const bridge = new CodexBridge({
+      socketPath: path.join(directory, "bridge.sock"),
+      databasePath,
+    });
+    await bridge.listen();
+    try {
+      const db = new DatabaseSync(databasePath);
+      db.prepare(`
+        INSERT INTO accepted_deliveries (
+          delivery_id, server_pid, pane_id, pane_pid,
+          queued_for_next_turn, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run("tg:42:42:0:100", 100, "%4", 200, 1, Date.now());
+      db.close();
+      await expect(bridge.dispatch({
+        op: "send",
+        target: { serverPid: 100, paneId: "%4", panePid: 200 },
+        text: "retry after restart",
+        deliveryId: "tg:42:42:0:100",
+      })).resolves.toEqual({
+        ok: true,
+        sent: true,
+        queuedUntilNextToolCall: true,
+      });
+      await expect(bridge.dispatch({
+        op: "send",
+        target: { serverPid: 100, paneId: "%5", panePid: 201 },
+        text: "conflicting retry",
+        deliveryId: "tg:42:42:0:100",
+      })).resolves.toMatchObject({
+        ok: false,
+        code: "BAD_PROMPT",
+      });
+    } finally {
+      await bridge.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("reconciles an already-gone pane as closed from its persisted binding", async () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-bridge-"));
     const databasePath = path.join(directory, "bridge.sqlite");

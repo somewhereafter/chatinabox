@@ -119,7 +119,15 @@ describe("ChatinaboxStore", () => {
       userId: 42,
       now,
     })).resolves.toMatchObject({ ok: false, reason: "NOT_FOUND" });
+    store.completeTelegramUpdate(10);
+    expect(store.claimTelegramUpdate(10)).toBe(false);
+    expect(store.claimTelegramUpdate(11)).toBe(true);
     store.close();
+
+    const reopened = new ChatinaboxStore(databasePath, () => now);
+    expect(reopened.claimTelegramUpdate(10)).toBe(false);
+    expect(reopened.claimTelegramUpdate(11)).toBe(true);
+    reopened.close();
   });
 
   it("persists session routing, queued prompts, statuses, and final dedupe", async () => {
@@ -142,8 +150,15 @@ describe("ChatinaboxStore", () => {
     expect(store.attachCodex(42, 42, pane)).toMatchObject({ pane_id: "%4" });
     expect(store.codexAttachment(42, 43)).toBeNull();
     store.recordCodexPrompt(42, 42, pane, 77);
+    store.recordCodexPrompt(42, 42, pane, 77);
     const pending = store.nextCodexPrompt(42, 42, pane)!;
     expect(pending.telegram_message_id).toBe(77);
+    expect(store.pendingCodexPromptsThrough(
+      42,
+      42,
+      pane,
+      Number.MAX_SAFE_INTEGER,
+    )).toHaveLength(1);
     store.markCodexPromptDelivered(pending.id);
     expect(store.nextCodexPrompt(42, 42, pane)).toBeNull();
     store.recordCodexPrompt(42, 42, pane, 78, true);

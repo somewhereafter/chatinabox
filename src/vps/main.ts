@@ -69,7 +69,16 @@ export async function handleUpdate(app: App, update: TelegramUpdate) {
     update.update_id < 0 ||
     !app.store.claimTelegramUpdate(update.update_id)
   ) return;
+  try {
+    await handleClaimedUpdate(app, update);
+    app.store.completeTelegramUpdate(update.update_id);
+  } catch (error) {
+    app.store.releaseTelegramUpdate(update.update_id);
+    throw error;
+  }
+}
 
+async function handleClaimedUpdate(app: App, update: TelegramUpdate) {
   const callback = update.callback_query;
   if (callback) {
     const ownerId = callback.from?.id;

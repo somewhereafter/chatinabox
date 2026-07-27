@@ -4,6 +4,17 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.0.0 — 2026-07-27
+
+- Added automatic new-topic setup with bounded Git repository discovery,
+  configurable launch defaults, fresh chats, unbound running sessions, recent
+  saved chats, and a profile-driven temporary manager guide.
+- Made Telegram update processing restart-safe with separate in-flight and
+  completed state, and added bridge-level prompt delivery IDs to prevent
+  duplicate prompt pastes during replay.
+- Kept the live transient visible while forming expandable thinking sections,
+  reset interrupted transients on the next prompt, and confirmed interrupts
+  from recovered pane state when lifecycle events are delayed.
 - Added forum-native work topics, a live overview, a 🔮 manager topic, topic
   presence icons, and resumable inactivity shutdown.
 - Added conversational first-run setup plus a validated private experience

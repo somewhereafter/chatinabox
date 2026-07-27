@@ -230,6 +230,14 @@ export class CodexBridge {
         prompt TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS accepted_deliveries (
+        delivery_id TEXT PRIMARY KEY,
+        server_pid INTEGER NOT NULL,
+        pane_id TEXT NOT NULL,
+        pane_pid INTEGER NOT NULL,
+        queued_for_next_turn INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS transcript_suppressions (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         server_pid INTEGER NOT NULL,
@@ -596,8 +604,10 @@ export class CodexBridge {
   private async sendPrompt(
     request: Record<string, unknown>,
   ): Promise<CodexBridgeResponse> {
-    const target = await this.requireTarget(request.target);
-    if (!target) return failure("STALE_TARGET", "That Codex session is no longer available.");
+    if (!isPaneIdentity(request.target)) {
+      return failure("STALE_TARGET", "That Codex session is no longer available.");
+    }
+    const requestedTarget = request.target;
     if (
       typeof request.text !== "string" ||
       request.text.trim() === "" ||
@@ -613,7 +623,68 @@ export class CodexBridge {
     ) {
       return failure("BAD_PROMPT", "Prompt delivery mode is invalid.");
     }
+    const deliveryId = normalizeDeliveryId(request.deliveryId);
+    if (request.deliveryId !== undefined && deliveryId === null) {
+      return failure("BAD_PROMPT", "Prompt delivery id is invalid.");
+    }
+    if (deliveryId) {
+      const accepted = this.db.prepare(`
+        SELECT server_pid, pane_id, pane_pid, queued_for_next_turn
+        FROM accepted_deliveries
+        WHERE delivery_id = ?
+      `).get(deliveryId) as
+        | {
+            server_pid: number;
+            pane_id: string;
+            pane_pid: number;
+            queued_for_next_turn: number;
+          }
+        | undefined;
+      if (accepted) {
+        if (!samePaneIdentity(requestedTarget, {
+          serverPid: accepted.server_pid,
+          paneId: accepted.pane_id,
+          panePid: accepted.pane_pid,
+        })) {
+          return failure(
+            "BAD_PROMPT",
+            "Prompt delivery id was already used for another session.",
+          );
+        }
+        return {
+          ok: true,
+          sent: true,
+          queuedUntilNextToolCall: accepted.queued_for_next_turn === 1,
+        };
+      }
+    }
+    const target = await this.requireTarget(requestedTarget);
+    if (!target) {
+      return failure(
+        "STALE_TARGET",
+        "That Codex session is no longer available.",
+      );
+    }
     const queueForNextTurn = request.mode === "queue" && target.busy;
+    if (deliveryId) {
+      this.db.prepare(`
+        INSERT INTO accepted_deliveries (
+          delivery_id, server_pid, pane_id, pane_pid,
+          queued_for_next_turn, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(
+        deliveryId,
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        queueForNextTurn ? 1 : 0,
+        Date.now(),
+      );
+      this.db.prepare(`
+        DELETE FROM accepted_deliveries
+        WHERE created_at < ?
+      `).run(Date.now() - 7 * 24 * 60 * 60 * 1_000);
+    }
     const bufferName = `codex-tg-${randomBytes(8).toString("hex")}`;
     const originId = this.recordPromptOrigin(target, request.text);
     let sent = false;
@@ -648,7 +719,14 @@ export class CodexBridge {
         queuedUntilNextToolCall: queueForNextTurn,
       };
     } finally {
-      if (!sent) this.deletePromptOrigin(originId);
+      if (!sent) {
+        this.deletePromptOrigin(originId);
+        if (deliveryId) {
+          this.db.prepare(`
+            DELETE FROM accepted_deliveries WHERE delivery_id = ?
+          `).run(deliveryId);
+        }
+      }
       await run(TMUX, ["delete-buffer", "-b", bufferName]).catch(() => undefined);
     }
   }
@@ -3126,6 +3204,16 @@ function normalizeLabel(value: string, max: number): string {
 
 function normalizeCwd(value: string): string {
   return value.includes("\u0000") ? "/" : value.slice(0, 4_096);
+}
+
+function normalizeDeliveryId(value: unknown): string | null {
+  if (value === undefined) return null;
+  return typeof value === "string" &&
+      value.length >= 1 &&
+      value.length <= 160 &&
+      /^[A-Za-z0-9:_.-]+$/u.test(value)
+    ? value
+    : null;
 }
 
 const WORKSPACE_SCAN_LIMIT = 32;

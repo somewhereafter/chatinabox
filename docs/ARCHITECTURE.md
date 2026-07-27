@@ -93,6 +93,12 @@ activity state from transcript records.
 Transcript reading is also the recovery path when a lifecycle event is missed.
 Final deliveries are deduplicated per Telegram owner and pane.
 
+Telegram updates have separate in-flight and completed markers. The long-poll
+offset advances only after handling completes; an in-flight marker is reclaimed
+on process restart, while completed updates remain deduplicated. Telegram prompt
+handoffs also carry stable delivery IDs into the root bridge, so replaying an
+update after a bot restart does not paste the same prompt into Codex twice.
+
 ## Follow-up queue
 
 Telegram messages arriving during an active turn are stored in order. A

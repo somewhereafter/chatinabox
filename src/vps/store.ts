@@ -198,7 +198,8 @@ export class ChatinaboxStore {
       PRAGMA synchronous = NORMAL;
       CREATE TABLE IF NOT EXISTS seen_updates (
         update_id INTEGER PRIMARY KEY,
-        seen_at INTEGER NOT NULL
+        seen_at INTEGER NOT NULL,
+        completed_at INTEGER
       );
       CREATE TABLE IF NOT EXISTS callbacks (
         reference TEXT PRIMARY KEY,
@@ -404,6 +405,7 @@ export class ChatinaboxStore {
         PRIMARY KEY (chat_id, owner_user_id, message_thread_id)
       );
     `);
+    this.migrateSeenUpdates();
     this.migrateCodexAttachments();
     this.migrateCodexPrompts();
     this.migrateCodexStatuses();
@@ -621,7 +623,14 @@ export class ChatinaboxStore {
       INSERT INTO codex_prompts (
         chat_id, owner_user_id, server_pid, pane_id, pane_pid,
         telegram_message_id, created_at, queued_for_next_turn
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      )
+      SELECT ?, ?, ?, ?, ?, ?, ?, ?
+      WHERE NOT EXISTS (
+        SELECT 1 FROM codex_prompts
+        WHERE chat_id = ? AND owner_user_id = ?
+          AND server_pid = ? AND pane_id = ? AND pane_pid = ?
+          AND telegram_message_id = ?
+      )
     `).run(
       chatId,
       ownerUserId,
@@ -631,6 +640,12 @@ export class ChatinaboxStore {
       telegramMessageId,
       this.now(),
       queuedForNextTurn ? 1 : 0,
+      chatId,
+      ownerUserId,
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      telegramMessageId,
     );
     this.db.prepare(`
       DELETE FROM codex_prompts
@@ -1386,15 +1401,27 @@ export class ChatinaboxStore {
   }
 
   // ── Telegram update dedupe ────────────────────────────
-  /** Returns true when this update id has not been processed before. */
+  /** Returns true when this update id is not completed or already in flight. */
   claimTelegramUpdate(updateId: number): boolean {
     const result = this.db
-      .prepare(`INSERT OR IGNORE INTO seen_updates (update_id, seen_at) VALUES (?, ?)`)
+      .prepare(`
+        INSERT OR IGNORE INTO seen_updates (
+          update_id, seen_at, completed_at
+        ) VALUES (?, ?, NULL)
+      `)
       .run(updateId, this.now());
     this.db
       .prepare(`DELETE FROM seen_updates WHERE seen_at < ?`)
       .run(this.now() - TELEGRAM_UPDATE_RETENTION_MS);
     return result.changes > 0;
+  }
+
+  completeTelegramUpdate(updateId: number): void {
+    this.db.prepare(`
+      UPDATE seen_updates
+      SET completed_at = ?
+      WHERE update_id = ? AND completed_at IS NULL
+    `).run(this.now(), updateId);
   }
 
   /** Release a failed in-flight update so the poller can retry it. */
@@ -1643,6 +1670,22 @@ export class ChatinaboxStore {
   // ── Callback references ───────────────────────────────
   callbackStore(): CallbackReferenceStore {
     return new SqliteCallbackStore(this.db, this.now);
+  }
+
+  private migrateSeenUpdates(): void {
+    const columns = new Set(
+      (this.db.prepare(`PRAGMA table_info(seen_updates)`).all() as unknown as
+        Array<{ name: string }>).map((column) => column.name),
+    );
+    if (!columns.has("completed_at")) {
+      this.db.exec(`
+        ALTER TABLE seen_updates ADD COLUMN completed_at INTEGER;
+        UPDATE seen_updates SET completed_at = seen_at;
+      `);
+    }
+    // A row without completed_at belonged to a process that stopped before the
+    // poller advanced its durable offset. Telegram will replay that update.
+    this.db.exec(`DELETE FROM seen_updates WHERE completed_at IS NULL`);
   }
 
   private migrateCodexAttachments(): void {
