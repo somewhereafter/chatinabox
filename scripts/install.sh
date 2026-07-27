@@ -21,6 +21,13 @@ if [[ "$(id -u)" -ne 0 ]]; then
   exit 1
 fi
 
+# Capture explicit overrides before loading an existing installation. This lets
+# an operator rotate Scribe credentials while preserving stored values when no
+# replacement is supplied.
+provided_scribe_api_key="${ELEVENLABS_API_KEY:-}"
+provided_scribe_language="${CHATINABOX_SCRIBE_LANGUAGE:-}"
+provided_scribe_keyterms="${CHATINABOX_SCRIBE_KEYTERMS:-}"
+
 env_file=/etc/chatinabox/chatinabox.env
 if [[ -f "$env_file" ]]; then
   env_owner="$(stat -c '%u' "$env_file")"
@@ -98,9 +105,9 @@ if [[ -z "$convert_path" || ! -x "$convert_path" || -z "$chrome_path" ]]; then
   echo "Chat, sessions, setup, and deployment do not depend on it."
 fi
 
-scribe_api_key="${ELEVENLABS_API_KEY:-}"
-scribe_language="${CHATINABOX_SCRIBE_LANGUAGE:-eng}"
-scribe_keyterms="${CHATINABOX_SCRIBE_KEYTERMS:-}"
+scribe_api_key="${provided_scribe_api_key:-${ELEVENLABS_API_KEY:-}}"
+scribe_language="${provided_scribe_language:-${CHATINABOX_SCRIBE_LANGUAGE:-eng}}"
+scribe_keyterms="${provided_scribe_keyterms:-${CHATINABOX_SCRIBE_KEYTERMS:-}}"
 
 printf '\n› Building and testing Chatinabox\n'
 (
