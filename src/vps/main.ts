@@ -26,6 +26,7 @@ import { runPoller } from "./poller";
 import { ChatinaboxStore } from "./store";
 import { TopicSessionController } from "./topic-sessions";
 import { ManagerController } from "./manager";
+import { TelegramProgressPacer } from "./progress-pacer";
 
 interface App {
   readonly env: ChatinaboxEnv;
@@ -341,8 +342,19 @@ async function main(): Promise<void> {
   const profile = () => profileProvider.current();
   mkdirSync(env.DATA_DIR, { recursive: true, mode: 0o700 });
   const store = new ChatinaboxStore(path.join(env.DATA_DIR, "chatinabox.sqlite"));
-  const codex = new CodexTelegramController({ env, store, profile });
-  const overview = new OverviewController({ env, store, profile });
+  const progressPacer = new TelegramProgressPacer();
+  const codex = new CodexTelegramController({
+    env,
+    store,
+    profile,
+    progressPacer,
+  });
+  const overview = new OverviewController({
+    env,
+    store,
+    profile,
+    progressPacer,
+  });
   const topics = new TopicSessionController({ env, store, profile });
   const manager = new ManagerController({ env, store, profile });
   const app: App = {

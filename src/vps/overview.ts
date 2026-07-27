@@ -36,9 +36,14 @@ import type {
   CodexGoalRow,
   OverviewDashboardRow,
 } from "./store";
+import {
+  TelegramProgressPacer,
+  type ProgressPacer,
+} from "./progress-pacer";
 
 const NEXUS_POLL_MS = 5_000;
 const NEXUS_TIMESTAMP_REFRESH_MS = 60_000;
+const NEXUS_AUTOMATIC_RENDER_INTERVAL_MS = 30_000;
 
 type BridgeClient = Pick<CodexBridgeClient, "request">;
 
@@ -64,12 +69,14 @@ interface OverviewDependencies {
   readonly bridge?: BridgeClient;
   readonly now?: () => number;
   readonly profile?: () => ExperienceProfile;
+  readonly progressPacer?: ProgressPacer;
 }
 
 export class OverviewController {
   private readonly bridge: BridgeClient;
   private readonly now: () => number;
   private readonly profile: () => ExperienceProfile;
+  private readonly progressPacer: ProgressPacer;
   private readonly refreshing = new Map<number, Promise<void>>();
 
   constructor(private readonly dependencies: OverviewDependencies) {
@@ -78,6 +85,9 @@ export class OverviewController {
       new CodexBridgeClient(dependencies.env.CODEX_BRIDGE_SOCKET);
     this.now = dependencies.now ?? Date.now;
     this.profile = dependencies.profile ?? (() => DEFAULT_EXPERIENCE_PROFILE);
+    this.progressPacer =
+      dependencies.progressPacer ??
+      new TelegramProgressPacer();
   }
 
   isOverviewChat(chatId: number): boolean {
@@ -246,7 +256,10 @@ export class OverviewController {
   private async refreshDashboard(chatId: number, force: boolean): Promise<void> {
     const row = this.dependencies.store.overviewDashboard(chatId);
     if (!row) return;
-    const response = await this.bridge.request({ op: "list" }).catch(() => null);
+    const response = await this.bridge.request({
+      op: "list",
+      ...(force ? { refreshUsage: true } : {}),
+    }).catch(() => null);
     const stats = overviewStatsFromBridge(response);
     const goals: OverviewGoals = {
       current: this.dependencies.store.codexGoalsForChat(chatId)
@@ -276,6 +289,23 @@ export class OverviewController {
     ) {
       return;
     }
+    if (
+      !force &&
+      row.dashboard_message_id !== null &&
+      this.now() - row.rendered_at < NEXUS_AUTOMATIC_RENDER_INTERVAL_MS
+    ) {
+      return;
+    }
+    if (
+      !force &&
+      !this.progressPacer.tryAcquire(
+        chatId,
+        row.message_thread_id,
+        this.now(),
+      )
+    ) {
+      return;
+    }
     const refreshButton = (
       await issueCallbackReference(this.dependencies.store.callbackStore(), {
         action: "nexus.refresh",
@@ -299,6 +329,11 @@ export class OverviewController {
         keyboard,
       );
       if (edited.ok) {
+        this.progressPacer.record(
+          chatId,
+          row.message_thread_id,
+          this.now(),
+        );
         this.dependencies.store.setOverviewDashboardMessage(
           chatId,
           row.dashboard_message_id,
@@ -331,6 +366,11 @@ export class OverviewController {
       row.chat_id,
       sent.result.message_id,
       signature,
+    );
+    this.progressPacer.record(
+      row.chat_id,
+      row.message_thread_id,
+      this.now(),
     );
   }
 }

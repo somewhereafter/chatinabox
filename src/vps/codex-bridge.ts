@@ -384,7 +384,7 @@ export class CodexBridge {
           panes: await this.listCodexPanes(),
           recent: savedSessions.slice(0, 8),
           totalSessions: savedSessions.length,
-          usage: await this.latestCodexUsage(),
+          usage: await this.latestCodexUsage(request.refreshUsage === true),
         };
         }
       case "workspaces":
@@ -1405,9 +1405,15 @@ export class CodexBridge {
     }
   }
 
-  private async latestCodexUsage(): Promise<CodexUsage | null> {
+  private async latestCodexUsage(
+    forceRefresh = false,
+  ): Promise<CodexUsage | null> {
     const now = Date.now();
-    if (this.usageCache && now - this.usageCache.cachedAt < 10_000) {
+    if (
+      !forceRefresh &&
+      this.usageCache &&
+      now - this.usageCache.cachedAt < 3 * 60 * 1_000
+    ) {
       return this.usageCache.value;
     }
     const rows = this.db.prepare(`
@@ -3679,7 +3685,7 @@ export function fullAccessCodexCommand(): string {
     `-c 'hide_agent_reasoning=false' ` +
     `-c 'show_raw_agent_reasoning=false' ` +
     `-c 'service_tier="default"' ` +
-    "--disable fast_mode --enable hooks"
+    "--enable fast_mode --enable hooks"
   );
 }
 
@@ -4624,6 +4630,7 @@ export function parseCodexUsageFromTranscriptTail(
     const observedAt = Date.parse(record.timestamp);
     if (!Number.isFinite(observedAt)) continue;
     const rateLimits = record.payload.rate_limits;
+    if (isSparkCodexRateLimit(rateLimits)) continue;
     const limits = [rateLimits.primary, rateLimits.secondary]
       .map(parseCodexUsageLimit)
       .filter((limit): limit is CodexUsageLimit => limit !== null);
@@ -4645,6 +4652,18 @@ export function parseCodexUsageFromTranscriptTail(
     };
   }
   return null;
+}
+
+function isSparkCodexRateLimit(rateLimits: Record<string, unknown>): boolean {
+  const limitId =
+    typeof rateLimits.limit_id === "string"
+      ? rateLimits.limit_id.trim().toLowerCase()
+      : "";
+  const limitName =
+    typeof rateLimits.limit_name === "string"
+      ? rateLimits.limit_name.trim().toLowerCase()
+      : "";
+  return limitId === "codex_bengalfox" || limitName.includes("codex-spark");
 }
 
 /** Read current context occupancy from the newest complete token-count record. */

@@ -30,6 +30,7 @@ import {
   tgEditMessage,
   tgEditMessageCaption,
   tgEditRichHtml,
+  tgEditRichMarkdown,
   tgGetFile,
   tgPinChatMessage,
   tgSend,
@@ -79,6 +80,10 @@ import { transcribeScribeV2 } from "./scribe";
 import {
   renderTelegramMarkdownChunks,
 } from "./telegram-markdown";
+import {
+  TelegramProgressPacer,
+  type ProgressPacer,
+} from "./progress-pacer";
 
 const CODEX_CALLBACK_TTL_MS = 24 * 60 * 60 * 1_000;
 const TELEGRAM_SAFE_TEXT_CHARS = 3_400;
@@ -89,9 +94,8 @@ const CODEX_ATTACHMENT_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS = 900;
 const TELEGRAM_TEXT_BURST_DEBOUNCE_MS = 700;
 const THINKING_SECTION_FLUSH_INTERVAL_MS = 5_000;
-const GOAL_SYNC_INTERVAL_MS = 5_000;
-const TRANSIENT_ACTIVITY_RENDER_INTERVAL_MS = 4_000;
-const TRANSIENT_TIMER_REFRESH_INTERVAL_MS = 15_000;
+const GOAL_SYNC_INTERVAL_MS = 30_000;
+const TRANSIENT_TIMER_REFRESH_INTERVAL_MS = 5_000;
 
 interface CodexTelegramDependencies {
   readonly env: ChatinaboxEnv;
@@ -101,6 +105,7 @@ interface CodexTelegramDependencies {
   readonly now?: () => number;
   readonly thinkingFlushIntervalMs?: number;
   readonly goalSyncIntervalMs?: number;
+  readonly progressPacer?: ProgressPacer;
 }
 
 interface Menu {
@@ -166,9 +171,11 @@ export class CodexTelegramController {
   private readonly flushingTextBursts = new Set<string>();
   private readonly transientMutationVersions = new Map<string, number>();
   private readonly transientRenderedAt = new Map<string, number>();
+  private readonly transientRenderedReplyTo = new Map<string, number | null>();
   private readonly transientTimerRenderedAt = new Map<string, number>();
   private readonly profile: () => ExperienceProfile;
   private readonly now: () => number;
+  private readonly progressPacer: ProgressPacer;
   private readonly thinkingFlushIntervalMs: number;
   private readonly goalSyncIntervalMs: number;
   private lastGoalSyncAt = 0;
@@ -179,6 +186,9 @@ export class CodexTelegramController {
       new CodexBridgeClient(dependencies.env.CODEX_BRIDGE_SOCKET);
     this.profile = dependencies.profile ?? (() => DEFAULT_EXPERIENCE_PROFILE);
     this.now = dependencies.now ?? Date.now;
+    this.progressPacer =
+      dependencies.progressPacer ??
+      new TelegramProgressPacer();
     this.thinkingFlushIntervalMs =
       dependencies.thinkingFlushIntervalMs ??
       THINKING_SECTION_FLUSH_INTERVAL_MS;
@@ -682,6 +692,7 @@ export class CodexTelegramController {
           await this.refreshGoalTransient(
             attachment,
             threadGoalFromRow(goal),
+            true,
           );
         }
         return true;
@@ -776,6 +787,7 @@ export class CodexTelegramController {
         await this.refreshGoalTransient(
           attachment,
           threadGoalFromRow(goal),
+          true,
         );
         await tgSend(
           this.dependencies.env,
@@ -796,6 +808,7 @@ export class CodexTelegramController {
         await this.refreshGoalTransient(
           attachment,
           threadGoalFromRow(goal),
+          true,
         );
         await tgSend(
           this.dependencies.env,
@@ -815,7 +828,7 @@ export class CodexTelegramController {
         telegramMessageThreadId(message),
         response.goal,
       );
-      await this.refreshGoalTransient(attachment, response.goal);
+      await this.refreshGoalTransient(attachment, response.goal, true);
       return true;
     }
     const hadActivityStatus = this.dependencies.store.codexStatus(
@@ -1566,7 +1579,7 @@ export class CodexTelegramController {
       messageThreadId,
       response.goal,
     );
-    await this.refreshGoalTransient(attachment, response.goal);
+    await this.refreshGoalTransient(attachment, response.goal, true);
     if (status === "active") {
       // A sidecar can mutate persisted goal state, but the terminal-owned TUI
       // remains the continuation engine. Wake its native goal command so a
@@ -1710,6 +1723,7 @@ export class CodexTelegramController {
   private async refreshGoalTransient(
     attachment: CodexAttachmentRow,
     goal: CodexThreadGoal,
+    forceRender = false,
   ): Promise<void> {
     if (goal.status === "complete") return;
     const target = attachmentTarget(attachment);
@@ -1726,6 +1740,8 @@ export class CodexTelegramController {
       undefined,
       undefined,
       true,
+      undefined,
+      forceRender,
     );
   }
 
@@ -1935,17 +1951,33 @@ export class CodexTelegramController {
         continue;
       }
       if (event.kind === "turn_aborted") {
-        if (!await this.flushThinkingSection(
-          attachment,
+        const thinking = this.dependencies.store.codexThinkingSection(
+          attachment.chat_id,
+          attachment.owner_user_id,
           event.target,
-          true,
-        )) return false;
+        );
         await this.clearQueuedFollowupStatus(attachment, event.target);
         await this.setTransientStatus(
           attachment,
           event.target,
           "state_interrupted",
         );
+        const rendered = this.dependencies.store.codexThinkingSection(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          event.target,
+        );
+        if (
+          thinking &&
+          rendered &&
+          rendered.rendered_at >= thinking.updated_at
+        ) {
+          this.dependencies.store.clearCodexThinkingSection(
+            attachment.chat_id,
+            attachment.owner_user_id,
+            event.target,
+          );
+        }
         continue;
       }
       if (event.kind === "agent_reasoning") {
@@ -1956,18 +1988,6 @@ export class CodexTelegramController {
           event.message,
         );
         continue;
-      }
-      if (
-        event.kind === "assistant_progress" ||
-        event.kind === "assistant_final" ||
-        event.kind === "user_local" ||
-        event.kind === "context_compacted"
-      ) {
-        if (!await this.flushThinkingSection(
-          attachment,
-          event.target,
-          true,
-        )) return false;
       }
       const finalHash = event.kind === "assistant_final"
         ? createHash("sha256").update(event.message).digest("hex")
@@ -1984,6 +2004,11 @@ export class CodexTelegramController {
         continue;
       }
       if (event.kind === "context_compacted") {
+        const thinking = this.dependencies.store.codexThinkingSection(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          event.target,
+        );
         const goal = visibleCodexGoal(
           this.dependencies.store.codexGoal(
             attachment.chat_id,
@@ -1991,52 +2016,54 @@ export class CodexTelegramController {
             attachment.message_thread_id,
           ),
         );
-        if (goal) {
-          const sent = await tgSendRichHtml(
-            this.dependencies.env,
-            attachment.chat_id,
-            formatPromotedContextCompaction(this.profile()),
-            undefined,
-            undefined,
-            attachment.message_thread_id || undefined,
-          );
-          if (!sent.ok) return false;
-          const transient = this.dependencies.store.codexStatus(
-            attachment.chat_id,
-            attachment.owner_user_id,
-            event.target,
-          );
-          if (transient) {
-            await this.reanchorTransientStatus(attachment, event.target);
-          } else {
-            await this.refreshGoalTransient(
-              attachment,
-              threadGoalFromRow(goal),
-            );
-          }
-          continue;
-        }
-        const transient = this.takeTransientStatus(attachment, event.target);
+        const transient = this.takeTransientStatus(
+          attachment,
+          event.target,
+        );
+        const checkpoint = formatPromotedContextCompaction(
+          this.profile(),
+          thinking,
+        );
         let delivered = false;
         if (transient) {
           const edited = await tgEditRichHtml(
             this.dependencies.env,
             attachment.chat_id,
             transient.telegram_message_id,
-            formatPromotedContextCompaction(this.profile()),
+            checkpoint,
           ).catch(() => null);
           delivered = telegramEditSucceeded(edited);
+          if (!delivered) {
+            await tgDeleteMessage(
+              this.dependencies.env,
+              attachment.chat_id,
+              transient.telegram_message_id,
+            ).catch(() => undefined);
+          }
         }
         if (!delivered) {
           const sent = await tgSendRichHtml(
             this.dependencies.env,
             attachment.chat_id,
-            formatPromotedContextCompaction(this.profile()),
+            checkpoint,
             undefined,
             undefined,
             attachment.message_thread_id || undefined,
           );
           if (!sent.ok) return false;
+        }
+        if (thinking) {
+          this.dependencies.store.clearCodexThinkingSection(
+            attachment.chat_id,
+            attachment.owner_user_id,
+            event.target,
+          );
+        }
+        if (goal) {
+          await this.refreshGoalTransient(
+            attachment,
+            threadGoalFromRow(goal),
+          );
         }
         continue;
       }
@@ -2049,28 +2076,35 @@ export class CodexTelegramController {
         );
         continue;
       }
+      const storedGoalRowBeforeOutput = this.dependencies.store.codexGoal(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        attachment.message_thread_id,
+      );
       const storedGoalBeforeOutput = visibleCodexGoal(
-        this.dependencies.store.codexGoal(
-          attachment.chat_id,
-          attachment.owner_user_id,
-          attachment.message_thread_id,
-        ),
+        storedGoalRowBeforeOutput,
       );
       const preserveGoalTransient = storedGoalBeforeOutput !== null;
-      const transient = preserveGoalTransient
+      const preserveGoalEditor =
+        storedGoalRowBeforeOutput?.awaiting_edit === 1;
+      const outputThinking =
+        event.kind === "assistant_progress" ||
+          event.kind === "assistant_final" ||
+          event.kind === "user_local"
+          ? this.dependencies.store.codexThinkingSection(
+            attachment.chat_id,
+            attachment.owner_user_id,
+            event.target,
+          )
+          : null;
+      const transient = preserveGoalEditor
         ? this.dependencies.store.codexStatus(
           attachment.chat_id,
           attachment.owner_user_id,
           event.target,
         )
         : this.takeTransientStatus(attachment, event.target);
-      if (transient && !preserveGoalTransient) {
-        await tgDeleteMessage(
-          this.dependencies.env,
-          attachment.chat_id,
-          transient.telegram_message_id,
-        ).catch(() => undefined);
-      }
+      const checkpointTransient = preserveGoalEditor ? null : transient;
       const pendingThrough = (
         event.kind === "assistant_final" ||
         event.kind === "assistant_progress"
@@ -2119,44 +2153,97 @@ export class CodexTelegramController {
         : undefined;
       let deliveredAsRichMessage = false;
       let checkpointMessageId: number | null = null;
-      if (
-        (
-          event.kind === "assistant_final" ||
+      let transientConsumed = false;
+      const richMarkdown =
+        event.kind === "assistant_final" ||
           event.kind === "assistant_progress"
-        ) &&
-        event.message.length <= 30_000
-      ) {
-        const richResult = await tgSendRichMarkdown(
-          this.dependencies.env,
-          attachment.chat_id,
-          formatCodexRichMarkdown(event, details, this.profile()),
-          pending?.telegram_message_id,
-          attachment.message_thread_id || undefined,
-        ).catch(() => null);
-        deliveredAsRichMessage = richResult?.ok === true;
-        if (event.kind === "assistant_final" && richResult?.ok) {
-          checkpointMessageId = richResult.result.message_id;
+          ? formatCodexRichMarkdown(
+            event,
+            details,
+            this.profile(),
+            outputThinking,
+          )
+          : null;
+      if (richMarkdown !== null && richMarkdown.length <= 30_000) {
+        const markdown = richMarkdown;
+        if (checkpointTransient) {
+          const edited = await tgEditRichMarkdown(
+            this.dependencies.env,
+            attachment.chat_id,
+            checkpointTransient.telegram_message_id,
+            markdown,
+          ).catch(() => null);
+          deliveredAsRichMessage = telegramEditSucceeded(edited);
+          transientConsumed = deliveredAsRichMessage;
+          if (event.kind === "assistant_final" && deliveredAsRichMessage) {
+            checkpointMessageId = checkpointTransient.telegram_message_id;
+          }
+        } else {
+          const richResult = await tgSendRichMarkdown(
+            this.dependencies.env,
+            attachment.chat_id,
+            markdown,
+            pending?.telegram_message_id,
+            attachment.message_thread_id || undefined,
+          ).catch(() => null);
+          deliveredAsRichMessage = richResult?.ok === true;
+          if (event.kind === "assistant_final" && richResult?.ok) {
+            checkpointMessageId = richResult.result.message_id;
+          }
         }
       }
       if (!deliveredAsRichMessage) {
-        const chunks = formatCodexEvent(event, this.profile());
+        const chunks = formatCodexEvent(
+          event,
+          this.profile(),
+          outputThinking,
+        );
         for (let index = 0; index < chunks.length; index += 1) {
-          const result = await tgSend(
-            this.dependencies.env,
-            attachment.chat_id,
-            chunks[index],
-            index === 0 ? pending?.telegram_message_id : undefined,
-            undefined,
-            attachment.message_thread_id || undefined,
-          );
-          if (!result.ok) return false;
+          let messageId: number | null = null;
+          if (index === 0 && checkpointTransient && !transientConsumed) {
+            const edited = await tgEditMessage(
+              this.dependencies.env,
+              attachment.chat_id,
+              checkpointTransient.telegram_message_id,
+              chunks[index],
+            ).catch(() => null);
+            if (telegramEditSucceeded(edited)) {
+              transientConsumed = true;
+              messageId = checkpointTransient.telegram_message_id;
+            } else {
+              await tgDeleteMessage(
+                this.dependencies.env,
+                attachment.chat_id,
+                checkpointTransient.telegram_message_id,
+              ).catch(() => undefined);
+            }
+          }
+          if (messageId === null) {
+            const result = await tgSend(
+              this.dependencies.env,
+              attachment.chat_id,
+              chunks[index],
+              index === 0 ? pending?.telegram_message_id : undefined,
+              undefined,
+              attachment.message_thread_id || undefined,
+            );
+            if (!result.ok) return false;
+            messageId = result.result.message_id;
+          }
           if (
             event.kind === "assistant_final" &&
             checkpointMessageId === null
           ) {
-            checkpointMessageId = result.result.message_id;
+            checkpointMessageId = messageId;
           }
         }
+      }
+      if (outputThinking) {
+        this.dependencies.store.clearCodexThinkingSection(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          event.target,
+        );
       }
       if (event.kind === "assistant_final") {
         this.dependencies.store.recordCodexFinalDelivery(
@@ -2179,21 +2266,10 @@ export class CodexTelegramController {
           ).catch(() => undefined);
         }
       }
-      if (preserveGoalTransient && transient) {
-        await this.reanchorTransientStatus(
-          attachment,
-          event.target,
-        );
-      } else if (preserveGoalTransient) {
+      if (preserveGoalTransient && !preserveGoalEditor) {
         await this.refreshGoalTransient(
           attachment,
           threadGoalFromRow(storedGoalBeforeOutput!),
-        );
-      } else if (event.kind === "assistant_progress" && transient) {
-        await this.restoreTransientStatus(
-          attachment,
-          event.target,
-          transient,
         );
       }
       if (event.kind === "assistant_final" && pendingBatch.length > 0) {
@@ -2496,7 +2572,7 @@ export class CodexTelegramController {
         );
         continue;
       }
-      await this.flushThinkingSection(attachment, target, false);
+      await this.renderThinkingInTransient(attachment, target);
     }
   }
 
@@ -2547,6 +2623,15 @@ export class CodexTelegramController {
       ) {
         continue;
       }
+      if (
+        !this.progressPacer.tryAcquire(
+          attachment.chat_id,
+          attachment.message_thread_id,
+          now,
+        )
+      ) {
+        continue;
+      }
       const storedGoal = this.dependencies.store.codexGoal(
         attachment.chat_id,
         attachment.owner_user_id,
@@ -2555,6 +2640,11 @@ export class CodexTelegramController {
       if (storedGoal?.awaiting_edit === 1) continue;
       const mutation = this.beginTransientMutation(attachment, target);
       const goal = visibleCodexGoal(storedGoal);
+      const thinking = this.dependencies.store.codexThinkingSection(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        target,
+      );
       const snapshot = statusSnapshotFromRow(
         status,
         status.reply_to_message_id,
@@ -2573,6 +2663,7 @@ export class CodexTelegramController {
           now,
           this.profile(),
           goal,
+          thinking,
         ),
         keyboard,
       ).catch(() => null);
@@ -2581,16 +2672,23 @@ export class CodexTelegramController {
         telegramEditSucceeded(edited)
       ) {
         this.transientTimerRenderedAt.set(key, now);
+        if (thinking) {
+          this.dependencies.store.markCodexThinkingSectionRendered(
+            attachment.chat_id,
+            attachment.owner_user_id,
+            target,
+            status.telegram_message_id,
+          );
+        }
       }
     }
   }
 
-  private async flushThinkingSection(
+  private async renderThinkingInTransient(
     attachment: CodexAttachmentRow,
     target: CodexPaneIdentity,
-    finalize: boolean,
   ): Promise<boolean> {
-    let row = this.dependencies.store.codexThinkingSection(
+    const row = this.dependencies.store.codexThinkingSection(
       attachment.chat_id,
       attachment.owner_user_id,
       target,
@@ -2605,193 +2703,94 @@ export class CodexTelegramController {
       );
       return true;
     }
-    const needsRender =
-      row.telegram_message_id === null ||
-      row.updated_at > row.rendered_at;
-    if (needsRender && row.telegram_message_id !== null) {
-      let edited = await tgEditRichHtml(
-        this.dependencies.env,
+    if (
+      !this.progressPacer.tryAcquire(
         attachment.chat_id,
-        row.telegram_message_id,
-        formatThinkingSectionRichHtml(row),
-      ).catch(() => null);
-      if (!telegramEditSucceeded(edited)) {
-        edited = await tgEditMessage(
-          this.dependencies.env,
-          attachment.chat_id,
-          row.telegram_message_id,
-          formatThinkingSectionFallbackHtml(row),
-        ).catch(() => null);
-      }
-      if (!telegramEditSucceeded(edited)) return false;
-      row = this.dependencies.store.markCodexThinkingSectionRendered(
-        attachment.chat_id,
-        attachment.owner_user_id,
-        target,
-        row.telegram_message_id,
-      ) ?? row;
-    } else if (needsRender) {
-      const transient = this.dependencies.store.codexStatus(
-        attachment.chat_id,
-        attachment.owner_user_id,
-        target,
-      );
-      if (transient) {
-        // Keep a live transient visible at all times: first create its new
-        // latest copy, then transform the older copy in place into thinking.
-        if (!await this.reanchorTransientStatus(
-          attachment,
-          target,
-          false,
-        )) return false;
-        let edited = await tgEditRichHtml(
-          this.dependencies.env,
-          attachment.chat_id,
-          transient.telegram_message_id,
-          formatThinkingSectionRichHtml(row),
-        ).catch(() => null);
-        if (!telegramEditSucceeded(edited)) {
-          edited = await tgEditMessage(
-            this.dependencies.env,
-            attachment.chat_id,
-            transient.telegram_message_id,
-            formatThinkingSectionFallbackHtml(row),
-          ).catch(() => null);
-        }
-        if (!telegramEditSucceeded(edited)) {
-          await tgDeleteMessage(
-            this.dependencies.env,
-            attachment.chat_id,
-            transient.telegram_message_id,
-          ).catch(() => undefined);
-          return false;
-        }
-        row = this.dependencies.store.markCodexThinkingSectionRendered(
-          attachment.chat_id,
-          attachment.owner_user_id,
-          target,
-          transient.telegram_message_id,
-        ) ?? row;
-      } else {
-        let sent = await tgSendRichHtml(
-          this.dependencies.env,
-          attachment.chat_id,
-          formatThinkingSectionRichHtml(row),
-          undefined,
-          undefined,
-          attachment.message_thread_id || undefined,
-        ).catch(() => null);
-        if (!sent?.ok) {
-          sent = await tgSend(
-            this.dependencies.env,
-            attachment.chat_id,
-            formatThinkingSectionFallbackHtml(row),
-            undefined,
-            undefined,
-            attachment.message_thread_id || undefined,
-          ).catch(() => null);
-        }
-        if (!sent?.ok) return false;
-        row = this.dependencies.store.markCodexThinkingSectionRendered(
-          attachment.chat_id,
-          attachment.owner_user_id,
-          target,
-          sent.result.message_id,
-        ) ?? row;
-      }
+        attachment.message_thread_id,
+        this.now(),
+      )
+    ) {
+      return true;
     }
-    if (finalize) {
-      this.dependencies.store.clearCodexThinkingSection(
-        attachment.chat_id,
-        attachment.owner_user_id,
-        target,
-      );
-    }
-    return true;
-  }
-
-  private async reanchorTransientStatus(
-    attachment: CodexAttachmentRow,
-    target: CodexPaneIdentity,
-    deletePrevious = true,
-  ): Promise<boolean> {
-    const previous = this.dependencies.store.codexStatus(
+    let transient = this.dependencies.store.codexStatus(
       attachment.chat_id,
       attachment.owner_user_id,
       target,
     );
-    if (!previous) return false;
-    const mutation = this.beginTransientMutation(attachment, target);
-    const snapshot = statusSnapshotFromRow(previous, null);
+    if (!transient) {
+      await this.setTransientStatus(
+        attachment,
+        target,
+        "state_working",
+      );
+      transient = this.dependencies.store.codexStatus(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        target,
+      );
+      if (!transient) return false;
+      this.dependencies.store.markCodexThinkingSectionRendered(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        target,
+        transient.telegram_message_id,
+      );
+      return true;
+    }
     const storedGoal = this.dependencies.store.codexGoal(
       attachment.chat_id,
       attachment.owner_user_id,
       attachment.message_thread_id,
     );
+    if (storedGoal?.awaiting_edit === 1) return true;
+    const snapshot = statusSnapshotFromRow(
+      transient,
+      transient.reply_to_message_id,
+    );
     const goal = visibleCodexGoal(storedGoal);
-    const editingGoal = storedGoal?.awaiting_edit === 1
-      ? storedGoal
-      : null;
-    const html = editingGoal
-      ? formatGoalEditPrompt(editingGoal)
-      : formatCodexTransientRichHtml(
+    const keyboard = await this.transientControlKeyboard(
+      attachment,
+      goal,
+    ).catch(() => undefined);
+    let edited = await tgEditRichHtml(
+      this.dependencies.env,
+      attachment.chat_id,
+      transient.telegram_message_id,
+      formatCodexTransientRichHtml(
         snapshot,
         this.now(),
         this.profile(),
         goal,
-      );
-    const keyboard = editingGoal
-      ? await this.goalEditKeyboard(
-        attachment.chat_id,
-        attachment.owner_user_id,
-      ).catch(() => undefined)
-      : await this.transientControlKeyboard(
-        attachment,
-        goal,
-      ).catch(() => undefined);
-    if (!this.isCurrentTransientMutation(mutation)) return false;
-    let sent = await tgSendRichHtml(
-      this.dependencies.env,
-      attachment.chat_id,
-      html,
-      snapshot.replyToMessageId ?? undefined,
+        row,
+      ),
       keyboard,
-      attachment.message_thread_id || undefined,
     ).catch(() => null);
-    if (!sent?.ok) {
-      sent = await tgSend(
+    if (!telegramEditSucceeded(edited)) {
+      edited = await tgEditMessage(
         this.dependencies.env,
         attachment.chat_id,
-        formatCodexTransientFallback(snapshot, this.profile(), goal),
-        snapshot.replyToMessageId ?? undefined,
+        transient.telegram_message_id,
+        formatCodexTransientFallback(
+          snapshot,
+          this.profile(),
+          goal,
+          row,
+        ),
         keyboard,
-        attachment.message_thread_id || undefined,
       ).catch(() => null);
     }
-    if (!sent?.ok) return false;
-    if (!this.isCurrentTransientMutation(mutation)) {
-      await tgDeleteMessage(
-        this.dependencies.env,
-        attachment.chat_id,
-        sent.result.message_id,
-      ).catch(() => undefined);
-      return false;
-    }
-    this.dependencies.store.setCodexStatus(
+    if (!telegramEditSucceeded(edited)) return false;
+    this.dependencies.store.markCodexThinkingSectionRendered(
       attachment.chat_id,
       attachment.owner_user_id,
       target,
-      sent.result.message_id,
-      snapshot,
+      transient.telegram_message_id,
     );
-    this.transientRenderedAt.set(mutation.key, this.now());
-    if (deletePrevious) {
-      await tgDeleteMessage(
-        this.dependencies.env,
-        attachment.chat_id,
-        previous.telegram_message_id,
-      ).catch(() => undefined);
-    }
+    this.progressPacer.record(
+      attachment.chat_id,
+      attachment.message_thread_id,
+      this.now(),
+    );
     return true;
   }
 
@@ -2804,6 +2803,7 @@ export class CodexTelegramController {
     activityMessage?: string,
     preserveExisting = false,
     _assistantNameOverride?: CodexAssistantName,
+    forceRender = false,
   ): Promise<void> {
     const mutation = this.beginTransientMutation(attachment, target);
     const existing = this.dependencies.store.codexStatus(
@@ -2826,6 +2826,11 @@ export class CodexTelegramController {
       attachment.message_thread_id,
     );
     const goal = visibleCodexGoal(storedGoal);
+    const thinking = this.dependencies.store.codexThinkingSection(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      target,
+    );
     const editingGoal = storedGoal?.awaiting_edit === 1
       ? storedGoal
       : null;
@@ -2841,11 +2846,14 @@ export class CodexTelegramController {
       return;
     }
     if (
-      kind === "state_activity" &&
       existing &&
-      this.now() -
-          (this.transientRenderedAt.get(mutation.key) ?? 0) <
-        TRANSIENT_ACTIVITY_RENDER_INTERVAL_MS
+      isCoalescableTransientStatus(kind) &&
+      !forceRender &&
+      !this.progressPacer.tryAcquire(
+        attachment.chat_id,
+        attachment.message_thread_id,
+        this.now(),
+      )
     ) {
       if (!this.isCurrentTransientMutation(mutation)) return;
       this.dependencies.store.setCodexStatus(
@@ -2864,6 +2872,7 @@ export class CodexTelegramController {
         this.now(),
         this.profile(),
         goal,
+        thinking,
       );
     const keyboard = editingGoal
       ? await this.goalEditKeyboard(
@@ -2875,10 +2884,13 @@ export class CodexTelegramController {
         goal,
       ).catch(() => undefined);
     if (!this.isCurrentTransientMutation(mutation)) return;
+    const renderedReplyTo = this.transientRenderedReplyTo.has(mutation.key)
+      ? this.transientRenderedReplyTo.get(mutation.key)
+      : existing?.reply_to_message_id;
     const shouldReanchor =
       existing !== null &&
       replyToMessageId !== undefined &&
-      existing.reply_to_message_id !== replyToMessageId;
+      renderedReplyTo !== replyToMessageId;
     if (existing && !shouldReanchor) {
       const edited = await tgEditRichHtml(
         this.dependencies.env,
@@ -2897,6 +2909,23 @@ export class CodexTelegramController {
           snapshot,
         );
         this.transientRenderedAt.set(mutation.key, this.now());
+        this.transientRenderedReplyTo.set(
+          mutation.key,
+          snapshot.replyToMessageId,
+        );
+        if (thinking) {
+          this.dependencies.store.markCodexThinkingSectionRendered(
+            attachment.chat_id,
+            attachment.owner_user_id,
+            target,
+            existing.telegram_message_id,
+          );
+        }
+        this.progressPacer.record(
+          attachment.chat_id,
+          attachment.message_thread_id,
+          this.now(),
+        );
         return;
       }
     }
@@ -2913,7 +2942,12 @@ export class CodexTelegramController {
       sent = await tgSend(
         this.dependencies.env,
         attachment.chat_id,
-        formatCodexTransientFallback(snapshot, this.profile(), goal),
+        formatCodexTransientFallback(
+          snapshot,
+          this.profile(),
+          goal,
+          thinking,
+        ),
         snapshot.replyToMessageId ?? undefined,
         keyboard,
         attachment.message_thread_id || undefined,
@@ -2936,6 +2970,23 @@ export class CodexTelegramController {
       snapshot,
     );
     this.transientRenderedAt.set(mutation.key, this.now());
+    this.transientRenderedReplyTo.set(
+      mutation.key,
+      snapshot.replyToMessageId,
+    );
+    if (thinking) {
+      this.dependencies.store.markCodexThinkingSectionRendered(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        target,
+        sent.result.message_id,
+      );
+    }
+    this.progressPacer.record(
+      attachment.chat_id,
+      attachment.message_thread_id,
+      this.now(),
+    );
     if (
       existing &&
       existing.telegram_message_id !== sent.result.message_id
@@ -2970,78 +3021,6 @@ export class CodexTelegramController {
       undefined,
       true,
     );
-  }
-
-  private async restoreTransientStatus(
-    attachment: CodexAttachmentRow,
-    target: CodexPaneIdentity,
-    previous: CodexStatusRow,
-  ): Promise<void> {
-    const mutation = this.beginTransientMutation(attachment, target);
-    const snapshot = statusSnapshotFromRow(previous, null);
-    const storedGoal = this.dependencies.store.codexGoal(
-      attachment.chat_id,
-      attachment.owner_user_id,
-      attachment.message_thread_id,
-    );
-    const goal = visibleCodexGoal(storedGoal);
-    const editingGoal = storedGoal?.awaiting_edit === 1
-      ? storedGoal
-      : null;
-    const html = editingGoal
-      ? formatGoalEditPrompt(editingGoal)
-      : formatCodexTransientRichHtml(
-        snapshot,
-        Date.now(),
-        this.profile(),
-        goal,
-      );
-    const keyboard = editingGoal
-      ? await this.goalEditKeyboard(
-        attachment.chat_id,
-        attachment.owner_user_id,
-      ).catch(() => undefined)
-      : await this.transientControlKeyboard(
-        attachment,
-        goal,
-      ).catch(() => undefined);
-    if (!this.isCurrentTransientMutation(mutation)) return;
-    let sent = await tgSendRichHtml(
-      this.dependencies.env,
-      attachment.chat_id,
-      html,
-      snapshot.replyToMessageId ?? undefined,
-      keyboard,
-      attachment.message_thread_id || undefined,
-    ).catch(() => null);
-    if (!sent?.ok) {
-      sent = await tgSend(
-        this.dependencies.env,
-        attachment.chat_id,
-        formatCodexTransientFallback(snapshot, this.profile(), goal),
-        snapshot.replyToMessageId ?? undefined,
-        keyboard,
-        attachment.message_thread_id || undefined,
-      ).catch(() => null);
-    }
-    if (sent?.ok) {
-      if (!this.isCurrentTransientMutation(mutation)) {
-        await tgDeleteMessage(
-          this.dependencies.env,
-          attachment.chat_id,
-          sent.result.message_id,
-        ).catch(() => undefined);
-        return;
-      }
-      this.dependencies.store.setCodexStatus(
-        attachment.chat_id,
-        attachment.owner_user_id,
-        target,
-        sent.result.message_id,
-        snapshot,
-      );
-      this.transientRenderedAt.set(mutation.key, this.now());
-    }
   }
 
   private beginTransientMutation(
@@ -3134,7 +3113,8 @@ export class CodexTelegramController {
     attachment: CodexAttachmentRow,
     target: CodexPaneIdentity,
   ): CodexStatusRow | null {
-    this.beginTransientMutation(attachment, target);
+    const mutation = this.beginTransientMutation(attachment, target);
+    this.transientRenderedReplyTo.delete(mutation.key);
     return this.dependencies.store.clearCodexStatus(
       attachment.chat_id,
       attachment.owner_user_id,
@@ -4272,6 +4252,15 @@ function safeStatusCount(value: number): number {
   return Number.isSafeInteger(value) && value > 0 ? value : 0;
 }
 
+function isCoalescableTransientStatus(kind: TransientStatusKind): boolean {
+  return (
+    kind === "state_compacting" ||
+    kind === "state_working" ||
+    kind === "state_waiting_terminal" ||
+    kind === "state_activity"
+  );
+}
+
 export function formatCodexTransientRichHtml(
   snapshot: CodexStatusSnapshot,
   now: number = Date.now(),
@@ -4283,6 +4272,10 @@ export function formatCodexTransientRichHtml(
     | "token_budget"
     | "tokens_used"
     | "time_used_seconds"
+  > | null = null,
+  thinking: Pick<
+    CodexThinkingSectionRow,
+    "summaries_json" | "omitted_count"
   > | null = null,
 ): string {
   const lines: string[] = [];
@@ -4348,7 +4341,8 @@ export function formatCodexTransientRichHtml(
   return (
     headline +
     (lines.length > 0 ? `<p>${lines.join("<br/>")}</p>` : "") +
-    goalSection
+    goalSection +
+    (thinking ? formatThinkingSectionRichHtml(thinking) : "")
   );
 }
 
@@ -4363,8 +4357,18 @@ function formatCodexTransientFallback(
     | "tokens_used"
     | "time_used_seconds"
   > | null = null,
+  thinking: Pick<
+    CodexThinkingSectionRow,
+    "summaries_json" | "omitted_count"
+  > | null = null,
 ): string {
-  return formatCodexTransientRichHtml(snapshot, Date.now(), profile, goal)
+  return formatCodexTransientRichHtml(
+    snapshot,
+    Date.now(),
+    profile,
+    goal,
+    thinking,
+  )
     .replaceAll("<mark>", "<b>")
     .replaceAll("</mark>", "</b>")
     .replaceAll("<p>", "")
@@ -4879,6 +4883,10 @@ export function codexHelpText(
 export function formatCodexEvent(
   event: CodexEvent,
   profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
+  thinking: Pick<
+    CodexThinkingSectionRow,
+    "summaries_json" | "omitted_count"
+  > | null = null,
 ): string[] {
   if (event.kind === "agent_reasoning") {
     return [
@@ -4900,6 +4908,9 @@ export function formatCodexEvent(
       : "";
   return bodyChunks.map(
     (chunk, index) =>
+      `${index === 0 && thinking
+        ? `${formatThinkingSectionRichHtml(thinking)}\n\n`
+        : ""}` +
       `${index === 0 ? heading : ""}${chunk}` +
       `${index === bodyChunks.length - 1 ? footer : ""}`,
   );
@@ -4931,26 +4942,6 @@ export function formatThinkingSectionRichHtml(
     omitted +
     body +
     "</details>"
-  );
-}
-
-function formatThinkingSectionFallbackHtml(
-  row: Pick<CodexThinkingSectionRow, "summaries_json" | "omitted_count">,
-): string {
-  const summaries = parseThinkingSummaries(row.summaries_json);
-  const omitted = row.omitted_count > 0
-    ? `<i>${row.omitted_count} earlier ` +
-      `${row.omitted_count === 1 ? "thought" : "thoughts"} omitted</i>\n`
-    : "";
-  return (
-    "<b>show thinking</b>\n" +
-    omitted +
-    summaries.map(
-      (summary) =>
-        `<blockquote><i>${escapeTelegramHtml(
-          agentReasoningText(summary),
-        )}</i></blockquote>`,
-    ).join("\n")
   );
 }
 
@@ -5004,6 +4995,10 @@ export function formatCodexRichMarkdown(
   event: CodexEvent,
   details?: CodexResponseDetails,
   profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
+  thinking: Pick<
+    CodexThinkingSectionRow,
+    "summaries_json" | "omitted_count"
+  > | null = null,
 ): string {
   const heading = event.kind === "user_local"
     ? "✍🏻 **you · vps**"
@@ -5017,7 +5012,13 @@ export function formatCodexRichMarkdown(
       ? `\n\n${formatCodexResponseDetails(details)}`
       : "";
   const footer = event.kind === "assistant_progress" ? "cont." : "fin";
-  return `${heading}\n\n${body}${detailsBlock}\n\n<footer>${footer}</footer>`;
+  const thinkingBlock = thinking
+    ? `${formatThinkingSectionRichHtml(thinking)}\n\n`
+    : "";
+  return (
+    `${thinkingBlock}${heading}\n\n${body}${detailsBlock}` +
+    `\n\n<footer>${footer}</footer>`
+  );
 }
 
 function formatCodexResponseDetails(details: CodexResponseDetails): string {
@@ -5088,8 +5089,13 @@ function statusSnapshotFromRow(
 
 function formatPromotedContextCompaction(
   profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
+  thinking: Pick<
+    CodexThinkingSectionRow,
+    "summaries_json" | "omitted_count"
+  > | null = null,
 ): string {
   return (
+    (thinking ? formatThinkingSectionRichHtml(thinking) : "") +
     `<p><mark>${escapeTelegramHtml(assistantIdentity(profile))}</mark></p>` +
     "<p>🧶 context compacted</p>" +
     "<footer>cont.</footer>"

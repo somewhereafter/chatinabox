@@ -16,6 +16,7 @@ import {
   tgSetChatTitle,
   tgSetMyName,
   tgSetMyProfilePhoto,
+  tgSend,
   tgSendDocument,
   tgSendPhoto,
 } from "../telegram";
@@ -36,6 +37,12 @@ import {
   type ReasoningEffort,
   type WorkerModel,
 } from "./experience-profile";
+import {
+  ArtifactRegistry,
+  publishArtifactShelf,
+  type ArtifactRoute,
+  type ArtifactShelf,
+} from "./artifacts";
 
 async function main(): Promise<number> {
   const environmentPath =
@@ -269,6 +276,13 @@ async function main(): Promise<number> {
         chatOption,
         threadOption,
         source,
+        json,
+      );
+    }
+    if (command === "artifact" || command === "share") {
+      return await artifactCommand(
+        command === "share" ? ["add", ...args] : args,
+        bridge,
         json,
       );
     }
@@ -864,6 +878,162 @@ function readStdin(): string {
   return readFileSync(0, "utf8").trim();
 }
 
+async function artifactCommand(
+  args: string[],
+  bridge: CodexBridgeClient,
+  json: boolean,
+): Promise<number> {
+  const action = args.shift() ?? "list";
+  const chatOption = takeOption(args, "--chat");
+  const threadOption = takeOption(args, "--thread");
+  const explicitSessionId = takeOption(args, "--session");
+  const source = chatOption ? null : await resolveCurrentTarget(bridge);
+  const target = loadTelegramDeliveryTarget(
+    chatOption,
+    threadOption,
+    source,
+  );
+  const route: ArtifactRoute = {
+    chatId: target.chatId,
+    ownerUserId: target.ownerUserId,
+    messageThreadId: target.messageThreadId,
+    sessionId:
+      explicitSessionId ??
+      await resolveArtifactSessionId(bridge, source) ??
+      `telegram:${target.chatId}:${target.messageThreadId}`,
+  };
+  const registry = new ArtifactRegistry(artifactDatabasePath());
+  try {
+    if (action === "list") {
+      if (args.length > 0) return usage("artifact list takes no arguments");
+      return outputArtifactResult({
+        ok: true,
+        configured: artifactPublisherConfigured(),
+        shelf: registry.shelfForRoute(route),
+      }, json);
+    }
+    if (action === "link" || action === "sync") {
+      if (args.length > 0) return usage(`artifact ${action} takes no arguments`);
+      const shelf = registry.shelfForRoute(route);
+      if (!shelf) return usage("this session does not have any artifacts yet");
+      return outputArtifactResult({
+        ok: true,
+        shelf,
+        published: await publishConfiguredShelf(shelf),
+      }, json);
+    }
+    if (action !== "add") {
+      return usage("artifact requires add, list, link, or sync");
+    }
+
+    const input = args.shift();
+    if (!input) return usage("artifact add requires a local FILE or HTTPS URL");
+    const titleOption = takeOption(args, "--title");
+    const kindOption = takeOption(args, "--kind");
+    const deployedUrl = takeOption(args, "--url");
+    const previewUrl = takeOption(args, "--preview");
+    const metadataOption = takeOption(args, "--metadata");
+    const noDeliver = removeFlag(args, "--no-deliver");
+    const caption = args.join(" ").trim();
+    const remote = looksLikeUrl(input);
+    if (remote && deployedUrl) {
+      return usage("--url is only needed when SOURCE is a local file");
+    }
+
+    let title: string;
+    let kind: string;
+    let url: string | undefined;
+    let telegramMessageId: number | undefined;
+    if (remote) {
+      const parsed = new URL(input);
+      title = titleOption?.trim() || parsed.hostname;
+      kind = kindOption?.trim() || "web";
+      url = input;
+      if (!noDeliver) {
+        const sent = await tgSend(
+          target.env,
+          target.chatId,
+          caption
+            ? `<b>${escapeTelegramHtml(title)}</b>\n${escapeTelegramHtml(caption)}`
+            : `<b>${escapeTelegramHtml(title)}</b>`,
+          undefined,
+          {
+            inline_keyboard: [[{
+              text: "Open artifact",
+              url,
+            }]],
+          },
+          target.messageThreadId || undefined,
+        );
+        if (!sent.ok) throw new Error("Telegram rejected the artifact link");
+        telegramMessageId = sent.result.message_id;
+      }
+    } else {
+      const filePath = path.resolve(input);
+      const stats = statSync(filePath);
+      if (!stats.isFile()) return usage("SOURCE must be a regular file or URL");
+      const fileName = path.basename(filePath);
+      title = titleOption?.trim() || fileName;
+      kind = kindOption?.trim() ||
+        path.extname(fileName).slice(1).toLowerCase() ||
+        "file";
+      url = deployedUrl;
+      if (!noDeliver) {
+        const delivered = await sendTelegramMedia(
+          isInlineImage(fileName) ? "send-image" : "send-file",
+          filePath,
+          caption || title,
+          target,
+        );
+        telegramMessageId = delivered.messageId;
+      }
+    }
+
+    const shelf = registry.add(route, {
+      title,
+      kind,
+      ...(url ? { url } : {}),
+      ...(previewUrl ? { previewUrl } : {}),
+      ...(telegramMessageId ? { telegramMessageId } : {}),
+      metadata: parseArtifactMetadata(metadataOption),
+    });
+    let published = await publishConfiguredShelf(shelf);
+    if (published.ok && !published.launchUrl) {
+      const launchUrl = await telegramMiniAppLaunchUrl(target.env, shelf.id);
+      if (launchUrl) published = { ...published, launchUrl };
+    }
+    if (
+      !noDeliver &&
+      shelf.artifacts.length === 1 &&
+      published.ok &&
+      published.launchUrl
+    ) {
+      await tgSend(
+        target.env,
+        target.chatId,
+        `Shelf updated · ${escapeTelegramHtml(title)}`,
+        undefined,
+        {
+          inline_keyboard: [[{
+            text: "Open artifact shelf",
+            url: published.launchUrl,
+          }]],
+        },
+        target.messageThreadId || undefined,
+      );
+    }
+    return outputArtifactResult({
+      ok: true,
+      added: shelf.artifacts.at(-1),
+      shelf,
+      published,
+      delivered: telegramMessageId !== undefined,
+    }, json);
+  } finally {
+    registry.close();
+  }
+}
+
 async function deliverTelegramMedia(
   command: "send-image" | "send-file",
   inputPath: string,
@@ -873,24 +1043,61 @@ async function deliverTelegramMedia(
   source: CodexPaneIdentity | null,
   json: boolean,
 ): Promise<number> {
+  const target = loadTelegramDeliveryTarget(
+    chatOption,
+    threadOption,
+    source,
+  );
+  const delivered = await sendTelegramMedia(
+    command,
+    inputPath,
+    caption,
+    target,
+  );
+  if (json) {
+    process.stdout.write(
+      `${JSON.stringify({
+        ok: true,
+        delivered: true,
+        chatId: target.chatId,
+        messageThreadId: target.messageThreadId,
+        messageId: delivered.messageId,
+        file: delivered.file,
+      })}\n`,
+    );
+  } else {
+    process.stdout.write(
+      `Delivered ${delivered.fileName} to Telegram ` +
+        `(message ${delivered.messageId}).\n`,
+    );
+  }
+  return 0;
+}
+
+async function sendTelegramMedia(
+  command: "send-image" | "send-file",
+  inputPath: string,
+  caption: string,
+  target: ReturnType<typeof loadTelegramDeliveryTarget>,
+): Promise<{
+  readonly messageId: number;
+  readonly file: string;
+  readonly fileName: string;
+}> {
   const filePath = path.resolve(inputPath);
   const stats = statSync(filePath);
-  if (!stats.isFile()) return usage("FILE must be a regular file");
+  if (!stats.isFile()) throw new Error("FILE must be a regular file");
   const maxBytes =
     command === "send-image" ? 10 * 1024 * 1024 : 49 * 1024 * 1024;
   if (stats.size < 1 || stats.size > maxBytes) {
-    return usage(
+    throw new Error(
       command === "send-image"
         ? "send-image accepts files up to 10 MB"
         : "send-file accepts files up to 49 MB",
     );
   }
 
-  const { env, chatId, messageThreadId } = loadTelegramDeliveryTarget(
-    chatOption,
-    threadOption,
-    source,
-  );
+  const { env, chatId, messageThreadId } = target;
   const fileName = path.basename(filePath);
   const bytes = readFileSync(filePath);
   const safeCaption = caption
@@ -920,23 +1127,11 @@ async function deliverTelegramMedia(
   if (!response.ok) {
     throw new Error("Telegram rejected the media delivery");
   }
-  if (json) {
-    process.stdout.write(
-      `${JSON.stringify({
-        ok: true,
-        delivered: true,
-        chatId,
-        messageThreadId,
-        messageId: response.result.message_id,
-        file: filePath,
-      })}\n`,
-    );
-  } else {
-    process.stdout.write(
-      `Delivered ${fileName} to Telegram (message ${response.result.message_id}).\n`,
-    );
-  }
-  return 0;
+  return {
+    messageId: response.result.message_id,
+    file: filePath,
+    fileName,
+  };
 }
 
 function loadTelegramDeliveryTarget(
@@ -946,6 +1141,7 @@ function loadTelegramDeliveryTarget(
 ): {
   readonly env: BotEnv;
   readonly chatId: number;
+  readonly ownerUserId: number;
   readonly messageThreadId: number;
 } {
   const secretsPath =
@@ -983,7 +1179,19 @@ function loadTelegramDeliveryTarget(
   if (!Number.isSafeInteger(messageThreadId) || messageThreadId < 0) {
     throw new Error("Telegram message thread id is invalid");
   }
-  return { env: { TG_BOT_TOKEN: token }, chatId, messageThreadId };
+  const rawOwner = process.env.TG_ALLOWED_USER_IDS?.split(",")
+    .map((value) => value.trim())
+    .find((value) => /^[1-9]\d*$/u.test(value));
+  const ownerUserId = Number(rawOwner);
+  if (!Number.isSafeInteger(ownerUserId) || ownerUserId < 1) {
+    throw new Error("No valid Telegram owner is configured");
+  }
+  return {
+    env: { TG_BOT_TOKEN: token },
+    chatId,
+    ownerUserId,
+    messageThreadId,
+  };
 }
 
 function attachedTelegramRoute(
@@ -1087,6 +1295,170 @@ function isPaneIdentityLike(value: unknown): value is CodexPaneIdentity {
     Number(target.panePid) > 0;
 }
 
+async function resolveArtifactSessionId(
+  bridge: CodexBridgeClient,
+  source: CodexPaneIdentity | null,
+): Promise<string | null> {
+  const environmentThreadId = process.env.CODEX_THREAD_ID?.trim();
+  if (environmentThreadId) return environmentThreadId;
+  if (!source) return null;
+  const response = await bridge.request({ op: "list" });
+  if (!response.ok || !("panes" in response)) return null;
+  return response.panes.find(
+    (pane) =>
+      pane.serverPid === source.serverPid &&
+      pane.paneId === source.paneId &&
+      pane.panePid === source.panePid,
+  )?.sessionId ?? null;
+}
+
+function artifactDatabasePath(): string {
+  return path.resolve(
+    process.env.CHATINABOX_ARTIFACT_DB?.trim() ||
+      "/var/lib/chatinabox-bridge/artifacts.sqlite",
+  );
+}
+
+function artifactPublisherConfigured(): boolean {
+  return Boolean(
+    process.env.CHATINABOX_ARTIFACTS_API_URL?.trim() &&
+    process.env.CHATINABOX_ARTIFACTS_API_TOKEN?.trim(),
+  );
+}
+
+async function publishConfiguredShelf(shelf: ArtifactShelf): Promise<
+  | {
+      readonly ok: true;
+      readonly configured: true;
+      readonly shelfUrl?: string;
+      readonly launchUrl?: string;
+    }
+  | {
+      readonly ok: false;
+      readonly configured: false;
+      readonly reason: string;
+    }
+> {
+  const apiUrl = process.env.CHATINABOX_ARTIFACTS_API_URL?.trim();
+  const apiToken = process.env.CHATINABOX_ARTIFACTS_API_TOKEN?.trim();
+  if (!apiUrl && !apiToken) {
+    return {
+      ok: false,
+      configured: false,
+      reason: "native delivery only; no artifact shelf publisher configured",
+    };
+  }
+  if (!apiUrl || !apiToken) {
+    throw new Error(
+      "Configure both CHATINABOX_ARTIFACTS_API_URL and " +
+        "CHATINABOX_ARTIFACTS_API_TOKEN",
+    );
+  }
+  const published = await publishArtifactShelf(shelf, {
+    apiUrl,
+    apiToken,
+  });
+  return { ...published, configured: true };
+}
+
+async function telegramMiniAppLaunchUrl(
+  env: BotEnv,
+  shelfId: string,
+): Promise<string | null> {
+  const response = await fetch(
+    `https://api.telegram.org/bot${env.TG_BOT_TOKEN}/getMe`,
+    { signal: AbortSignal.timeout(5_000) },
+  ).catch(() => null);
+  if (!response?.ok) return null;
+  const body = await response.json().catch(() => null) as {
+    ok?: boolean;
+    result?: { username?: unknown };
+  } | null;
+  const username = body?.result?.username;
+  if (
+    body?.ok !== true ||
+    typeof username !== "string" ||
+    !/^[A-Za-z0-9_]{5,32}$/u.test(username)
+  ) {
+    return null;
+  }
+  const launchUrl = new URL(`https://t.me/${username}`);
+  launchUrl.searchParams.set("startapp", shelfId);
+  return launchUrl.href;
+}
+
+function looksLikeUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function isInlineImage(fileName: string): boolean {
+  return [".png", ".jpg", ".jpeg", ".webp"].includes(
+    path.extname(fileName).toLowerCase(),
+  );
+}
+
+function parseArtifactMetadata(
+  value: string | undefined,
+): Readonly<Record<string, unknown>> {
+  if (!value) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new Error("--metadata requires a JSON object");
+  }
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    Array.isArray(parsed)
+  ) {
+    throw new Error("--metadata requires a JSON object");
+  }
+  return parsed as Readonly<Record<string, unknown>>;
+}
+
+function outputArtifactResult(
+  result: Readonly<Record<string, unknown>>,
+  json: boolean,
+): number {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return result.ok === true ? 0 : 1;
+  }
+  if (result.ok !== true) {
+    process.stderr.write("chatinabox: artifact operation failed\n");
+    return 1;
+  }
+  const shelf = result.shelf as ArtifactShelf | null | undefined;
+  const published = result.published as {
+    ok?: boolean;
+    launchUrl?: string;
+    reason?: string;
+  } | undefined;
+  if (result.added) {
+    process.stdout.write(
+      `Added artifact to this session (${shelf?.artifacts.length ?? 1} total).\n`,
+    );
+  } else if (shelf) {
+    process.stdout.write(
+      `${shelf.artifacts.length} artifact` +
+        `${shelf.artifacts.length === 1 ? "" : "s"} in this session.\n`,
+    );
+  } else {
+    process.stdout.write("No artifacts in this session.\n");
+  }
+  if (published?.ok && published.launchUrl) {
+    process.stdout.write(`${published.launchUrl}\n`);
+  } else if (published?.reason) {
+    process.stdout.write(`${published.reason}\n`);
+  }
+  return 0;
+}
+
 function imageMimeType(fileName: string): string {
   const extension = path.extname(fileName).toLowerCase();
   if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
@@ -1166,6 +1538,10 @@ Commands:
   screen TARGET --output FILE  Capture the current terminal as PNG
   send-image FILE [CAPTION]    Send an inline image to the attached topic
   send-file FILE [CAPTION]     Send a local file to the attached topic
+  share SOURCE [CAPTION]       Deliver and register a session artifact
+  artifact add SOURCE [OPTS]   Register a file or deployed HTTPS artifact
+  artifact list                List artifacts made in this session
+  artifact link|sync           Publish and print this session's shelf link
   profile show                 Show the private experience profile
   profile set [OPTIONS]        Update names, symbols, defaults, or setup state
   profile sync                 Reapply bot and forum identity to Telegram
@@ -1178,6 +1554,11 @@ New-session options: --cwd PATH, --model sol|luna|terra,
 Media commands prefer this worker's attached Telegram topic, then the latest
 attachment, configured chat, and sole allowed user. Override with --chat ID
 and optional --thread ID.
+Artifact SOURCE may be a local file or any deployed HTTPS URL. Options:
+  --title TEXT, --kind TEXT, --url DEPLOYED_URL, --preview URL,
+  --metadata JSON, --no-deliver, --chat ID, --thread ID, --session ID.
+Chatinabox records navigation only; agents remain free to build and deploy
+artifacts through any suitable tool or hosting route.
 Profile options include --assistant-name, --assistant-mark, --assistant-photo,
   --overview-name, --overview-emoji, --group-name, --group-photo,
   --manager-name, --manager-emoji, --manager-role,

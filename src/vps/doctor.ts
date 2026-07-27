@@ -218,6 +218,10 @@ async function main(): Promise<void> {
       hint: "Re-run the installer to clear the webhook.",
     });
   }
+  checks.push(await artifactPublisherCheck(
+    process.env.CHATINABOX_ARTIFACTS_API_URL,
+    process.env.CHATINABOX_ARTIFACTS_API_TOKEN,
+  ));
 
   const failed = checks.filter((check) => !check.ok && check.required !== false);
   const warnings = checks.filter((check) =>
@@ -428,6 +432,76 @@ async function telegramCall<T>(
     ok?: boolean;
     result?: T;
   }>).catch(() => null);
+}
+
+async function artifactPublisherCheck(
+  configuredUrl: string | undefined,
+  configuredToken: string | undefined,
+): Promise<Check> {
+  const apiUrl = configuredUrl?.trim();
+  const apiToken = configuredToken?.trim();
+  if (!apiUrl && !apiToken) {
+    return {
+      ok: false,
+      required: false,
+      label: "Artifact shelf",
+      detail: "native sharing enabled; session shelf publisher not configured",
+      hint:
+        "Optional: configure CHATINABOX_ARTIFACTS_API_URL and " +
+        "CHATINABOX_ARTIFACTS_API_TOKEN.",
+    };
+  }
+  if (!apiUrl || !apiToken) {
+    return {
+      ok: false,
+      required: false,
+      label: "Artifact shelf",
+      detail: "publisher configuration is incomplete",
+      hint:
+        "Set both CHATINABOX_ARTIFACTS_API_URL and " +
+        "CHATINABOX_ARTIFACTS_API_TOKEN, or remove both.",
+    };
+  }
+  let healthUrl: URL;
+  try {
+    const base = new URL(apiUrl.endsWith("/") ? apiUrl : `${apiUrl}/`);
+    if (base.protocol !== "https:") throw new Error("HTTPS required");
+    healthUrl = new URL("v1/health", base);
+  } catch {
+    return {
+      ok: false,
+      required: false,
+      label: "Artifact shelf",
+      detail: "publisher URL is not a valid HTTPS URL",
+      hint: "Set CHATINABOX_ARTIFACTS_API_URL to the publisher API root.",
+    };
+  }
+  try {
+    const response = await fetch(healthUrl, {
+      headers: { authorization: `Bearer ${apiToken}` },
+      signal: AbortSignal.timeout(5_000),
+    });
+    const body = await response.json().catch(() => null) as {
+      ok?: boolean;
+    } | null;
+    return {
+      ok: response.ok && body?.ok === true,
+      required: false,
+      label: "Artifact shelf",
+      detail: response.ok && body?.ok === true
+        ? `publisher responding at ${healthUrl.origin}`
+        : `publisher health rejected (${response.status})`,
+      hint: "Check the artifact publisher URL, token, and service logs.",
+    };
+  } catch {
+    return {
+      ok: false,
+      required: false,
+      label: "Artifact shelf",
+      detail: `publisher unavailable at ${healthUrl.origin}`,
+      hint: "Check the artifact publisher URL, TLS, firewall, and service.",
+    };
+  }
 }
 
 void main();

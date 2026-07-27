@@ -5,6 +5,15 @@ import {
 
 const APP_SERVER_REQUEST_TIMEOUT_MS = 12_000;
 const APP_SERVER_EXIT_TIMEOUT_MS = 1_000;
+const APP_SERVER_ARGS = [
+  "-c",
+  "mcp_servers.interactive-shell.enabled=false",
+  "-c",
+  "mcp_servers.mimic-local.enabled=false",
+  "-c",
+  "mcp_servers.openaiDeveloperDocs.enabled=false",
+  "app-server",
+] as const;
 const GOAL_STATUSES = new Set<CodexGoalStatus>([
   "active",
   "paused",
@@ -133,10 +142,15 @@ export class CodexAppServerGoalClient {
   private async withConnection<T>(
     work: (connection: AppServerConnection) => Promise<T>,
   ): Promise<T> {
-    const child = spawn(this.codexPath, ["app-server"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
-    });
+    const child = spawn(
+      this.codexPath,
+      APP_SERVER_ARGS,
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: process.env,
+        detached: process.platform !== "win32",
+      },
+    );
     const connection = new AppServerConnection(child);
     try {
       await connection.initialize();
@@ -218,11 +232,11 @@ class AppServerConnection {
     this.closed = true;
     this.failAll(new Error("Codex app-server connection closed"));
     if (this.child.exitCode !== null || this.child.signalCode !== null) return;
-    this.child.kill("SIGTERM");
+    this.killChildTree("SIGTERM");
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         if (this.child.exitCode === null && this.child.signalCode === null) {
-          this.child.kill("SIGKILL");
+          this.killChildTree("SIGKILL");
         }
         resolve();
       }, APP_SERVER_EXIT_TIMEOUT_MS);
@@ -232,6 +246,18 @@ class AppServerConnection {
         resolve();
       });
     });
+  }
+
+  private killChildTree(signal: NodeJS.Signals): void {
+    if (process.platform !== "win32" && this.child.pid) {
+      try {
+        process.kill(-this.child.pid, signal);
+        return;
+      } catch {
+        // Fall through when the process group has already exited.
+      }
+    }
+    this.child.kill(signal);
   }
 
   private write(value: unknown): void {
