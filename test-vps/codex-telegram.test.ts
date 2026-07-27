@@ -936,7 +936,8 @@ describe("Codex Telegram attachments", () => {
     await controller.refreshStaleTransientTimersOnce();
     expect(calls).toHaveLength(1);
     expect(calls[0]?.method).toBe("editMessageText");
-    expect(JSON.stringify(calls[0]?.body)).toContain("15s since update");
+    expect(JSON.stringify(calls[0]?.body)).toContain("1m 15s");
+    expect(JSON.stringify(calls[0]?.body)).not.toContain("since update");
     expect(store.codexStatus(-10042, 42, pane)?.updated_at)
       .toBe(actualUpdatedAt);
 
@@ -947,7 +948,7 @@ describe("Codex Telegram attachments", () => {
     now += 10_000;
     await controller.refreshStaleTransientTimersOnce();
     expect(calls).toHaveLength(2);
-    expect(JSON.stringify(calls[1]?.body)).toContain("30s since update");
+    expect(JSON.stringify(calls[1]?.body)).toContain("1m 30s");
     store.close();
   });
 

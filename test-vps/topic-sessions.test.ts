@@ -363,7 +363,103 @@ describe("Topic session setup", () => {
     store.close();
   });
 
-  it("shows an idle manager as done without closing its persistent worker", async () => {
+  it("clears a stale transient when the worker is already idle", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-stale-presence-"));
+    roots.push(root);
+    let now = 1_000;
+    const store = new ChatinaboxStore(
+      path.join(root, "state.sqlite"),
+      () => now,
+    );
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "review",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: false,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+    };
+    store.attachCodex(-10042, 42, pane, 7);
+    store.setCodexStatus(-10042, 42, pane, 700, {
+      statusKind: "state_working",
+      toolCalls: 0,
+      editedFiles: 0,
+      exploredThings: 0,
+      activeShells: 0,
+      queuedMessages: 0,
+      replyToMessageId: 650,
+      startedAt: now,
+    });
+    const calls: Array<{
+      method: string;
+      body: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("getForumTopicIconStickers")) {
+        return {
+          json: async () => ({
+            ok: true,
+            result: [
+              { emoji: "🧪", custom_emoji_id: "working-id" },
+              { emoji: "✅", custom_emoji_id: "done-id" },
+              { emoji: "📁", custom_emoji_id: "closed-id" },
+            ],
+          }),
+        };
+      }
+      calls.push({
+        method: url.split("/").pop() ?? "",
+        body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+      });
+      return { json: async () => ({ ok: true, result: true }) };
+    }));
+    const controller = new TopicSessionController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: "/root",
+      },
+      store,
+      bridge: {
+        request: vi.fn(async () => ({
+          ok: true,
+          panes: [pane],
+          recent: [],
+          totalSessions: 1,
+          usage: null,
+        })),
+      } as never,
+      now: () => now,
+    });
+
+    now += 30_000;
+    await controller.refreshPresence();
+
+    expect(store.codexStatus(-10042, 42, pane)).toBeNull();
+    expect(calls).toContainEqual({
+      method: "deleteMessage",
+      body: { chat_id: -10042, message_id: 700 },
+    });
+    expect(calls).toContainEqual({
+      method: "editForumTopic",
+      body: {
+        chat_id: -10042,
+        message_thread_id: 7,
+        icon_custom_emoji_id: "done-id",
+      },
+    });
+    expect(store.topicSetup(-10042, 42, 7)?.last_icon_status).toBe("done");
+    store.close();
+  });
+
+  it("leaves the persistent manager topic icon outside worker presence states", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-manager-presence-"));
     roots.push(root);
     let now = 1_000;
@@ -433,8 +529,8 @@ describe("Topic session setup", () => {
     });
 
     await controller.refreshPresence();
-    expect(iconEdits.at(-1)?.icon_custom_emoji_id).toBe("done-id");
-    expect(store.topicSetup(-10042, 42, 7)?.last_icon_status).toBe("done");
+    expect(iconEdits).toHaveLength(0);
+    expect(store.topicSetup(-10042, 42, 7)).toBeNull();
 
     now += 31 * 60 * 1_000;
     await controller.refreshPresence();

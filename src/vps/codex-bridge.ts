@@ -163,6 +163,7 @@ export class CodexBridge {
   private readonly server: net.Server;
   private mirrorTimer: NodeJS.Timeout | null = null;
   private mirrorRunning = false;
+  private closing = false;
   private readonly managedStartupRecoveries =
     new Map<string, Promise<boolean>>();
   private usageCache:
@@ -323,9 +324,13 @@ export class CodexBridge {
   }
 
   async close(): Promise<void> {
+    this.closing = true;
     if (this.mirrorTimer) clearInterval(this.mirrorTimer);
     this.mirrorTimer = null;
     await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    while (this.mirrorRunning) {
+      await delay(25);
+    }
     this.db.close();
     rmSync(this.options.socketPath, { force: true });
   }
@@ -2172,7 +2177,7 @@ export class CodexBridge {
   }
 
   private async mirrorTranscriptsOnce(): Promise<void> {
-    if (this.mirrorRunning) return;
+    if (this.closing || this.mirrorRunning) return;
     this.mirrorRunning = true;
     try {
       const bindings = this.db.prepare(`

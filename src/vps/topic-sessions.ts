@@ -100,8 +100,9 @@ export class TopicSessionController {
         continue;
       }
       const manager = this.dependencies.store.managerTopic(attachment.chat_id);
-      const isManagerTopic =
-        manager?.message_thread_id === attachment.message_thread_id;
+      if (manager?.message_thread_id === attachment.message_thread_id) {
+        continue;
+      }
       const pane = panes.find((candidate) =>
         samePaneIdentity(candidate, {
           serverPid: attachment.server_pid,
@@ -109,21 +110,42 @@ export class TopicSessionController {
           panePid: attachment.pane_pid,
         })
       );
-      const activeTurn =
-        this.dependencies.store.codexStatus(
-          attachment.chat_id,
-          attachment.owner_user_id,
-          {
-            serverPid: attachment.server_pid,
-            paneId: attachment.pane_id,
-            panePid: attachment.pane_pid,
-          },
-        ) !== null;
+      const target = {
+        serverPid: attachment.server_pid,
+        paneId: attachment.pane_id,
+        panePid: attachment.pane_pid,
+      };
+      let activeStatus = this.dependencies.store.codexStatus(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        target,
+      );
       const activeGoal = this.dependencies.store.hasActiveCodexGoal(
         attachment.chat_id,
         attachment.owner_user_id,
         attachment.message_thread_id,
       );
+      if (
+        activeStatus &&
+        pane?.busy !== true &&
+        !activeGoal &&
+        this.now() - activeStatus.updated_at >= TOPIC_PRESENCE_POLL_MS
+      ) {
+        const stale = this.dependencies.store.clearCodexStatus(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          target,
+        );
+        activeStatus = null;
+        if (stale) {
+          await tgDeleteMessage(
+            this.dependencies.env,
+            attachment.chat_id,
+            stale.telegram_message_id,
+          ).catch(() => undefined);
+        }
+      }
+      const activeTurn = activeStatus !== null;
       let row = this.dependencies.store.ensureTopicSetup(
         attachment.chat_id,
         attachment.owner_user_id,
@@ -173,7 +195,6 @@ export class TopicSessionController {
       const idleCloseMs =
         this.profile().sessions.idleCloseMinutes * 60 * 1_000;
       if (
-        !isManagerTopic &&
         idleCloseMs > 0 &&
         this.now() - row.idle_since >= idleCloseMs
       ) {

@@ -3573,7 +3573,6 @@ function mergeTransientStatus(
     replyToMessageId:
       replyToMessageId ?? existing?.reply_to_message_id ?? null,
     startedAt,
-    lastUpdateAt: now,
   };
 }
 
@@ -3663,19 +3662,11 @@ export function formatCodexTransientRichHtml(
       ? "<p><mark>■ interrupt requested</mark></p>"
       : snapshot.statusKind === "state_interrupted"
         ? "<p><mark>■ task interrupted</mark></p>"
-        : snapshot.lastUpdateAt !== undefined
-          ? `<p><mark>${escapeTelegramHtml(
-            assistantIdentity(profile),
-          )} is working · ${
-            formatCompactDuration(
-              Math.max(0, now - snapshot.lastUpdateAt),
-            )
-          } since update…</mark></p>`
-          : `<p><mark>${escapeTelegramHtml(
-            assistantIdentity(profile),
-          )} is working for ${
-            formatCompactDuration(Math.max(0, now - snapshot.startedAt))
-          }…</mark></p>`;
+        : `<p><mark>${escapeTelegramHtml(
+          assistantIdentity(profile),
+        )} is working for ${
+          formatCompactDuration(Math.max(0, now - snapshot.startedAt))
+        }…</mark></p>`;
   const goalSection = goal
     ? `<blockquote><b>🎯 ${escapeTelegramHtml(goalStatusLabel(goal.status))}</b>` +
       `<br/>${escapeTelegramHtml(truncateVisible(goal.objective, 700))}` +
@@ -4328,7 +4319,6 @@ function statusSnapshotFromRow(
     queuedMessages: row.queued_messages,
     replyToMessageId,
     startedAt: row.started_at,
-    lastUpdateAt: row.updated_at,
   };
 }
 
