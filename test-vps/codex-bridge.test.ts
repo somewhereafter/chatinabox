@@ -281,6 +281,72 @@ describe("Codex bridge", () => {
     });
   });
 
+  it("caches automatic usage reads and lets an explicit refresh bypass them", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-usage-"));
+    const databasePath = path.join(directory, "bridge.sqlite");
+    const transcriptPath = path.join(directory, "usage.jsonl");
+    const bridge = new CodexBridge({
+      socketPath: path.join(directory, "bridge.sock"),
+      databasePath,
+    });
+    const usageLine = (usedPercent: number, timestamp: string) => line({
+      timestamp,
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        rate_limits: {
+          limit_id: "codex",
+          primary: {
+            used_percent: usedPercent,
+            window_minutes: 10080,
+            resets_at: 1785611896,
+          },
+          secondary: null,
+          credits: { balance: "5000" },
+          plan_type: "pro",
+        },
+      },
+    });
+    try {
+      writeFileSync(
+        transcriptPath,
+        usageLine(20, "2026-07-27T17:00:00.000Z"),
+      );
+      const db = new DatabaseSync(databasePath);
+      db.prepare(`
+        INSERT INTO transcript_bindings (
+          server_pid, pane_id, pane_pid, session_id, transcript_path,
+          cursor, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, ?)
+      `).run(100, "%4", 200, "usage-session", transcriptPath, Date.now());
+      db.close();
+
+      const first = await bridge.dispatch({ op: "list" });
+      expect(first).toMatchObject({
+        ok: true,
+        usage: { limits: [{ usedPercent: 20 }] },
+      });
+
+      writeFileSync(
+        transcriptPath,
+        usageLine(45, "2026-07-27T17:01:00.000Z"),
+      );
+      await expect(bridge.dispatch({ op: "list" })).resolves.toMatchObject({
+        ok: true,
+        usage: { limits: [{ usedPercent: 20 }] },
+      });
+      await expect(
+        bridge.dispatch({ op: "list", refreshUsage: true }),
+      ).resolves.toMatchObject({
+        ok: true,
+        usage: { limits: [{ usedPercent: 45 }] },
+      });
+    } finally {
+      await bridge.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("reads current context occupancy from the latest token count", () => {
     const contents = line({
       type: "event_msg",
@@ -343,7 +409,8 @@ describe("Codex bridge", () => {
       fast: false,
     });
     expect(worker).toContain(`service_tier="default"`);
-    expect(worker).toContain("--disable fast_mode");
+    expect(worker).toContain("--enable fast_mode");
+    expect(worker).not.toContain("--disable fast_mode");
     expect(worker).not.toContain("trust_level");
     const managedWorker = workerCodexCommand({
       model: "sol",

@@ -261,6 +261,22 @@ export async function tgEditRichHtml(
   });
 }
 
+/** Edit an existing Telegram Rich Message from Markdown (Bot API 10.2+). */
+export async function tgEditRichMarkdown(
+  env: BotEnv,
+  chatId: number,
+  messageId: number,
+  markdown: string,
+  replyMarkup?: TelegramInlineKeyboardMarkup,
+) {
+  return tgCall(env, "editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    rich_message: { markdown },
+    ...(replyMarkup && { reply_markup: replyMarkup }),
+  });
+}
+
 /** Edit the caption on an existing bot-sent media message. */
 export async function tgEditMessageCaption(
   env: BotEnv,

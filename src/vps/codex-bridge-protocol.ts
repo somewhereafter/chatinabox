@@ -113,7 +113,7 @@ export interface CodexGoalObservation {
 
 export type CodexBridgeRequest =
   | { readonly op: "ping" }
-  | { readonly op: "list" }
+  | { readonly op: "list"; readonly refreshUsage?: boolean }
   | { readonly op: "workspaces" }
   | {
       readonly op: "send";

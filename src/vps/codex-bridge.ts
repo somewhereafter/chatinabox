@@ -384,7 +384,7 @@ export class CodexBridge {
           panes: await this.listCodexPanes(),
           recent: savedSessions.slice(0, 8),
           totalSessions: savedSessions.length,
-          usage: await this.latestCodexUsage(),
+          usage: await this.latestCodexUsage(request.refreshUsage === true),
         };
         }
       case "workspaces":
@@ -1405,9 +1405,15 @@ export class CodexBridge {
     }
   }
 
-  private async latestCodexUsage(): Promise<CodexUsage | null> {
+  private async latestCodexUsage(
+    forceRefresh = false,
+  ): Promise<CodexUsage | null> {
     const now = Date.now();
-    if (this.usageCache && now - this.usageCache.cachedAt < 10_000) {
+    if (
+      !forceRefresh &&
+      this.usageCache &&
+      now - this.usageCache.cachedAt < 3 * 60 * 1_000
+    ) {
       return this.usageCache.value;
     }
     const rows = this.db.prepare(`
@@ -3679,7 +3685,7 @@ export function fullAccessCodexCommand(): string {
     `-c 'hide_agent_reasoning=false' ` +
     `-c 'show_raw_agent_reasoning=false' ` +
     `-c 'service_tier="default"' ` +
-    "--disable fast_mode --enable hooks"
+    "--enable fast_mode --enable hooks"
   );
 }
 

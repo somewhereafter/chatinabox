@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { mkdtempSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { describe, expect, it, vi } from "vitest";
 import {
   formatOverviewDashboard,
+  OverviewController,
   overviewThreadId,
   overviewRenderSignature,
   overviewStatsFromBridge,
@@ -9,6 +13,7 @@ import {
   DEFAULT_EXPERIENCE_PROFILE,
   patchExperienceProfile,
 } from "../src/vps/experience-profile";
+import { ChatinaboxStore } from "../src/vps/store";
 
 const customProfile = patchExperienceProfile(DEFAULT_EXPERIENCE_PROFILE, {
   setupComplete: true,
@@ -145,6 +150,69 @@ describe("Overview dashboard", () => {
       "<blockquote><b>✓ complete</b> · Review<br/>",
     );
     expect(card).not.toContain("<p><b>✓ Review</b>");
+  });
+
+  it("caps automatic renders at thirty seconds and forces manual usage refresh", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-overview-"));
+    let now = 1_800_000_000_000;
+    const store = new ChatinaboxStore(
+      path.join(root, "state.sqlite"),
+      () => now,
+    );
+    const bridge = {
+      request: vi.fn(async () => ({
+        ok: true as const,
+        totalSessions: 2,
+        recent: [],
+        usage: null,
+        panes: [pane("Build", "Sol", true)],
+      })),
+    };
+    const fetchMock = vi.fn(async () => ({
+      json: async () => ({ ok: true, result: true }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      store.registerOverview(-10042, 42, 7);
+      store.setOverviewDashboardMessage(-10042, 900, "old");
+      const controller = new OverviewController({
+        env: {
+          TG_BOT_TOKEN: "test-token",
+          TG_ALLOWED_USER_IDS: "42",
+          DATA_DIR: root,
+          CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+          DEFAULT_CWD: root,
+        },
+        store,
+        bridge,
+        now: () => now,
+      });
+      const refresh = (
+        controller as unknown as {
+          refreshDashboard(chatId: number, force: boolean): Promise<void>;
+        }
+      ).refreshDashboard.bind(controller);
+
+      now += 10_000;
+      await refresh(-10042, false);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      now += 20_000;
+      await refresh(-10042, false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      now += 1_000;
+      await refresh(-10042, true);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(bridge.request).toHaveBeenLastCalledWith({
+        op: "list",
+        refreshUsage: true,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 
