@@ -5,6 +5,15 @@ import {
 
 const APP_SERVER_REQUEST_TIMEOUT_MS = 12_000;
 const APP_SERVER_EXIT_TIMEOUT_MS = 1_000;
+const APP_SERVER_ARGS = [
+  "-c",
+  "mcp_servers.interactive-shell.enabled=false",
+  "-c",
+  "mcp_servers.mimic-local.enabled=false",
+  "-c",
+  "mcp_servers.openaiDeveloperDocs.enabled=false",
+  "app-server",
+] as const;
 const GOAL_STATUSES = new Set<CodexGoalStatus>([
   "active",
   "paused",
@@ -133,11 +142,15 @@ export class CodexAppServerGoalClient {
   private async withConnection<T>(
     work: (connection: AppServerConnection) => Promise<T>,
   ): Promise<T> {
-    const child = spawn(this.codexPath, ["app-server"], {
-      stdio: ["pipe", "pipe", "pipe"],
-      env: process.env,
-      detached: process.platform !== "win32",
-    });
+    const child = spawn(
+      this.codexPath,
+      APP_SERVER_ARGS,
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: process.env,
+        detached: process.platform !== "win32",
+      },
+    );
     const connection = new AppServerConnection(child);
     try {
       await connection.initialize();
