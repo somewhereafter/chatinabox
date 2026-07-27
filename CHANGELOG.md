@@ -4,6 +4,10 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.2.1 — 2026-07-27
+
+- Updated the README hero artwork revision label for the 2.2 release.
+
 ## 2.2.0 — 2026-07-27
 
 - Auto-forwarded completed Codex image generations to the Telegram topic that
