@@ -136,6 +136,7 @@ export class CodexAppServerGoalClient {
     const child = spawn(this.codexPath, ["app-server"], {
       stdio: ["pipe", "pipe", "pipe"],
       env: process.env,
+      detached: process.platform !== "win32",
     });
     const connection = new AppServerConnection(child);
     try {
@@ -218,11 +219,11 @@ class AppServerConnection {
     this.closed = true;
     this.failAll(new Error("Codex app-server connection closed"));
     if (this.child.exitCode !== null || this.child.signalCode !== null) return;
-    this.child.kill("SIGTERM");
+    this.killChildTree("SIGTERM");
     await new Promise<void>((resolve) => {
       const timer = setTimeout(() => {
         if (this.child.exitCode === null && this.child.signalCode === null) {
-          this.child.kill("SIGKILL");
+          this.killChildTree("SIGKILL");
         }
         resolve();
       }, APP_SERVER_EXIT_TIMEOUT_MS);
@@ -232,6 +233,18 @@ class AppServerConnection {
         resolve();
       });
     });
+  }
+
+  private killChildTree(signal: NodeJS.Signals): void {
+    if (process.platform !== "win32" && this.child.pid) {
+      try {
+        process.kill(-this.child.pid, signal);
+        return;
+      } catch {
+        // Fall through when the process group has already exited.
+      }
+    }
+    this.child.kill(signal);
   }
 
   private write(value: unknown): void {
