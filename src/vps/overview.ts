@@ -344,6 +344,7 @@ export function overviewRenderSignature(
   goals: OverviewGoals = { current: [], recent: [] },
 ): string {
   return JSON.stringify({
+    formatVersion: 2,
     total: stats.total,
     active: stats.active,
     working: stats.working,
@@ -435,13 +436,13 @@ function formatOverviewGoals(goals: OverviewGoals): string {
         : "direct chat"
     );
     return (
-      `<p><b>✓ ${escapeTelegramHtml(origin)}</b><br/>` +
+      `<blockquote><b>✓ complete</b> · ${escapeTelegramHtml(origin)}<br/>` +
       `${escapeTelegramHtml(shortGoalText(goal.objective))}<br/>` +
       `<i>${formatGoalUsage(
         goal.tokens_used,
         goal.time_used_seconds,
         null,
-      )} · ${formatUtcDate(goal.completed_at)}</i></p>`
+      )} · ${formatUtcDate(goal.completed_at)}</i></blockquote>`
     );
   }).join("");
   return (

@@ -141,7 +141,10 @@ describe("Overview dashboard", () => {
     expect(card).toContain("🎯 paused");
     expect(card).toContain("Ship native goal sync");
     expect(card).toContain("<details><summary>recent completed goals</summary>");
-    expect(card).toContain("✓ Review");
+    expect(card).toContain(
+      "<blockquote><b>✓ complete</b> · Review<br/>",
+    );
+    expect(card).not.toContain("<p><b>✓ Review</b>");
   });
 });
 
