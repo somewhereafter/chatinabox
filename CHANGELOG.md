@@ -4,6 +4,18 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.2.2 — 2026-07-27
+
+- Kept established forum topics bound to their own workers: handoffs and
+  session-picker actions now return direct Telegram navigation links instead
+  of silently replacing either topic's identity.
+- Made new tasks open in their own linked topics while preserving same-topic
+  completion for user-created topics that are still in guided setup.
+- Added explicit opt-in prompt seeding for delegated work; ordinary new tasks
+  start blank and never inherit the manager transcript.
+- Repaired stale pre-2.0.2 Lobby-contaminated topic state during restart so a
+  named work topic launches fresh from the default workspace.
+
 ## 2.2.1 — 2026-07-27
 
 - Updated the README hero artwork revision label for the 2.2 release.

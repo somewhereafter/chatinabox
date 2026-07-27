@@ -340,6 +340,25 @@ export async function tgEditForumTopic(
   });
 }
 
+export interface TelegramForumTopic {
+  readonly message_thread_id: number;
+  readonly name: string;
+  readonly icon_color: number;
+  readonly icon_custom_emoji_id?: string;
+}
+
+/** Create a named topic in a Telegram forum group. */
+export async function tgCreateForumTopic(
+  env: BotEnv,
+  chatId: number,
+  name: string,
+) {
+  return tgCall<TelegramForumTopic>(env, "createForumTopic", {
+    chat_id: chatId,
+    name,
+  });
+}
+
 /** Change the large custom-emoji icon on a forum topic. */
 export async function tgEditForumTopicIcon(
   env: BotEnv,

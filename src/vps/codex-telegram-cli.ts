@@ -138,6 +138,7 @@ async function main(): Promise<number> {
     if (command === "new-and-handoff") {
       const defaults = configuredWorkerDefaults();
       const cwd = takeOption(args, "--cwd");
+      const prompt = takeOption(args, "--prompt");
       const model =
         parseWorkerModel(takeOption(args, "--model")) ?? defaults.model;
       const reasoningEffort =
@@ -158,11 +159,20 @@ async function main(): Promise<number> {
         fast,
       });
       if (!created.ok || !("pane" in created)) return output(created, json);
+      if (prompt) {
+        const seeded = await bridge.request({
+          op: "send",
+          target: created.pane,
+          text: prompt,
+        });
+        if (!seeded.ok) return output(seeded, json);
+      }
       return output(
         await bridge.request({
           op: "handoff",
           source,
           destination: created.pane,
+          handoffKind: "created",
         }),
         json,
       );
@@ -1147,8 +1157,9 @@ Commands:
   self rename NAME             Rename the current Codex session
   self status                  Resolve this Codex thread to its running pane
   self lobby                   Return Telegram to 🪄 Lobby after this turn
-  handoff TARGET               Attach Telegram to TARGET after this turn
-  new-and-handoff [NAME]       Start a worker and hand off after this turn
+  handoff TARGET               Link Telegram to TARGET after this turn
+  new-and-handoff [NAME]       Start a blank worker and link it after this turn
+    --prompt TEXT              Seed one prompt only when the user requests it
   send TARGET TEXT             Send a prompt (or read it from stdin)
   interrupt TARGET             Send Ctrl-C
   keys TARGET KEY [KEY...]     Send allowlisted terminal keys

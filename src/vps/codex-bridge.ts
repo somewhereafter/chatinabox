@@ -319,6 +319,7 @@ export class CodexBridge {
         destination_server_pid INTEGER NOT NULL,
         destination_pane_id TEXT NOT NULL,
         destination_pane_pid INTEGER NOT NULL,
+        handoff_kind TEXT NOT NULL DEFAULT 'navigate',
         created_at INTEGER NOT NULL,
         PRIMARY KEY (
           source_server_pid, source_pane_id, source_pane_pid
@@ -329,6 +330,7 @@ export class CodexBridge {
     this.migrateEvents();
     this.migrateTranscriptBindings();
     this.migrateTurnActivity();
+    this.migratePendingHandoffs();
     this.server = net.createServer(
       { allowHalfOpen: true },
       (socket) => this.handleSocket(socket),
@@ -1517,14 +1519,15 @@ export class CodexBridge {
       INSERT INTO pending_handoffs (
         source_server_pid, source_pane_id, source_pane_pid,
         destination_server_pid, destination_pane_id, destination_pane_pid,
-        created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        handoff_kind, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(
         source_server_pid, source_pane_id, source_pane_pid
       ) DO UPDATE SET
         destination_server_pid = excluded.destination_server_pid,
         destination_pane_id = excluded.destination_pane_id,
         destination_pane_pid = excluded.destination_pane_pid,
+        handoff_kind = excluded.handoff_kind,
         created_at = excluded.created_at
     `).run(
       source.serverPid,
@@ -1533,6 +1536,7 @@ export class CodexBridge {
       destination.serverPid,
       destination.paneId,
       destination.panePid,
+      request.handoffKind === "created" ? "created" : "navigate",
       Date.now(),
     );
     return { ok: true, handoffQueued: true, destination };
@@ -2258,6 +2262,7 @@ export class CodexBridge {
         destination_server_pid,
         destination_pane_id,
         destination_pane_pid,
+        handoff_kind,
         created_at
       FROM pending_handoffs
       WHERE source_server_pid = ? AND source_pane_id = ? AND source_pane_pid = ?
@@ -2269,6 +2274,7 @@ export class CodexBridge {
       destination_server_pid: number;
       destination_pane_id: string;
       destination_pane_pid: number;
+      handoff_kind: string;
       created_at: number;
     } | undefined;
     if (!row) return;
@@ -2297,7 +2303,10 @@ export class CodexBridge {
       source.panePid,
       sessionId,
       turnId,
-      JSON.stringify(destination),
+      JSON.stringify({
+        destination,
+        kind: row.handoff_kind === "created" ? "created" : "navigate",
+      }),
       Date.now(),
     );
     this.db.prepare(`
@@ -3369,6 +3378,19 @@ export class CodexBridge {
           `ALTER TABLE turn_activity ADD COLUMN ${name} ${definition}`,
         );
       }
+    }
+  }
+
+  private migratePendingHandoffs(): void {
+    const columns = new Set(
+      (this.db.prepare(`PRAGMA table_info(pending_handoffs)`).all() as
+        unknown as Array<{ name: string }>).map((column) => column.name),
+    );
+    if (!columns.has("handoff_kind")) {
+      this.db.exec(`
+        ALTER TABLE pending_handoffs
+        ADD COLUMN handoff_kind TEXT NOT NULL DEFAULT 'navigate'
+      `);
     }
   }
 }

@@ -493,6 +493,475 @@ describe("Codex Telegram attachments", () => {
     store.close();
   });
 
+  it("creates a linked task topic without replacing the Nox topic", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-new-topic-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const nox = {
+      serverPid: 100,
+      paneId: "%10",
+      panePid: 210,
+      sessionName: "codex",
+      windowName: "🪄 Nox · orchestrator",
+      windowIndex: 0,
+      cwd: "/var/lib/chatinabox-bridge/nox",
+      active: true,
+      busy: false,
+      codexPid: 310,
+      assistantName: "Sol" as const,
+      sessionId: "nox-session",
+    };
+    const worker = {
+      ...nox,
+      paneId: "%21",
+      panePid: 221,
+      windowName: "GitHub Token Graph",
+      cwd: "/root",
+      codexPid: 321,
+      sessionId: "worker-session",
+    };
+    store.registerManagerTopic(-10042, 42, 68);
+    store.setManagerTarget(-10042, nox);
+    store.attachCodex(-10042, 42, nox, 68);
+    const event = {
+      id: 1,
+      kind: "session_handoff" as const,
+      target: nox,
+      sessionId: "nox-session",
+      turnId: "turn",
+      assistantName: "Sol" as const,
+      message: JSON.stringify({
+        destination: {
+          serverPid: worker.serverPid,
+          paneId: worker.paneId,
+          panePid: worker.panePid,
+        },
+        kind: "created",
+      }),
+      createdAt: 1,
+    };
+    const acknowledged: number[] = [];
+    const bridge = {
+      request: vi.fn(async (request: { op: string; eventId?: number }) => {
+        if (request.op === "events") return { ok: true, events: [event] };
+        if (request.op === "list") {
+          return {
+            ok: true,
+            panes: [nox, worker],
+            recent: [],
+            totalSessions: 2,
+            usage: null,
+          };
+        }
+        if (request.op === "ack") {
+          acknowledged.push(request.eventId!);
+          return { ok: true, acked: true };
+        }
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as
+        Record<string, unknown>;
+      calls.push({ method, body });
+      return {
+        json: async () => ({
+          ok: true,
+          result: method === "createForumTopic"
+            ? {
+                message_thread_id: 77,
+                name: worker.windowName,
+                icon_color: 1,
+              }
+            : { message_id: 900 + calls.length },
+        }),
+      };
+    }));
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: "/root",
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    await controller.deliverEventsOnce();
+
+    expect(store.codexAttachment(-10042, 42, 68)?.pane_id).toBe("%10");
+    expect(store.codexAttachment(-10042, 42, 77)?.pane_id).toBe("%21");
+    expect(calls).toContainEqual({
+      method: "createForumTopic",
+      body: { chat_id: -10042, name: "GitHub Token Graph" },
+    });
+    expect(calls.some((call) =>
+      call.method === "sendMessage" &&
+      call.body.message_thread_id === 68 &&
+      JSON.stringify(call.body.reply_markup).includes(
+        "https://t.me/c/42/77",
+      )
+    )).toBe(true);
+    expect(acknowledged).toEqual([1]);
+    store.close();
+  });
+
+  it("navigates to an existing topic without swapping either worker", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-navigation-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const source = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "Review",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: false,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+    };
+    const destination = {
+      ...source,
+      paneId: "%10",
+      panePid: 210,
+      windowName: "🪄 Nox · orchestrator",
+      cwd: "/var/lib/chatinabox-bridge/nox",
+      codexPid: 310,
+    };
+    store.attachCodex(-10042, 42, source, 20);
+    store.attachCodex(-10042, 42, destination, 68);
+    store.registerManagerTopic(-10042, 42, 68);
+    store.setManagerTarget(-10042, destination);
+    const event = {
+      id: 1,
+      kind: "session_handoff" as const,
+      target: source,
+      sessionId: "source",
+      turnId: "turn",
+      assistantName: "Sol" as const,
+      message: JSON.stringify({
+        destination: {
+          serverPid: destination.serverPid,
+          paneId: destination.paneId,
+          panePid: destination.panePid,
+        },
+        kind: "navigate",
+      }),
+      createdAt: 1,
+    };
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    const bridge = {
+      request: vi.fn(async (request: { op: string }) => {
+        if (request.op === "events") return { ok: true, events: [event] };
+        if (request.op === "list") {
+          return {
+            ok: true,
+            panes: [source, destination],
+            recent: [],
+            totalSessions: 2,
+            usage: null,
+          };
+        }
+        return { ok: true, acked: true };
+      }),
+    };
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({
+        method: url.split("/").pop() ?? "",
+        body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+      });
+      return {
+        json: async () => ({ ok: true, result: { message_id: 901 } }),
+      };
+    }));
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: "/root",
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    await controller.deliverEventsOnce();
+
+    expect(store.codexAttachment(-10042, 42, 20)?.pane_id).toBe("%4");
+    expect(store.codexAttachment(-10042, 42, 68)?.pane_id).toBe("%10");
+    expect(calls.some((call) => call.method === "createForumTopic")).toBe(false);
+    expect(JSON.stringify(calls.at(-1)?.body.reply_markup))
+      .toContain("https://t.me/c/42/68");
+    store.close();
+  });
+
+  it("keeps an existing topic stable when /attach selects another worker", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-command-nav-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const source = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 204,
+      sessionName: "codex",
+      windowName: "Review",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: false,
+      codexPid: 304,
+      assistantName: "Sol" as const,
+    };
+    const destination = {
+      ...source,
+      paneId: "%10",
+      panePid: 210,
+      windowName: "🪄 Nox · orchestrator",
+      cwd: "/var/lib/chatinabox-bridge/nox",
+      codexPid: 310,
+    };
+    store.attachCodex(-10042, 42, source, 20);
+    store.attachCodex(-10042, 42, destination, 68);
+    const bridge = {
+      request: vi.fn(async (request: { op: string }) => {
+        if (request.op === "list") {
+          return {
+            ok: true,
+            panes: [source, destination],
+            recent: [],
+            totalSessions: 2,
+            usage: null,
+          };
+        }
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({
+        method: url.split("/").pop() ?? "",
+        body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+      });
+      return {
+        json: async () => ({ ok: true, result: { message_id: 901 } }),
+      };
+    }));
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: "/root",
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    await controller.handleCommand(message({
+      message_id: 55,
+      chat: { id: -10042, type: "supergroup" },
+      from: { id: 42 },
+      message_thread_id: 20,
+      is_topic_message: true,
+    }), { name: "attach", argument: "%10" });
+
+    expect(store.codexAttachment(-10042, 42, 20)?.pane_id).toBe("%4");
+    expect(store.codexAttachment(-10042, 42, 68)?.pane_id).toBe("%10");
+    expect(JSON.stringify(calls.at(-1)?.body.reply_markup))
+      .toContain("https://t.me/c/42/68");
+    store.close();
+  });
+
+  it("starts /codex new in a linked topic without replacing the source", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-command-new-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const source = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 204,
+      sessionName: "codex",
+      windowName: "Review",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: false,
+      codexPid: 304,
+      assistantName: "Sol" as const,
+    };
+    const worker = {
+      ...source,
+      paneId: "%22",
+      panePid: 222,
+      windowName: "Fresh Task",
+      codexPid: 322,
+    };
+    store.attachCodex(-10042, 42, source, 20);
+    const bridge = {
+      request: vi.fn(async (request: { op: string }) => {
+        if (request.op === "new") return { ok: true, pane: worker };
+        if (request.op === "list") {
+          return {
+            ok: true,
+            panes: [source, worker],
+            recent: [],
+            totalSessions: 2,
+            usage: null,
+          };
+        }
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as
+        Record<string, unknown>;
+      calls.push({ method, body });
+      return {
+        json: async () => ({
+          ok: true,
+          result: method === "createForumTopic"
+            ? {
+                message_thread_id: 77,
+                name: worker.windowName,
+                icon_color: 1,
+              }
+            : { message_id: 901 },
+        }),
+      };
+    }));
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: "/root",
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    await controller.handleCommand(message({
+      message_id: 56,
+      chat: { id: -10042, type: "supergroup" },
+      from: { id: 42 },
+      message_thread_id: 20,
+      is_topic_message: true,
+    }), { name: "codex_new", argument: "Fresh Task" });
+
+    expect(store.codexAttachment(-10042, 42, 20)?.pane_id).toBe("%4");
+    expect(store.codexAttachment(-10042, 42, 77)?.pane_id).toBe("%22");
+    expect(calls.some((call) => call.method === "createForumTopic")).toBe(true);
+    store.close();
+  });
+
+  it("completes a user-created setup topic in place", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-guide-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const guide = {
+      serverPid: 100,
+      paneId: "%20",
+      panePid: 220,
+      sessionName: "codex",
+      windowName: "orchestrator · setup · Review",
+      windowIndex: 0,
+      cwd: "/var/lib/chatinabox-bridge/manager",
+      active: true,
+      busy: false,
+      codexPid: 320,
+      assistantName: "Sol" as const,
+    };
+    const worker = {
+      ...guide,
+      paneId: "%21",
+      panePid: 221,
+      windowName: "Review",
+      cwd: "/root",
+      codexPid: 321,
+    };
+    store.rememberTopic(-10042, 42, 20, "Review", "/root");
+    store.registerManagerTopic(-10042, 42, 68);
+    store.attachCodex(-10042, 42, guide, 20);
+    const event = {
+      id: 1,
+      kind: "session_handoff" as const,
+      target: guide,
+      sessionId: "guide",
+      turnId: "turn",
+      assistantName: "Sol" as const,
+      message: JSON.stringify({
+        destination: {
+          serverPid: worker.serverPid,
+          paneId: worker.paneId,
+          panePid: worker.panePid,
+        },
+        kind: "created",
+      }),
+      createdAt: 1,
+    };
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    const bridge = {
+      request: vi.fn(async (request: { op: string }) => {
+        if (request.op === "events") return { ok: true, events: [event] };
+        if (request.op === "list") {
+          return {
+            ok: true,
+            panes: [guide, worker],
+            recent: [],
+            totalSessions: 2,
+            usage: null,
+          };
+        }
+        return { ok: true, acked: true };
+      }),
+    };
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push({
+        method: url.split("/").pop() ?? "",
+        body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+      });
+      return { json: async () => ({ ok: true, result: true }) };
+    }));
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: "/root",
+      },
+      store,
+      bridge: bridge as never,
+      profile: () => personalProfile,
+    });
+
+    await controller.deliverEventsOnce();
+
+    expect(store.codexAttachment(-10042, 42, 20)?.pane_id).toBe("%21");
+    expect(calls.some((call) => call.method === "createForumTopic")).toBe(false);
+    expect(calls).toContainEqual({
+      method: "editForumTopic",
+      body: {
+        chat_id: -10042,
+        message_thread_id: 20,
+        name: "Review",
+      },
+    });
+    store.close();
+  });
+
   it("preserves useful filenames without allowing path traversal", () => {
     expect(sanitizeAttachmentFileName("../../my report (final).pdf"))
       .toBe("_my_report_final_.pdf");

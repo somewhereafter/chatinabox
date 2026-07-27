@@ -174,6 +174,7 @@ export type CodexBridgeRequest =
       readonly op: "handoff";
       readonly source: CodexPaneIdentity;
       readonly destination: CodexPaneIdentity;
+      readonly handoffKind?: "navigate" | "created";
     }
   | {
       readonly op: "bind";

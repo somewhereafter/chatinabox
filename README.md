@@ -162,10 +162,10 @@ The complete neutral schema is in
 | `/overview setup` | Register the overview topic |
 | `/manager setup` | Register the manager topic |
 | `/codex` | List active and recent sessions |
-| `/codex new [name]` | Start and attach a worker |
+| `/codex new [name]` | Start a worker in a new linked topic |
 | `/codex rename name` | Rename the attached session |
 | `/codex interrupt` | Interrupt the current turn |
-| `/codex detach` | Return to the Lobby |
+| `/codex detach` | Open the Nox manager topic |
 | `/queue text` | Hold a message for the next turn |
 | Voice note | Transcribe with Scribe v2 and send it as a prompt |
 | `/screen` | Post the current terminal view |

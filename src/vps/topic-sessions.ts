@@ -651,11 +651,7 @@ export class TopicSessionController {
         identity.chatId,
         identity.ownerUserId,
         identity.messageThreadId,
-        {
-          topic_name: "new codex chat",
-          cwd: this.dependencies.env.DEFAULT_CWD,
-          awaiting: "",
-        },
+        reservedLobbyRepair(current, this.dependencies.env.DEFAULT_CWD),
       ) ?? current;
     }
     if (current.closed_at) {
@@ -1165,11 +1161,7 @@ export class TopicSessionController {
           chatId,
           ownerUserId,
           messageThreadId,
-          {
-            topic_name: "new codex chat",
-            cwd: this.dependencies.env.DEFAULT_CWD,
-            awaiting: "",
-          },
+          reservedLobbyRepair(row, this.dependencies.env.DEFAULT_CWD),
         );
         await this.editSetupCard(
           chatId,
@@ -1335,12 +1327,23 @@ export class TopicSessionController {
         ownerUserId,
         messageThreadId,
       )) return;
-      const row = this.dependencies.store.topicSetup(
+      let row = this.dependencies.store.topicSetup(
         chatId,
         ownerUserId,
         messageThreadId,
       );
       if (!row?.closed_at) return;
+      if (isReservedLobbySetup(row)) {
+        row = this.dependencies.store.updateTopicSetup(
+          chatId,
+          ownerUserId,
+          messageThreadId,
+          {
+            ...reservedLobbyRepair(row, this.dependencies.env.DEFAULT_CWD),
+            closed_session_id: null,
+          },
+        ) ?? row;
+      }
       await tgEditRichHtml(
         this.dependencies.env,
         chatId,
@@ -1627,6 +1630,23 @@ export function isReservedLobbySetup(
   return row.topic_name.trim() === CHATINABOX_LOBBY_NAME ||
     path.posix.normalize(row.cwd) ===
       path.posix.normalize(DEFAULT_CHATINABOX_LOBBY_CWD);
+}
+
+function reservedLobbyRepair(
+  row: Pick<TopicSetupRow, "topic_name">,
+  defaultCwd: string,
+): {
+  readonly topic_name: string;
+  readonly cwd: string;
+  readonly awaiting: "";
+} {
+  return {
+    topic_name: row.topic_name.trim() === CHATINABOX_LOBBY_NAME
+      ? "new codex chat"
+      : row.topic_name,
+    cwd: defaultCwd,
+    awaiting: "",
+  };
 }
 
 export function formatSetupCard(

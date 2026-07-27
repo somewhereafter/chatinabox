@@ -120,10 +120,15 @@ export interface ParseCallbackContext {
   now?: number;
 }
 
-export interface TelegramInlineKeyboardButton {
-  text: string;
-  callback_data: IssuedCallbackData;
-}
+export type TelegramInlineKeyboardButton =
+  | {
+      text: string;
+      callback_data: IssuedCallbackData;
+    }
+  | {
+      text: string;
+      url: string;
+    };
 
 export interface TelegramInlineKeyboardMarkup {
   inline_keyboard: TelegramInlineKeyboardButton[][];

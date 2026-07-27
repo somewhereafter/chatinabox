@@ -604,6 +604,48 @@ describe("Topic session setup", () => {
     store.close();
   });
 
+  it("restarts a polluted Review topic as a fresh worker outside Lobby", async () => {
+    const { controller, store, requests } = setup();
+    store.rememberTopic(
+      -10042,
+      42,
+      7,
+      "Review",
+      "/var/lib/chatinabox-bridge/lobby",
+    );
+    store.updateTopicSetup(-10042, 42, 7, {
+      closed_session_id: "019fa305-565d-7190-a1fc-d8a613e43f33",
+      closed_at: 1_000,
+    });
+
+    const consumed = await controller.handleMessage({
+      message_id: 79,
+      chat: { id: -10042, type: "supergroup" },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      text: "Start a separate task.",
+      date: 1,
+    }, null);
+
+    expect(consumed).toBe(false);
+    expect(requests).toEqual([{
+      op: "new",
+      name: "Review",
+      cwd: "/root",
+      model: "sol",
+      reasoningEffort: "high",
+      fast: false,
+    }]);
+    expect(store.topicSetup(-10042, 42, 7)).toMatchObject({
+      topic_name: "Review",
+      cwd: "/root",
+      closed_session_id: null,
+      closed_at: null,
+    });
+    store.close();
+  });
+
   it("keeps a failed wake message visible and does not consume it silently", async () => {
     const { controller, store, requests, sends } = setup(
       undefined,

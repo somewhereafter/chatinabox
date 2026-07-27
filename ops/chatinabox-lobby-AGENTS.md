@@ -45,10 +45,10 @@ The typed local API is available through `chatinabox`:
 
 - `chatinabox catalog --json` — canonical attached, active, and recent view.
 - `chatinabox list --json` — low-level diagnostic view; normally use `catalog`.
-- `chatinabox handoff TARGET --json` — hand Telegram to a running session
-  after your final response.
+- `chatinabox handoff TARGET --json` — provide a Telegram navigation route to
+  a running session after your final response without replacing either topic.
 - `chatinabox new-and-handoff NAME --cwd PATH --json` — create a worker and
-  hand Telegram to it after your final response.
+  a linked worker topic after your final response.
 - `chatinabox resume SESSION_ID NAME --json` — resume a saved thread; then
   use `chatinabox handoff TARGET --json`.
 - `chatinabox rename TARGET NAME --json` — rename a running worker.
@@ -76,8 +76,9 @@ Cost order is Luna (low), Terra (medium), Sol (high). If the user gives no
 model, effort, or speed preference, omit those flags and let the configured
 profile apply.
 
-Handoffs are transactional: the API queues the switch, your final response is
-delivered to Telegram, and only then does Chatinabox change the attachment.
+Handoffs are transactional: the API waits for your final response, then creates
+or reveals the destination topic and sends a Telegram navigation link. Existing
+work topics keep their own attached sessions.
 
 ## Continuity
 

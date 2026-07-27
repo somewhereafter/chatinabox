@@ -22,8 +22,10 @@ import {
 import {
   escapeTelegramHtml,
   tgAnswerCallbackQuery,
+  tgCreateForumTopic,
   tgDeleteMessage,
   tgDownloadFile,
+  tgEditForumTopic,
   tgEditPhotoMedia,
   tgEditMessage,
   tgEditMessageCaption,
@@ -448,17 +450,26 @@ export class CodexTelegramController {
           );
           return true;
         }
-        this.dependencies.store.attachCodex(
+        const source = this.dependencies.store.codexAttachment(
           chatId!,
           ownerUserId,
-          pane,
           messageThreadId,
         );
+        if (chatId! < 0 && messageThreadId > 0 && source) {
+          await this.routeForumHandoff(source, pane, "navigate", panes);
+        } else {
+          this.dependencies.store.attachCodex(
+            chatId!,
+            ownerUserId,
+            pane,
+            messageThreadId,
+          );
+        }
         await this.editMenu(chatId!, ownerUserId, messageId!, messageThreadId);
         return true;
       }
       case "codex.detach":
-        await this.attachLobby(chatId!, ownerUserId, messageThreadId);
+        await this.detach(chatId!, ownerUserId, messageId!, messageThreadId);
         await this.editMenu(chatId!, ownerUserId, messageId!, messageThreadId);
         return true;
       case "codex.refresh":
@@ -481,12 +492,26 @@ export class CodexTelegramController {
           );
           return true;
         }
-        this.dependencies.store.attachCodex(
+        const source = this.dependencies.store.codexAttachment(
           chatId!,
           ownerUserId,
-          result.pane,
           messageThreadId,
         );
+        if (chatId! < 0 && messageThreadId > 0 && source) {
+          await this.routeForumHandoff(
+            source,
+            result.pane,
+            "created",
+            await this.listPanes().catch(() => [result.pane]),
+          );
+        } else {
+          this.dependencies.store.attachCodex(
+            chatId!,
+            ownerUserId,
+            result.pane,
+            messageThreadId,
+          );
+        }
         await this.editMenu(chatId!, ownerUserId, messageId!, messageThreadId);
         return true;
       }
@@ -512,12 +537,26 @@ export class CodexTelegramController {
           );
           return true;
         }
-        this.dependencies.store.attachCodex(
+        const source = this.dependencies.store.codexAttachment(
           chatId!,
           ownerUserId,
-          result.pane,
           messageThreadId,
         );
+        if (chatId! < 0 && messageThreadId > 0 && source) {
+          await this.routeForumHandoff(
+            source,
+            result.pane,
+            "created",
+            await this.listPanes().catch(() => [result.pane]),
+          );
+        } else {
+          this.dependencies.store.attachCodex(
+            chatId!,
+            ownerUserId,
+            result.pane,
+            messageThreadId,
+          );
+        }
         await this.editMenu(chatId!, ownerUserId, messageId!, messageThreadId);
         return true;
       }
@@ -1059,7 +1098,9 @@ export class CodexTelegramController {
           transient.telegram_message_id,
         ).catch(() => undefined);
       }
-      if (response?.code === "STALE_TARGET") {
+      const forumSource =
+        attachment.chat_id < 0 && attachment.message_thread_id > 0;
+      if (response?.code === "STALE_TARGET" && !forumSource) {
         await this.attachLobby(
           attachment.chat_id,
           attachment.owner_user_id,
@@ -1067,15 +1108,44 @@ export class CodexTelegramController {
         );
       }
       if (reportFailure) {
+        const manager = response?.code === "STALE_TARGET" && forumSource
+          ? this.dependencies.store.managerTopic(attachment.chat_id)
+          : null;
+        const managerAttachment = manager
+          ? this.dependencies.store.codexAttachment(
+              attachment.chat_id,
+              attachment.owner_user_id,
+              manager.message_thread_id,
+            )
+          : null;
+        const managerUrl = managerAttachment
+          ? forumTopicUrl(
+              managerAttachment.chat_id,
+              managerAttachment.message_thread_id,
+            )
+          : null;
         await tgSend(
           this.dependencies.env,
           attachment.chat_id,
           response && !response.ok
             ? `⚠️ ${escapeTelegramHtml(response.error)}\n` +
-              "🪄 You’re back in Lobby; resend your message there."
+              (forumSource
+                ? managerAttachment
+                  ? `Open ${escapeTelegramHtml(this.profile().manager.name)} ` +
+                    "to reconnect or resume this worker."
+                  : `Send <code>/manager wake</code> in the ` +
+                    `${escapeTelegramHtml(this.profile().manager.name)} topic.`
+                : "🪄 You’re back in Lobby; resend your message there.")
             : "⚠️ The session bridge is unavailable. Your message was not sent.",
           replyToMessageId,
-          undefined,
+          managerUrl
+            ? {
+                inline_keyboard: [[{
+                  text: `Open ${this.profile().manager.name}`.slice(0, 64),
+                  url: managerUrl,
+                }]],
+              }
+            : undefined,
           attachment.message_thread_id || undefined,
         );
       }
@@ -1761,12 +1831,14 @@ export class CodexTelegramController {
       return true;
     }
     if (event.kind === "session_handoff") {
-      const destination = parseHandoffDestination(event.message);
-      const panes = destination
+      const handoff = parseHandoffDirective(event.message);
+      const panes = handoff
         ? await this.listPanes().catch(() => [])
         : [];
-      const pane = destination
-        ? panes.find((candidate) => samePaneIdentity(candidate, destination))
+      const pane = handoff
+        ? panes.find((candidate) =>
+          samePaneIdentity(candidate, handoff.destination)
+        )
         : undefined;
       for (const attachment of attachments) {
         if (!pane) {
@@ -1780,6 +1852,15 @@ export class CodexTelegramController {
             attachment.message_thread_id || undefined,
           );
           if (!failed.ok) return false;
+          continue;
+        }
+        if (attachment.chat_id < 0) {
+          await this.routeForumHandoff(
+            attachment,
+            pane,
+            handoff?.kind ?? "navigate",
+            panes,
+          );
           continue;
         }
         this.dependencies.store.attachCodex(
@@ -2122,6 +2203,206 @@ export class CodexTelegramController {
       }
     }
     return true;
+  }
+
+  private async routeForumHandoff(
+    source: CodexAttachmentRow,
+    requestedPane: CodexPane,
+    kind: "navigate" | "created",
+    panes: readonly CodexPane[],
+  ): Promise<void> {
+    if (kind === "created" && this.isTemporaryManagerGuide(source)) {
+      await this.adoptSetupTopicWorker(source, requestedPane);
+      return;
+    }
+
+    const manager = this.dependencies.store.managerTopic(source.chat_id);
+    if (isLobbyPane(requestedPane) && manager) {
+      const managerAttachment = this.dependencies.store.codexAttachment(
+        source.chat_id,
+        source.owner_user_id,
+        manager.message_thread_id,
+      );
+      if (managerAttachment) {
+        await this.sendTopicNavigation(source, managerAttachment);
+        return;
+      }
+    }
+
+    if (kind === "navigate") {
+      const existing = this.dependencies.store
+        .codexAttachmentsForTarget(requestedPane)
+        .find((candidate) =>
+          candidate.chat_id === source.chat_id &&
+          candidate.owner_user_id === source.owner_user_id &&
+          candidate.message_thread_id > 0
+        );
+      if (existing) {
+        await this.sendTopicNavigation(source, existing);
+        return;
+      }
+    }
+
+    const livePane = panes.find((candidate) =>
+      samePaneIdentity(candidate, requestedPane)
+    ) ?? requestedPane;
+    await this.createWorkerTopic(source, livePane);
+  }
+
+  private isTemporaryManagerGuide(source: CodexAttachmentRow): boolean {
+    const manager = this.profile().manager;
+    return source.cwd === manager.cwd &&
+      source.window_name.startsWith(`${manager.name} · setup ·`) &&
+      this.dependencies.store.managerTopic(source.chat_id)?.message_thread_id !==
+        source.message_thread_id;
+  }
+
+  private async adoptSetupTopicWorker(
+    source: CodexAttachmentRow,
+    pane: CodexPane,
+  ): Promise<void> {
+    const renamed = await tgEditForumTopic(
+      this.dependencies.env,
+      source.chat_id,
+      source.message_thread_id,
+      pane.windowName,
+    ).catch(() => null);
+    if (!renamed?.ok) {
+      await tgSend(
+        this.dependencies.env,
+        source.chat_id,
+        "⚠️ The worker is ready, but this setup topic could not be renamed.",
+        undefined,
+        undefined,
+        source.message_thread_id,
+      ).catch(() => undefined);
+      return;
+    }
+    this.dependencies.store.attachCodex(
+      source.chat_id,
+      source.owner_user_id,
+      pane,
+      source.message_thread_id,
+    );
+    this.dependencies.store.updateTopicSetup(
+      source.chat_id,
+      source.owner_user_id,
+      source.message_thread_id,
+      {
+        topic_name: pane.windowName,
+        cwd: pane.cwd,
+        awaiting: "",
+        idle_since: this.now(),
+        closed_session_id: null,
+        closed_at: null,
+        resting_message_id: null,
+      },
+    );
+    await tgSend(
+      this.dependencies.env,
+      source.chat_id,
+      `🪄 <b>Setup complete</b> · now talking to ` +
+        `<b>${normalizeAssistantName(pane.assistantName)}</b> in ` +
+        `<b>${escapeTelegramHtml(pane.windowName)}</b>.`,
+      undefined,
+      undefined,
+      source.message_thread_id,
+    ).catch(() => undefined);
+  }
+
+  private async createWorkerTopic(
+    source: CodexAttachmentRow,
+    pane: CodexPane,
+  ): Promise<void> {
+    const created = await tgCreateForumTopic(
+      this.dependencies.env,
+      source.chat_id,
+      pane.windowName,
+    ).catch(() => null);
+    if (!created?.ok) {
+      await tgSend(
+        this.dependencies.env,
+        source.chat_id,
+        "⚠️ <b>New topic could not be created.</b>\n" +
+          `${escapeTelegramHtml(pane.windowName)} is running but remains ` +
+          "unattached. Ask Nox to reconnect it.",
+        undefined,
+        undefined,
+        source.message_thread_id || undefined,
+      ).catch(() => undefined);
+      return;
+    }
+
+    const messageThreadId = created.result.message_thread_id;
+    this.dependencies.store.rememberTopic(
+      source.chat_id,
+      source.owner_user_id,
+      messageThreadId,
+      pane.windowName,
+      pane.cwd,
+    );
+    this.dependencies.store.attachCodex(
+      source.chat_id,
+      source.owner_user_id,
+      pane,
+      messageThreadId,
+    );
+    await tgSend(
+      this.dependencies.env,
+      source.chat_id,
+      `🪄 <b>${escapeTelegramHtml(pane.windowName)}</b>\n` +
+        `Now talking to ${normalizeAssistantName(pane.assistantName)}.`,
+      undefined,
+      undefined,
+      messageThreadId,
+    ).catch(() => undefined);
+    await this.sendTopicNavigation(
+      source,
+      this.dependencies.store.codexAttachment(
+        source.chat_id,
+        source.owner_user_id,
+        messageThreadId,
+      )!,
+      true,
+    );
+  }
+
+  private async sendTopicNavigation(
+    source: CodexAttachmentRow,
+    destination: CodexAttachmentRow,
+    created = false,
+  ): Promise<void> {
+    if (source.message_thread_id === destination.message_thread_id) {
+      await tgSend(
+        this.dependencies.env,
+        source.chat_id,
+        `✓ Already in <b>${escapeTelegramHtml(destination.window_name)}</b>.`,
+        undefined,
+        undefined,
+        source.message_thread_id || undefined,
+      ).catch(() => undefined);
+      return;
+    }
+    const url = forumTopicUrl(
+      destination.chat_id,
+      destination.message_thread_id,
+    );
+    await tgSend(
+      this.dependencies.env,
+      source.chat_id,
+      `${created ? "↗ <b>New task ready</b>" : "↗ <b>Chat ready</b>"} · ` +
+        `${escapeTelegramHtml(destination.window_name)}`,
+      undefined,
+      url
+        ? {
+            inline_keyboard: [[{
+              text: `Open ${destination.window_name}`.slice(0, 64),
+              url,
+            }]],
+          }
+        : undefined,
+      source.message_thread_id || undefined,
+    ).catch(() => undefined);
   }
 
   private async deliverGeneratedImage(
@@ -2968,7 +3249,7 @@ export class CodexTelegramController {
           samePaneIdentity(pane, attachmentTarget(attachment)),
         )
       : undefined;
-    if (attachment && !activePane) {
+    if (attachment && !activePane && chatId > 0) {
       activePane = await this.attachLobby(
         chatId,
         ownerUserId,
@@ -3171,6 +3452,15 @@ export class CodexTelegramController {
       );
       return;
     }
+    const source = this.dependencies.store.codexAttachment(
+      chatId,
+      ownerUserId,
+      messageThreadId,
+    );
+    if (chatId < 0 && messageThreadId > 0 && source) {
+      await this.routeForumHandoff(source, pane, "navigate", panes);
+      return;
+    }
     this.dependencies.store.attachCodex(
       chatId,
       ownerUserId,
@@ -3197,6 +3487,35 @@ export class CodexTelegramController {
     replyToMessageId: number,
     messageThreadId = 0,
   ): Promise<void> {
+    const source = this.dependencies.store.codexAttachment(
+      chatId,
+      ownerUserId,
+      messageThreadId,
+    );
+    if (chatId < 0 && messageThreadId > 0 && source) {
+      const manager = this.dependencies.store.managerTopic(chatId);
+      const managerAttachment = manager
+        ? this.dependencies.store.codexAttachment(
+            chatId,
+            ownerUserId,
+            manager.message_thread_id,
+          )
+        : null;
+      if (managerAttachment) {
+        await this.sendTopicNavigation(source, managerAttachment);
+      } else {
+        await tgSend(
+          this.dependencies.env,
+          chatId,
+          `⚠️ ${escapeTelegramHtml(this.profile().manager.name)} is not ` +
+            "connected. Send <code>/manager wake</code> in its topic.",
+          replyToMessageId,
+          undefined,
+          messageThreadId,
+        );
+      }
+      return;
+    }
     const lobby = await this.attachLobby(
       chatId,
       ownerUserId,
@@ -3277,6 +3596,20 @@ export class CodexTelegramController {
         replyToMessageId,
         undefined,
         messageThreadId || undefined,
+      );
+      return;
+    }
+    const source = this.dependencies.store.codexAttachment(
+      chatId,
+      ownerUserId,
+      messageThreadId,
+    );
+    if (chatId < 0 && messageThreadId > 0 && source) {
+      await this.routeForumHandoff(
+        source,
+        result.pane,
+        "created",
+        await this.listPanes().catch(() => [result.pane]),
       );
       return;
     }
@@ -4274,15 +4607,48 @@ function telegramDeliveryId(
   ].join(":");
 }
 
-function parseHandoffDestination(
+interface HandoffDirective {
+  readonly destination: CodexPaneIdentity;
+  readonly kind: "navigate" | "created";
+}
+
+function parseHandoffDirective(
   value: string,
-): CodexPaneIdentity | null {
+): HandoffDirective | null {
   try {
     const parsed = JSON.parse(value) as unknown;
-    return isPaneIdentity(parsed) ? parsed : null;
+    if (isPaneIdentity(parsed)) {
+      return { destination: parsed, kind: "navigate" };
+    }
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      !Array.isArray(parsed) &&
+      "destination" in parsed &&
+      isPaneIdentity(parsed.destination)
+    ) {
+      return {
+        destination: parsed.destination,
+        kind:
+          "kind" in parsed && parsed.kind === "created"
+            ? "created"
+            : "navigate",
+      };
+    }
+    return null;
   } catch {
     return null;
   }
+}
+
+function forumTopicUrl(
+  chatId: number,
+  messageThreadId: number,
+): string | null {
+  const match = String(chatId).match(/^-100(\d+)$/u);
+  return match && messageThreadId > 0
+    ? `https://t.me/c/${match[1]}/${messageThreadId}`
+    : null;
 }
 
 function isLobbyPane(pane: Pick<CodexPane, "windowName" | "assistantName">): boolean {
