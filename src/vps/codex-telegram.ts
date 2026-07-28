@@ -1986,17 +1986,69 @@ export class CodexTelegramController {
         continue;
       }
       if (event.kind === "turn_aborted") {
+        const checkpoint =
+          this.dependencies.store.codexResponseCheckpoint(
+            attachment.chat_id,
+            attachment.owner_user_id,
+            event.target,
+            event.sessionId,
+            event.turnId,
+          );
+        const abortedMarkdown = checkpoint
+          ? checkpoint.event_id === event.id
+            ? checkpoint.rendered_markdown
+            : formatAbortedCheckpointRichMarkdown(
+                checkpoint.rendered_markdown,
+              )
+          : null;
+        const checkpointMarkedAborted = checkpoint
+          ? checkpoint.event_id === event.id ||
+            telegramEditSucceeded(
+              await tgEditRichMarkdown(
+                this.dependencies.env,
+                attachment.chat_id,
+                checkpoint.telegram_message_id,
+                abortedMarkdown!,
+              ).catch(() => null),
+            )
+          : false;
+        if (checkpoint && checkpointMarkedAborted) {
+          this.dependencies.store.recordCodexResponseCheckpoint(
+            attachment.chat_id,
+            attachment.owner_user_id,
+            event.target,
+            event.sessionId,
+            event.turnId,
+            event.id,
+            checkpoint.telegram_message_id,
+            checkpoint.message_hash,
+            abortedMarkdown!,
+          );
+        } else if (checkpoint) {
+          this.dependencies.store.clearCodexResponseCheckpoint(
+            attachment.chat_id,
+            attachment.owner_user_id,
+            event.target,
+            event.sessionId,
+            event.turnId,
+          );
+        }
         const thinking = this.dependencies.store.codexThinkingSection(
           attachment.chat_id,
           attachment.owner_user_id,
           event.target,
         );
         await this.clearQueuedFollowupStatus(attachment, event.target);
-        await this.setTransientStatus(
-          attachment,
-          event.target,
-          "state_interrupted",
-        );
+        if (checkpointMarkedAborted) {
+          await this.dependencies.topicPresence?.markReady(attachment)
+            .catch(() => undefined);
+        } else {
+          await this.setTransientStatus(
+            attachment,
+            event.target,
+            "state_interrupted",
+          );
+        }
         const rendered = this.dependencies.store.codexThinkingSection(
           attachment.chat_id,
           attachment.owner_user_id,
@@ -2004,8 +2056,13 @@ export class CodexTelegramController {
         );
         if (
           thinking &&
-          rendered &&
-          rendered.rendered_at >= thinking.updated_at
+          (
+            checkpointMarkedAborted ||
+            (
+              rendered &&
+              rendered.rendered_at >= thinking.updated_at
+            )
+          )
         ) {
           this.dependencies.store.clearCodexThinkingSection(
             attachment.chat_id,
@@ -2039,6 +2096,18 @@ export class CodexTelegramController {
           event.target,
           finalHash,
         )
+      ) {
+        continue;
+      }
+      if (
+        event.kind === "assistant_progress" &&
+        this.dependencies.store.codexResponseCheckpoint(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          event.target,
+          event.sessionId,
+          event.turnId,
+        )?.event_id === event.id
       ) {
         continue;
       }
@@ -2144,6 +2213,15 @@ export class CodexTelegramController {
         )
         : this.takeTransientStatus(attachment, event.target);
       const checkpointTransient = preserveGoalEditor ? null : transient;
+      const responseCheckpoint = event.kind === "assistant_final"
+        ? this.dependencies.store.codexResponseCheckpoint(
+            attachment.chat_id,
+            attachment.owner_user_id,
+            event.target,
+            event.sessionId,
+            event.turnId,
+          )
+        : null;
       const pendingThrough = (
         event.kind === "assistant_final" ||
         event.kind === "assistant_progress"
@@ -2193,6 +2271,8 @@ export class CodexTelegramController {
       let deliveredAsRichMessage = false;
       let checkpointMessageId: number | null = null;
       let transientConsumed = false;
+      let responseCheckpointConsumed = false;
+      let deliveredMessageCount = 0;
       const richMarkdown =
         event.kind === "assistant_final" ||
           event.kind === "assistant_progress"
@@ -2205,7 +2285,21 @@ export class CodexTelegramController {
           : null;
       if (richMarkdown !== null && richMarkdown.length <= 30_000) {
         const markdown = richMarkdown;
-        if (checkpointTransient) {
+        if (responseCheckpoint) {
+          const edited = await tgEditRichMarkdown(
+            this.dependencies.env,
+            attachment.chat_id,
+            responseCheckpoint.telegram_message_id,
+            markdown,
+          ).catch(() => null);
+          deliveredAsRichMessage = telegramEditSucceeded(edited);
+          responseCheckpointConsumed = deliveredAsRichMessage;
+          if (deliveredAsRichMessage) {
+            checkpointMessageId = responseCheckpoint.telegram_message_id;
+            deliveredMessageCount = 1;
+          }
+        }
+        if (!deliveredAsRichMessage && checkpointTransient) {
           const edited = await tgEditRichMarkdown(
             this.dependencies.env,
             attachment.chat_id,
@@ -2214,10 +2308,12 @@ export class CodexTelegramController {
           ).catch(() => null);
           deliveredAsRichMessage = telegramEditSucceeded(edited);
           transientConsumed = deliveredAsRichMessage;
-          if (event.kind === "assistant_final" && deliveredAsRichMessage) {
+          if (deliveredAsRichMessage) {
             checkpointMessageId = checkpointTransient.telegram_message_id;
+            deliveredMessageCount = 1;
           }
-        } else {
+        }
+        if (!deliveredAsRichMessage) {
           const richResult = await tgSendRichMarkdown(
             this.dependencies.env,
             attachment.chat_id,
@@ -2226,8 +2322,9 @@ export class CodexTelegramController {
             attachment.message_thread_id || undefined,
           ).catch(() => null);
           deliveredAsRichMessage = richResult?.ok === true;
-          if (event.kind === "assistant_final" && richResult?.ok) {
+          if (richResult?.ok) {
             checkpointMessageId = richResult.result.message_id;
+            deliveredMessageCount = 1;
           }
         }
       }
@@ -2239,7 +2336,28 @@ export class CodexTelegramController {
         );
         for (let index = 0; index < chunks.length; index += 1) {
           let messageId: number | null = null;
-          if (index === 0 && checkpointTransient && !transientConsumed) {
+          if (
+            index === 0 &&
+            responseCheckpoint &&
+            !responseCheckpointConsumed
+          ) {
+            const edited = await tgEditMessage(
+              this.dependencies.env,
+              attachment.chat_id,
+              responseCheckpoint.telegram_message_id,
+              chunks[index],
+            ).catch(() => null);
+            if (telegramEditSucceeded(edited)) {
+              responseCheckpointConsumed = true;
+              messageId = responseCheckpoint.telegram_message_id;
+            }
+          }
+          if (
+            index === 0 &&
+            messageId === null &&
+            checkpointTransient &&
+            !transientConsumed
+          ) {
             const edited = await tgEditMessage(
               this.dependencies.env,
               attachment.chat_id,
@@ -2249,12 +2367,6 @@ export class CodexTelegramController {
             if (telegramEditSucceeded(edited)) {
               transientConsumed = true;
               messageId = checkpointTransient.telegram_message_id;
-            } else {
-              await tgDeleteMessage(
-                this.dependencies.env,
-                attachment.chat_id,
-                checkpointTransient.telegram_message_id,
-              ).catch(() => undefined);
             }
           }
           if (messageId === null) {
@@ -2269,13 +2381,31 @@ export class CodexTelegramController {
             if (!result.ok) return false;
             messageId = result.result.message_id;
           }
-          if (
-            event.kind === "assistant_final" &&
-            checkpointMessageId === null
-          ) {
-            checkpointMessageId = messageId;
-          }
+          checkpointMessageId ??= messageId;
+          deliveredMessageCount += 1;
         }
+      }
+      if (
+        checkpointTransient &&
+        !transientConsumed &&
+        checkpointTransient.telegram_message_id !== checkpointMessageId
+      ) {
+        await tgDeleteMessage(
+          this.dependencies.env,
+          attachment.chat_id,
+          checkpointTransient.telegram_message_id,
+        ).catch(() => undefined);
+      }
+      if (
+        responseCheckpoint &&
+        !responseCheckpointConsumed &&
+        responseCheckpoint.telegram_message_id !== checkpointMessageId
+      ) {
+        await tgDeleteMessage(
+          this.dependencies.env,
+          attachment.chat_id,
+          responseCheckpoint.telegram_message_id,
+        ).catch(() => undefined);
       }
       if (
         event.kind === "assistant_progress" ||
@@ -2290,12 +2420,37 @@ export class CodexTelegramController {
           event.target,
         );
       }
+      if (
+        event.kind === "assistant_progress" &&
+        checkpointMessageId !== null &&
+        deliveredMessageCount === 1 &&
+        richMarkdown !== null
+      ) {
+        this.dependencies.store.recordCodexResponseCheckpoint(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          event.target,
+          event.sessionId,
+          event.turnId,
+          event.id,
+          checkpointMessageId,
+          createHash("sha256").update(event.message).digest("hex"),
+          richMarkdown,
+        );
+      }
       if (event.kind === "assistant_final") {
         this.dependencies.store.recordCodexFinalDelivery(
           attachment.chat_id,
           attachment.owner_user_id,
           event.target,
           finalHash!,
+        );
+        this.dependencies.store.clearCodexResponseCheckpoint(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          event.target,
+          event.sessionId,
+          event.turnId,
         );
         await this.dependencies.topicPresence?.markReady(attachment)
           .catch(() => undefined);
@@ -5268,6 +5423,20 @@ export function formatCodexRichMarkdown(
   return (
     `${thinkingBlock}${heading}\n\n${body}${detailsBlock}` +
     `\n\n<footer>${footer}</footer>`
+  );
+}
+
+export function formatAbortedCheckpointRichMarkdown(
+  checkpointMarkdown: string,
+): string {
+  const body = checkpointMarkdown.replace(
+    /\n\n<footer>cont\.<\/footer>\s*$/u,
+    "",
+  );
+  return (
+    `${body}\n\n<details><summary>details</summary>\n\n` +
+    "`task aborted`\n\n</details>\n\n" +
+    "<footer>cont. · aborted</footer>"
   );
 }
 

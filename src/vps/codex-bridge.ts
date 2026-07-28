@@ -2902,19 +2902,17 @@ export class CodexBridge {
         payload.type === "agent_message" &&
         typeof payload.message === "string"
       ) {
-        if (pendingAgent && pendingKey) {
-          this.insertMessageEvent(
-            "assistant_progress",
-            target,
-            binding.session_id,
-            pendingKey,
-            pendingAgent,
-            pendingKey,
-          );
-        }
         pendingAgent = payload.message;
         pendingKey = `transcript-agent:${binding.session_id}:${recordOffset}`;
         pendingAt = Date.now();
+        this.insertMessageEvent(
+          "assistant_progress",
+          target,
+          binding.session_id,
+          activity?.turnId ?? pendingKey,
+          pendingAgent,
+          pendingKey,
+        );
         continue;
       }
       if (
@@ -2927,14 +2925,6 @@ export class CodexBridge {
           payload.type === "custom_tool_call"
         )
       ) {
-        this.insertMessageEvent(
-          "assistant_progress",
-          target,
-          binding.session_id,
-          pendingKey,
-          pendingAgent,
-          pendingKey,
-        );
         pendingAgent = null;
         pendingKey = null;
         pendingAt = null;

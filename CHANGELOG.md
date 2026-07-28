@@ -9,10 +9,10 @@ Notable changes to Chatinabox are recorded here.
 - Made forum topic icons switch to working when a turn starts and back to done
   when its final response is delivered. The 30-second presence pass now repairs
   missed state instead of being the only way short turns can update their icon.
-- Stopped elapsed time alone from turning a pending final answer into a
-  continuation. Continuations now require later transcript evidence that work
-  actually continued, preventing the same response from arriving as both
-  `cont.` and `fin`.
+- Sends each Codex checkpoint immediately as `cont.`, then edits the latest
+  checkpoint in place to `fin` with its final details when completion arrives.
+  Interrupted checkpoints remain continuations and gain a clear
+  `task aborted` detail instead of producing a second response.
 
 ## 2.4.5 — 2026-07-28
 

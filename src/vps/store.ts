@@ -76,6 +76,21 @@ export interface CodexQueueStatusRow extends CodexStatusRow {
   message_count: number;
 }
 
+export interface CodexResponseCheckpointRow {
+  chat_id: number;
+  owner_user_id: number;
+  server_pid: number;
+  pane_id: string;
+  pane_pid: number;
+  session_id: string;
+  turn_id: string;
+  event_id: number;
+  telegram_message_id: number;
+  message_hash: string;
+  rendered_markdown: string;
+  updated_at: number;
+}
+
 export interface CodexQueuedPromptRow {
   id: number;
   chat_id: number;
@@ -296,6 +311,24 @@ export class ChatinaboxStore {
         delivered_at INTEGER NOT NULL,
         PRIMARY KEY (
           chat_id, owner_user_id, server_pid, pane_id, pane_pid
+        )
+      );
+      CREATE TABLE IF NOT EXISTS codex_response_checkpoints (
+        chat_id INTEGER NOT NULL,
+        owner_user_id INTEGER NOT NULL,
+        server_pid INTEGER NOT NULL,
+        pane_id TEXT NOT NULL,
+        pane_pid INTEGER NOT NULL,
+        session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        event_id INTEGER NOT NULL,
+        telegram_message_id INTEGER NOT NULL,
+        message_hash TEXT NOT NULL,
+        rendered_markdown TEXT NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (
+          chat_id, owner_user_id, server_pid, pane_id, pane_pid,
+          session_id, turn_id
         )
       );
       CREATE TABLE IF NOT EXISTS codex_session_work (
@@ -1461,6 +1494,100 @@ export class ChatinaboxStore {
       target.panePid,
       messageHash,
       this.now(),
+    );
+  }
+
+  codexResponseCheckpoint(
+    chatId: number,
+    ownerUserId: number,
+    target: CodexPaneIdentity,
+    sessionId: string,
+    turnId: string,
+  ): CodexResponseCheckpointRow | null {
+    return (
+      this.db.prepare(`
+        SELECT * FROM codex_response_checkpoints
+        WHERE chat_id = ? AND owner_user_id = ?
+          AND server_pid = ? AND pane_id = ? AND pane_pid = ?
+          AND session_id = ? AND turn_id = ?
+      `).get(
+        chatId,
+        ownerUserId,
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        sessionId,
+        turnId,
+      ) as CodexResponseCheckpointRow | undefined
+    ) ?? null;
+  }
+
+  recordCodexResponseCheckpoint(
+    chatId: number,
+    ownerUserId: number,
+    target: CodexPaneIdentity,
+    sessionId: string,
+    turnId: string,
+    eventId: number,
+    telegramMessageId: number,
+    messageHash: string,
+    renderedMarkdown: string,
+  ): void {
+    this.db.prepare(`
+      INSERT INTO codex_response_checkpoints (
+        chat_id, owner_user_id, server_pid, pane_id, pane_pid,
+        session_id, turn_id, event_id, telegram_message_id, message_hash,
+        rendered_markdown, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(
+        chat_id, owner_user_id, server_pid, pane_id, pane_pid,
+        session_id, turn_id
+      ) DO UPDATE SET
+        event_id = excluded.event_id,
+        telegram_message_id = excluded.telegram_message_id,
+        message_hash = excluded.message_hash,
+        rendered_markdown = excluded.rendered_markdown,
+        updated_at = excluded.updated_at
+    `).run(
+      chatId,
+      ownerUserId,
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      sessionId,
+      turnId,
+      eventId,
+      telegramMessageId,
+      messageHash,
+      renderedMarkdown,
+      this.now(),
+    );
+    this.db.prepare(`
+      DELETE FROM codex_response_checkpoints
+      WHERE updated_at < ?
+    `).run(this.now() - 24 * 60 * 60 * 1_000);
+  }
+
+  clearCodexResponseCheckpoint(
+    chatId: number,
+    ownerUserId: number,
+    target: CodexPaneIdentity,
+    sessionId: string,
+    turnId: string,
+  ): void {
+    this.db.prepare(`
+      DELETE FROM codex_response_checkpoints
+      WHERE chat_id = ? AND owner_user_id = ?
+        AND server_pid = ? AND pane_id = ? AND pane_pid = ?
+        AND session_id = ? AND turn_id = ?
+    `).run(
+      chatId,
+      ownerUserId,
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      sessionId,
+      turnId,
     );
   }
 

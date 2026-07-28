@@ -305,7 +305,7 @@ describe("Codex bridge", () => {
     }
   });
 
-  it("does not turn a pending final into progress just because time elapsed", async () => {
+  it("emits a checkpoint immediately and promotes it only on completion", async () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-final-wait-"));
     const databasePath = path.join(directory, "bridge.sqlite");
     const transcriptPath = path.join(directory, "rollout.jsonl");
@@ -367,6 +367,28 @@ describe("Codex bridge", () => {
       db.close();
 
       await testBridge.mirrorTranscriptsOnce();
+      const progressResponse = await bridge.dispatch({
+        op: "events",
+        limit: 100,
+      });
+      if (!progressResponse.ok || !("events" in progressResponse)) {
+        throw new Error("Expected bridge events");
+      }
+      const progress = progressResponse.events.filter(
+        (event) =>
+          event.kind === "assistant_progress" ||
+          event.kind === "assistant_final",
+      );
+      expect(progress).toEqual([
+        expect.objectContaining({
+          kind: "assistant_progress",
+          sessionId,
+          turnId,
+          message: "This should be delivered once as the final.",
+        }),
+      ]);
+      await bridge.dispatch({ op: "ack", eventId: progress[0]!.id });
+
       const aged = new DatabaseSync(databasePath);
       aged.prepare(`
         UPDATE transcript_bindings SET pending_at = ?
@@ -375,6 +397,15 @@ describe("Codex bridge", () => {
       aged.close();
 
       await testBridge.mirrorTranscriptsOnce();
+      const unchanged = await bridge.dispatch({ op: "events", limit: 100 });
+      if (!unchanged.ok || !("events" in unchanged)) {
+        throw new Error("Expected bridge events");
+      }
+      expect(unchanged.events.filter(
+        (event) =>
+          event.kind === "assistant_progress" ||
+          event.kind === "assistant_final",
+      )).toEqual([]);
       appendFileSync(
         transcriptPath,
         line({
