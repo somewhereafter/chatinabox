@@ -985,8 +985,10 @@ export class CodexBridge {
     ) {
       return failure("BAD_SESSION", "That saved Codex session id is invalid.");
     }
-    const recent = this.listSavedSessions();
-    const saved = recent.find((session) => session.id === request.sessionId);
+    const saved = await this.resumableSession(
+      request.sessionId,
+      typeof request.name === "string" ? request.name : undefined,
+    );
     if (!saved) {
       return failure("BAD_SESSION", "That saved Codex session is no longer available.");
     }
@@ -1403,6 +1405,53 @@ export class CodexBridge {
     } catch {
       return [];
     }
+  }
+
+  private async resumableSession(
+    sessionId: string,
+    requestedName?: string,
+  ): Promise<CodexRecentSession | null> {
+    const indexed = this.listSavedSessions().find(
+      (session) => session.id === sessionId,
+    );
+    if (indexed) return indexed;
+
+    const rows = this.db.prepare(`
+      SELECT transcript_path, updated_at FROM transcript_bindings
+      WHERE session_id = ?
+      ORDER BY updated_at DESC
+    `).all(sessionId) as unknown as Array<{
+      readonly transcript_path: string;
+      readonly updated_at: number;
+    }>;
+    const transcriptRoot = await realpath(
+      process.env.CODEX_TRANSCRIPT_ROOT ?? path.join(CODEX_HOME, "sessions"),
+    ).catch(() => null);
+    if (!transcriptRoot) return null;
+
+    for (const row of rows) {
+      const resolvedPath = await realpath(row.transcript_path).catch(() => null);
+      if (
+        !resolvedPath ||
+        !resolvedPath.startsWith(`${transcriptRoot}${path.sep}`) ||
+        !resolvedPath.endsWith(".jsonl")
+      ) {
+        continue;
+      }
+      const fileStat = await statFile(resolvedPath).catch(() => null);
+      if (
+        !fileStat?.isFile() ||
+        transcriptSessionIdFromHead(resolvedPath, fileStat.size) !== sessionId
+      ) {
+        continue;
+      }
+      return {
+        id: sessionId,
+        name: normalizeRequestedName(requestedName ?? "Recovered Codex chat"),
+        updatedAt: new Date(row.updated_at).toISOString(),
+      };
+    }
+    return null;
   }
 
   private async latestCodexUsage(
@@ -1992,24 +2041,129 @@ export class CodexBridge {
       requestedCursor <= fileStat.size
         ? requestedCursor
         : fileStat.size;
-    this.db.prepare(`
-      INSERT INTO transcript_bindings (
-        server_pid, pane_id, pane_pid, session_id, transcript_path, cursor,
-        updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(server_pid, pane_id, pane_pid) DO UPDATE SET
-        session_id = excluded.session_id,
-        transcript_path = excluded.transcript_path,
-        updated_at = excluded.updated_at
-    `).run(
-      target.serverPid,
-      target.paneId,
-      target.panePid,
-      sessionId,
-      resolvedPath,
-      cursor,
-      Date.now(),
-    );
+    while (this.mirrorRunning && !this.closing) {
+      await delay(10);
+    }
+    const now = Date.now();
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(`
+        UPDATE hook_sessions SET active = 0, busy = 0, updated_at = ?
+        WHERE EXISTS (
+          SELECT 1 FROM transcript_bindings binding
+          WHERE binding.server_pid = hook_sessions.server_pid
+            AND binding.pane_id = hook_sessions.pane_id
+            AND binding.pane_pid = hook_sessions.pane_pid
+            AND (
+              binding.session_id = ? OR binding.transcript_path = ?
+            )
+            AND NOT (
+              binding.server_pid = ? AND binding.pane_id = ?
+                AND binding.pane_pid = ?
+            )
+        )
+      `).run(
+        now,
+        sessionId,
+        resolvedPath,
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+      );
+      this.db.prepare(`
+        DELETE FROM turn_activity
+        WHERE EXISTS (
+          SELECT 1 FROM transcript_bindings binding
+          WHERE binding.server_pid = turn_activity.server_pid
+            AND binding.pane_id = turn_activity.pane_id
+            AND binding.pane_pid = turn_activity.pane_pid
+            AND (
+              binding.session_id = ? OR binding.transcript_path = ?
+            )
+            AND NOT (
+              binding.server_pid = ? AND binding.pane_id = ?
+                AND binding.pane_pid = ?
+            )
+        )
+      `).run(
+        sessionId,
+        resolvedPath,
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+      );
+      this.db.prepare(`
+        DELETE FROM transcript_bindings
+        WHERE (
+          session_id = ? OR transcript_path = ?
+        ) AND NOT (
+          server_pid = ? AND pane_id = ? AND pane_pid = ?
+        )
+      `).run(
+        sessionId,
+        resolvedPath,
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+      );
+      this.db.prepare(`
+        INSERT INTO transcript_bindings (
+          server_pid, pane_id, pane_pid, session_id, transcript_path, cursor,
+          updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(server_pid, pane_id, pane_pid) DO UPDATE SET
+          session_id = excluded.session_id,
+          transcript_path = excluded.transcript_path,
+          cursor = CASE
+            WHEN transcript_bindings.session_id = excluded.session_id
+              AND transcript_bindings.transcript_path =
+                excluded.transcript_path
+            THEN transcript_bindings.cursor
+            ELSE excluded.cursor
+          END,
+          pending_agent = CASE
+            WHEN transcript_bindings.session_id = excluded.session_id
+              AND transcript_bindings.transcript_path =
+                excluded.transcript_path
+            THEN transcript_bindings.pending_agent
+            ELSE NULL
+          END,
+          pending_key = CASE
+            WHEN transcript_bindings.session_id = excluded.session_id
+              AND transcript_bindings.transcript_path =
+                excluded.transcript_path
+            THEN transcript_bindings.pending_key
+            ELSE NULL
+          END,
+          pending_at = CASE
+            WHEN transcript_bindings.session_id = excluded.session_id
+              AND transcript_bindings.transcript_path =
+                excluded.transcript_path
+            THEN transcript_bindings.pending_at
+            ELSE NULL
+          END,
+          internal_turn_id = CASE
+            WHEN transcript_bindings.session_id = excluded.session_id
+              AND transcript_bindings.transcript_path =
+                excluded.transcript_path
+            THEN transcript_bindings.internal_turn_id
+            ELSE NULL
+          END,
+          updated_at = excluded.updated_at
+      `).run(
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        sessionId,
+        resolvedPath,
+        cursor,
+        now,
+      );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return true;
   }
 
@@ -3836,6 +3990,48 @@ function transcriptRecordTime(record: Record<string, unknown>): number | null {
   if (typeof record.timestamp !== "string") return null;
   const parsed = Date.parse(record.timestamp);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function transcriptSessionIdFromHead(
+  transcriptPath: string,
+  fileSize: number,
+): string | null {
+  const bytesToRead = Math.min(fileSize, 2 * 1024 * 1024);
+  if (bytesToRead <= 0) return null;
+  let descriptor: number | null = null;
+  try {
+    descriptor = openSync(transcriptPath, "r");
+    const buffer = Buffer.alloc(bytesToRead);
+    const bytesRead = readSync(descriptor, buffer, 0, bytesToRead, 0);
+    for (const line of buffer.subarray(0, bytesRead).toString("utf8").split("\n")) {
+      if (!line.trim()) continue;
+      let record: unknown;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (
+        !isPlainRecord(record) ||
+        record.type !== "session_meta" ||
+        !isPlainRecord(record.payload)
+      ) {
+        continue;
+      }
+      const sessionId =
+        stringField(record.payload, "session_id", 200) ??
+        stringField(record.payload, "id", 200);
+      return sessionId &&
+          /^[0-9a-f]{8}-[0-9a-f-]{27}$/iu.test(sessionId)
+        ? sessionId
+        : null;
+    }
+  } catch {
+    return null;
+  } finally {
+    if (descriptor !== null) closeSync(descriptor);
+  }
+  return null;
 }
 
 function parseNumberSet(value: string): Set<number> {
