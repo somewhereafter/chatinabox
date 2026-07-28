@@ -417,4 +417,30 @@ describe("ChatinaboxStore", () => {
     expect(store.recentCompletedCodexGoals(-10042)).toHaveLength(1);
     store.close();
   });
+
+  it("repairs a legacy Overview row that overlaps a work topic", async () => {
+    const root = await temporaryRoot();
+    const databasePath = path.join(root, "state.sqlite");
+    let store = new ChatinaboxStore(databasePath, () => 1_800_000_000_000);
+    store.rememberTopic(-10042, 42, 26, "chatinabox", "/root/chatinabox");
+    store.registerOverview(-10042, 42, 26);
+    store.setOverviewDashboardMessage(-10042, 15, "stale-signature");
+    store.close();
+
+    store = new ChatinaboxStore(databasePath, () => 1_800_000_001_000);
+
+    expect(store.topicSetup(-10042, 42, 26)).toMatchObject({
+      topic_name: "chatinabox",
+      cwd: "/root/chatinabox",
+    });
+    expect(store.overviewDashboard(-10042)).toMatchObject({
+      owner_user_id: 42,
+      message_thread_id: 0,
+      dashboard_message_id: null,
+      render_signature: "",
+      rendered_at: 0,
+      updated_at: 1_800_000_001_000,
+    });
+    store.close();
+  });
 });

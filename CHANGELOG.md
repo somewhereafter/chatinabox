@@ -4,6 +4,12 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.4.1 — 2026-07-28
+
+- Repaired legacy forum state where the Overview and a normal work topic shared
+  one Telegram thread, preserving the work session and returning the Overview
+  to General so setup and restart controls work normally.
+
 ## 2.4.0 — 2026-07-27
 
 - Replaced manual control-topic setup with one `/forum setup` command in

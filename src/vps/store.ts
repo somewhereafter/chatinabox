@@ -418,6 +418,7 @@ export class ChatinaboxStore {
     this.migrateCodexStatuses();
     this.migrateCodexTopicRouting();
     this.migrateTopicSetups();
+    this.migrateOverviewWorkTopicCollisions();
   }
 
   close(): void {
@@ -1811,6 +1812,32 @@ export class ChatinaboxStore {
         this.db.exec(`ALTER TABLE topic_setups ADD COLUMN ${name} ${definition}`);
       }
     }
+  }
+
+  /**
+   * Early forum builds could leave the same Telegram topic registered both as
+   * the Overview and as a normal work topic. Overview is now deliberately
+   * non-conversational, so that contradictory legacy row would make `/setup`
+   * and restart controls reject a real Codex topic. Preserve the work topic
+   * and move the Overview back to Telegram's General-topic sentinel.
+   */
+  private migrateOverviewWorkTopicCollisions(): void {
+    this.db.prepare(`
+      UPDATE nexus_dashboards
+      SET message_thread_id = 0,
+          dashboard_message_id = NULL,
+          render_signature = '',
+          rendered_at = 0,
+          updated_at = ?
+      WHERE message_thread_id > 0
+        AND EXISTS (
+          SELECT 1
+          FROM topic_setups
+          WHERE topic_setups.chat_id = nexus_dashboards.chat_id
+            AND topic_setups.message_thread_id =
+              nexus_dashboards.message_thread_id
+        )
+    `).run(this.now());
   }
 
   private migrateCodexTopicRouting(): void {
