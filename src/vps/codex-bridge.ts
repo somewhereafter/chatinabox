@@ -3005,14 +3005,18 @@ export class CodexBridge {
         turnEndSignal === "completed"
       ) {
         flushActivity(recordOffset);
-        if (pendingAgent && pendingKey && !this.hasHookRegistration(target)) {
+        const completedTurnId =
+          typeof payload.turn_id === "string" && payload.turn_id.length <= 200
+            ? payload.turn_id
+            : activity?.turnId ?? pendingKey;
+        if (pendingAgent && pendingKey && completedTurnId) {
           this.insertMessageEvent(
             "assistant_final",
             target,
             binding.session_id,
-            pendingKey,
+            completedTurnId,
             pendingAgent,
-            `transcript-final:${binding.session_id}:${recordOffset}`,
+            `${binding.session_id}\u001f${completedTurnId}`,
           );
         }
         pendingAgent = null;

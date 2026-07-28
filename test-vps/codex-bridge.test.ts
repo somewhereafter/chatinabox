@@ -195,6 +195,118 @@ describe("Codex bridge", () => {
     }
   });
 
+  it("delivers a transcript final when a registered hook never emits Stop", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-bridge-"));
+    const databasePath = path.join(directory, "bridge.sqlite");
+    const transcriptPath = path.join(directory, "rollout.jsonl");
+    const sessionId = "rebound-session";
+    const turnId = "completed-without-stop";
+    const target = { serverPid: 100, paneId: "%4", panePid: 200 };
+    writeFileSync(
+      transcriptPath,
+      line({
+        timestamp: "2026-07-28T08:00:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: turnId },
+      }) +
+        line({
+          timestamp: "2026-07-28T08:00:01.000Z",
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: "Delivered from the transcript.",
+          },
+        }) +
+        line({
+          timestamp: "2026-07-28T08:00:02.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: turnId },
+        }),
+    );
+    const bridge = new CodexBridge({
+      socketPath: path.join(directory, "bridge.sock"),
+      databasePath,
+    });
+    await bridge.listen();
+    const testBridge = bridge as unknown as {
+      mirrorTranscriptsOnce(): Promise<void>;
+      insertMessageEvent(
+        kind: "assistant_final",
+        target: {
+          readonly serverPid: number;
+          readonly paneId: string;
+          readonly panePid: number;
+        },
+        sessionId: string,
+        turnId: string,
+        message: string,
+        eventKey: string,
+      ): void;
+    };
+    try {
+      const db = new DatabaseSync(databasePath);
+      db.prepare(`
+        INSERT INTO transcript_bindings (
+          server_pid, pane_id, pane_pid, session_id, transcript_path,
+          cursor, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, ?)
+      `).run(
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        sessionId,
+        transcriptPath,
+        Date.now(),
+      );
+      db.prepare(`
+        INSERT INTO hook_sessions (
+          server_pid, pane_id, pane_pid, session_id, permission_mode, cwd,
+          active, busy, updated_at
+        ) VALUES (?, ?, ?, ?, '', ?, 1, 1, ?)
+      `).run(
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        sessionId,
+        directory,
+        Date.now(),
+      );
+      db.close();
+
+      await testBridge.mirrorTranscriptsOnce();
+      testBridge.insertMessageEvent(
+        "assistant_final",
+        target,
+        sessionId,
+        turnId,
+        "Duplicate native Stop payload.",
+        `${sessionId}\u001f${turnId}`,
+      );
+
+      const response = await bridge.dispatch({ op: "events", limit: 20 });
+      expect(response).toMatchObject({
+        ok: true,
+        events: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "assistant_final",
+            sessionId,
+            turnId,
+            message: "Delivered from the transcript.",
+          }),
+        ]),
+      });
+      if (!response.ok || !("events" in response)) {
+        throw new Error("Expected bridge events");
+      }
+      expect(
+        response.events.filter((event) => event.kind === "assistant_final"),
+      ).toHaveLength(1);
+    } finally {
+      await bridge.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("reads the newest trustworthy Codex usage snapshot", () => {
     const contents =
       line({ type: "event_msg", payload: { type: "token_count" } }) +
