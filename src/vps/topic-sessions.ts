@@ -226,6 +226,48 @@ export class TopicSessionController {
     }
   }
 
+  async markWorking(attachment: CodexAttachmentRow): Promise<void> {
+    let row = this.presenceRow(attachment);
+    if (!row) return;
+    if (row.idle_since !== 0) {
+      row = this.dependencies.store.updateTopicSetup(
+        row.chat_id,
+        row.owner_user_id,
+        row.message_thread_id,
+        { idle_since: 0 },
+      ) ?? row;
+    }
+    if (row.last_icon_status === "working") return;
+    const icons = await this.loadStatusIcons();
+    if (icons) await this.setTopicIconStatus(row, "working", icons);
+  }
+
+  async markReady(attachment: CodexAttachmentRow): Promise<void> {
+    let row = this.presenceRow(attachment);
+    if (!row) return;
+    if (
+      this.dependencies.store.hasActiveCodexGoal(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        attachment.message_thread_id,
+      )
+    ) {
+      await this.markWorking(attachment);
+      return;
+    }
+    if (row.idle_since === 0) {
+      row = this.dependencies.store.updateTopicSetup(
+        row.chat_id,
+        row.owner_user_id,
+        row.message_thread_id,
+        { idle_since: this.now() },
+      ) ?? row;
+    }
+    if (row.last_icon_status === "done") return;
+    const icons = await this.loadStatusIcons();
+    if (icons) await this.setTopicIconStatus(row, "done", icons);
+  }
+
   async handleMessage(
     message: TelegramMessage,
     command: { readonly name: string; readonly argument: string } | null,
@@ -1609,6 +1651,43 @@ export class TopicSessionController {
     this.statusIcons =
       working && done && closed ? { working, done, closed } : null;
     return this.statusIcons;
+  }
+
+  private presenceRow(
+    attachment: CodexAttachmentRow,
+  ): TopicSetupRow | null {
+    if (
+      attachment.chat_id >= 0 ||
+      attachment.message_thread_id <= 0 ||
+      attachment.assistant_name === "Lobby"
+    ) {
+      return null;
+    }
+    const manager = this.dependencies.store.managerTopic(attachment.chat_id);
+    if (manager?.message_thread_id === attachment.message_thread_id) {
+      return null;
+    }
+    const current = this.dependencies.store.codexAttachment(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      attachment.message_thread_id,
+    );
+    if (
+      !current ||
+      current.server_pid !== attachment.server_pid ||
+      current.pane_id !== attachment.pane_id ||
+      current.pane_pid !== attachment.pane_pid
+    ) {
+      return null;
+    }
+    return this.dependencies.store.ensureTopicSetup(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      attachment.message_thread_id,
+      attachment.window_name,
+      attachment.cwd,
+      sessionDefaults(this.profile()),
+    );
   }
 
   private async setTopicIconStatus(

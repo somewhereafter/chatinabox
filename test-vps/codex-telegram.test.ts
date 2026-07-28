@@ -15,6 +15,7 @@ import {
   buildTelegramTextPrompt,
   codexHelpText,
   formatCodexActivityStatus,
+  formatAbortedCheckpointRichMarkdown,
   formatAgentReasoningRichMarkdown,
   formatCodexEvent,
   formatGoalEditPrompt,
@@ -65,6 +66,17 @@ function message(
 }
 
 describe("Codex Telegram attachments", () => {
+  it("marks an interrupted checkpoint without claiming it finished", () => {
+    expect(formatAbortedCheckpointRichMarkdown(
+      "==Sol==\n\nPartial result.\n\n<footer>cont.</footer>",
+    )).toBe(
+      "==Sol==\n\nPartial result.\n\n" +
+      "<details><summary>details</summary>\n\n" +
+      "`task aborted`\n\n</details>\n\n" +
+      "<footer>cont. · aborted</footer>",
+    );
+  });
+
   it("wraps final answers in the configured shell with compact details", () => {
     const event = {
       id: 1,
@@ -288,7 +300,7 @@ describe("Codex Telegram attachments", () => {
       sessionName: "codex",
       windowName: "voice",
       windowIndex: 0,
-      cwd: "/root",
+      cwd: root,
       active: true,
       busy: false,
       codexPid: 300,
@@ -1915,15 +1927,13 @@ describe("Codex Telegram attachments", () => {
     await controller.deliverEventsOnce();
     const finalAnswerIndex = calls.findIndex(
       (call) =>
-        call.method === "sendRichMessage" &&
+        call.method === "editMessageText" &&
         JSON.stringify(call.body).includes("<footer>fin</footer>"),
     );
     expect(finalAnswerIndex).toBeGreaterThanOrEqual(0);
     expect(JSON.stringify(calls[finalAnswerIndex]?.body))
       .toContain("Preparing final");
-    expect(calls[finalAnswerIndex]?.body.reply_parameters).toMatchObject({
-      message_id: 101,
-    });
+    expect(calls[finalAnswerIndex]?.body).toMatchObject({ message_id: 1_000 });
     expect(calls.at(-1)?.method).toBe("pinChatMessage");
     store.close();
   });
@@ -2090,7 +2100,7 @@ describe("Codex Telegram attachments", () => {
     addEvent("assistant_final", "Done before the grace period elapsed.");
     await controller.deliverEventsOnce();
     const final = calls.find((call) =>
-      call.method === "sendRichMessage" &&
+      call.method === "editMessageText" &&
       JSON.stringify(call.body).includes("Done before the grace period elapsed.")
     );
     expect(JSON.stringify(final?.body))
@@ -2223,6 +2233,214 @@ describe("Codex Telegram attachments", () => {
     expect(JSON.stringify(calls[0]?.body)).toContain("Second batch");
     expect(store.codexStatus(-10089, 42, pane)?.telegram_message_id)
       .toBe(700);
+    store.close();
+  });
+
+  it("drives topic presence from working and delivered-final events", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-topic-events-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "review",
+      windowIndex: 0,
+      cwd: root,
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(-10092, 42, pane, 11);
+    store.recordCodexPrompt(-10092, 42, pane, 650);
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(
+        String(init?.body ?? "{}"),
+      ) as Record<string, unknown>;
+      calls.push({ method, body });
+      return {
+        json: async () => ({
+          ok: true,
+          result:
+            method === "editMessageText" || method === "pinChatMessage"
+              ? true
+              : { message_id: 1_000 },
+        }),
+      };
+    }));
+    const events: Array<{
+      id: number;
+      kind:
+        | "state_working"
+        | "assistant_progress"
+        | "assistant_final"
+        | "turn_aborted";
+      target: typeof pane;
+      sessionId: string;
+      turnId: string;
+      assistantName: "Sol";
+      message: string;
+      createdAt: number;
+    }> = [
+      {
+        id: 1,
+        kind: "state_working" as const,
+        target: pane,
+        sessionId: "session",
+        turnId: "turn",
+        assistantName: "Sol" as const,
+        message: "working",
+        createdAt: 1_000,
+      },
+      {
+        id: 2,
+        kind: "assistant_progress" as const,
+        target: pane,
+        sessionId: "session",
+        turnId: "turn",
+        assistantName: "Sol" as const,
+        message: "Checkpoint.",
+        createdAt: 2_000,
+      },
+    ];
+    const acknowledged = new Set<number>();
+    const bridge = {
+      request: vi.fn(async (request: { op: string; eventId?: number }) => {
+        if (request.op === "events") {
+          return {
+            ok: true,
+            events: events.filter((event) => !acknowledged.has(event.id)),
+          };
+        }
+        if (request.op === "ack") {
+          acknowledged.add(request.eventId!);
+          return { ok: true, acknowledged: true };
+        }
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const topicPresence = {
+      markWorking: vi.fn(async () => undefined),
+      markReady: vi.fn(async () => undefined),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+      topicPresence,
+    });
+
+    await controller.deliverEventsOnce();
+
+    expect(topicPresence.markWorking).toHaveBeenCalledTimes(1);
+    expect(topicPresence.markWorking).toHaveBeenCalledWith(
+      store.codexAttachment(-10092, 42, 11),
+    );
+    expect(topicPresence.markReady).not.toHaveBeenCalled();
+    expect(store.codexResponseCheckpoint(
+      -10092,
+      42,
+      pane,
+      "session",
+      "turn",
+    )).toMatchObject({ telegram_message_id: 1_000 });
+
+    acknowledged.delete(2);
+    calls.length = 0;
+    await controller.deliverEventsOnce();
+    expect(calls).toHaveLength(0);
+    expect(acknowledged.has(2)).toBe(true);
+
+    events.push({
+      id: 3,
+      kind: "assistant_final" as const,
+      target: pane,
+      sessionId: "session",
+      turnId: "turn",
+      assistantName: "Sol" as const,
+      message: "Checkpoint.",
+      createdAt: 3_000,
+    });
+    await controller.deliverEventsOnce();
+
+    expect(topicPresence.markReady).toHaveBeenCalledTimes(1);
+    expect(topicPresence.markReady).toHaveBeenCalledWith(
+      store.codexAttachment(-10092, 42, 11),
+    );
+    const promoted = calls.findLast(
+      (call) =>
+        call.method === "editMessageText" &&
+        JSON.stringify(call.body).includes("<footer>fin</footer>"),
+    );
+    expect(promoted?.body).toMatchObject({ message_id: 1_000 });
+    expect(store.codexResponseCheckpoint(
+      -10092,
+      42,
+      pane,
+      "session",
+      "turn",
+    )).toBeNull();
+    expect(acknowledged).toEqual(new Set([1, 2, 3]));
+
+    store.recordCodexResponseCheckpoint(
+      -10092,
+      42,
+      pane,
+      "session",
+      "aborted-turn",
+      99,
+      2_000,
+      "checkpoint-hash",
+      "==Sol==\n\nPartial.\n\n<footer>cont.</footer>",
+    );
+    calls.length = 0;
+    events.push({
+      id: 4,
+      kind: "turn_aborted",
+      target: pane,
+      sessionId: "session",
+      turnId: "aborted-turn",
+      assistantName: "Sol",
+      message: "interrupted",
+      createdAt: 4_000,
+    });
+    await controller.deliverEventsOnce();
+    expect(calls[0]).toMatchObject({
+      method: "editMessageText",
+      body: { message_id: 2_000 },
+    });
+    expect(JSON.stringify(calls[0]?.body)).toContain("task aborted");
+    expect(JSON.stringify(calls[0]?.body))
+      .toContain("<footer>cont. · aborted</footer>");
+    expect(calls.some((call) => call.method === "sendRichMessage")).toBe(false);
+    expect(topicPresence.markReady).toHaveBeenCalledTimes(2);
+    expect(store.codexResponseCheckpoint(
+      -10092,
+      42,
+      pane,
+      "session",
+      "aborted-turn",
+    )).toMatchObject({
+      event_id: 4,
+      telegram_message_id: 2_000,
+      rendered_markdown: expect.stringContaining("task aborted"),
+    });
+    acknowledged.delete(4);
+    calls.length = 0;
+    await controller.deliverEventsOnce();
+    expect(calls).toHaveLength(0);
+    expect(acknowledged.has(4)).toBe(true);
     store.close();
   });
 
