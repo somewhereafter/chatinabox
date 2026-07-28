@@ -14,6 +14,22 @@ const PRIVATE_SEND_INTERVAL_MS = 1_100;
 const RATE_LIMIT_RECOVERY_MS = 5 * 60 * 1_000;
 const PACED_SEND_METHODS = new Set(["sendMessage", "sendRichMessage"]);
 
+/**
+ * A second send is safe only when Telegram explicitly rejected the rich
+ * request. Transport failures, 5xx responses, and 429s have ambiguous or
+ * retryable outcomes and must not immediately create a legacy duplicate.
+ */
+export function tgCanFallbackAfterRichFailure(
+  response: TelegramResponse<unknown> | null | undefined,
+): boolean {
+  if (!response || response.ok) return false;
+  return (
+    response.error_code === undefined ||
+    response.error_code === 400 ||
+    response.error_code === 404
+  );
+}
+
 async function tgCall<T>(
   env: BotEnv,
   method: string,

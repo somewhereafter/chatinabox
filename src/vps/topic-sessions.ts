@@ -9,6 +9,7 @@ import {
 } from "../telegram-callback";
 import {
   escapeTelegramHtml,
+  tgCanFallbackAfterRichFailure,
   tgAnswerCallbackQuery,
   tgDeleteMessage,
   tgEditForumTopic,
@@ -371,7 +372,7 @@ export class TopicSessionController {
       undefined,
       setup.message_thread_id,
     ).catch(() => null);
-    if (!notice?.ok) {
+    if (!notice?.ok && tgCanFallbackAfterRichFailure(notice)) {
       notice = await tgSend(
         this.dependencies.env,
         setup.chat_id,

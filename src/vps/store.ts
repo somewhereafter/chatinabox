@@ -91,6 +91,19 @@ export interface CodexResponseCheckpointRow {
   updated_at: number;
 }
 
+export interface CodexTerminalTurnRow {
+  chat_id: number;
+  owner_user_id: number;
+  message_thread_id: number;
+  session_id: string;
+  turn_id: string;
+  terminal_kind: "assistant_final" | "turn_aborted";
+  event_id: number;
+  message_hash: string;
+  telegram_message_id: number | null;
+  delivered_at: number;
+}
+
 export interface CodexQueuedPromptRow {
   id: number;
   chat_id: number;
@@ -331,6 +344,26 @@ export class ChatinaboxStore {
           session_id, turn_id
         )
       );
+      CREATE TABLE IF NOT EXISTS codex_terminal_turns (
+        chat_id INTEGER NOT NULL,
+        owner_user_id INTEGER NOT NULL,
+        message_thread_id INTEGER NOT NULL DEFAULT 0,
+        session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        terminal_kind TEXT NOT NULL,
+        event_id INTEGER NOT NULL,
+        message_hash TEXT NOT NULL DEFAULT '',
+        telegram_message_id INTEGER,
+        delivered_at INTEGER NOT NULL,
+        PRIMARY KEY (
+          chat_id, owner_user_id, message_thread_id, session_id, turn_id
+        )
+      );
+      CREATE INDEX IF NOT EXISTS codex_terminal_turns_message_idx
+        ON codex_terminal_turns(
+          chat_id, owner_user_id, message_thread_id, session_id,
+          message_hash, delivered_at
+        );
       CREATE TABLE IF NOT EXISTS codex_session_work (
         session_id TEXT PRIMARY KEY,
         active_ms INTEGER NOT NULL DEFAULT 0,
@@ -1554,6 +1587,133 @@ export class ChatinaboxStore {
         this.now() - 30 * 60 * 1_000,
       ) as CodexResponseCheckpointRow | undefined
     ) ?? null;
+  }
+
+  /**
+   * Recover one unambiguous provisional checkpoint for an authoritative abort.
+   * Multiple candidates are deliberately left untouched instead of guessing.
+   */
+  codexResponseCheckpointForAbort(
+    chatId: number,
+    ownerUserId: number,
+    target: CodexPaneIdentity,
+    sessionId: string,
+    turnStartedAt = 0,
+  ): CodexResponseCheckpointRow | null {
+    const cutoff = Math.max(
+      this.now() - 30 * 60 * 1_000,
+      Math.max(0, turnStartedAt),
+    );
+    const rows = this.db.prepare(`
+      SELECT * FROM codex_response_checkpoints
+      WHERE chat_id = ? AND owner_user_id = ?
+        AND server_pid = ? AND pane_id = ? AND pane_pid = ?
+        AND session_id = ?
+        AND turn_id LIKE 'transcript-%'
+        AND updated_at >= ?
+      ORDER BY updated_at DESC
+      LIMIT 2
+    `).all(
+      chatId,
+      ownerUserId,
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      sessionId,
+      cutoff,
+    ) as unknown as CodexResponseCheckpointRow[];
+    return rows.length === 1 ? rows[0] : null;
+  }
+
+  codexTerminalTurn(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId: number,
+    sessionId: string,
+    turnId: string,
+  ): CodexTerminalTurnRow | null {
+    return (
+      this.db.prepare(`
+        SELECT * FROM codex_terminal_turns
+        WHERE chat_id = ? AND owner_user_id = ?
+          AND message_thread_id = ? AND session_id = ? AND turn_id = ?
+      `).get(
+        chatId,
+        ownerUserId,
+        messageThreadId,
+        sessionId,
+        turnId,
+      ) as CodexTerminalTurnRow | undefined
+    ) ?? null;
+  }
+
+  codexTerminalTurnForMessage(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId: number,
+    sessionId: string,
+    messageHash: string,
+    windowMs = 30_000,
+  ): CodexTerminalTurnRow | null {
+    return (
+      this.db.prepare(`
+        SELECT * FROM codex_terminal_turns
+        WHERE chat_id = ? AND owner_user_id = ?
+          AND message_thread_id = ? AND session_id = ? AND message_hash = ?
+          AND delivered_at >= ?
+        ORDER BY delivered_at DESC
+        LIMIT 1
+      `).get(
+        chatId,
+        ownerUserId,
+        messageThreadId,
+        sessionId,
+        messageHash,
+        this.now() - Math.max(0, windowMs),
+      ) as CodexTerminalTurnRow | undefined
+    ) ?? null;
+  }
+
+  recordCodexTerminalTurn(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId: number,
+    sessionId: string,
+    turnId: string,
+    terminalKind: "assistant_final" | "turn_aborted",
+    eventId: number,
+    messageHash: string,
+    telegramMessageId: number | null,
+  ): CodexTerminalTurnRow {
+    this.db.prepare(`
+      INSERT OR IGNORE INTO codex_terminal_turns (
+        chat_id, owner_user_id, message_thread_id, session_id, turn_id,
+        terminal_kind, event_id, message_hash,
+        telegram_message_id, delivered_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      chatId,
+      ownerUserId,
+      messageThreadId,
+      sessionId,
+      turnId,
+      terminalKind,
+      eventId,
+      messageHash,
+      telegramMessageId,
+      this.now(),
+    );
+    this.db.prepare(`
+      DELETE FROM codex_terminal_turns
+      WHERE delivered_at < ?
+    `).run(this.now() - 7 * 24 * 60 * 60 * 1_000);
+    return this.codexTerminalTurn(
+      chatId,
+      ownerUserId,
+      messageThreadId,
+      sessionId,
+      turnId,
+    )!;
   }
 
   recordCodexResponseCheckpoint(

@@ -21,6 +21,7 @@ import {
 } from "../telegram-callback";
 import {
   escapeTelegramHtml,
+  tgCanFallbackAfterRichFailure,
   tgAnswerCallbackQuery,
   tgCreateForumTopic,
   tgDeleteMessage,
@@ -72,6 +73,7 @@ import type {
   CodexPromptRow,
   CodexStatusRow,
   CodexStatusSnapshot,
+  CodexTerminalTurnRow,
   CodexThinkingSectionRow,
   ChatinaboxStore,
 } from "./store";
@@ -1942,6 +1944,23 @@ export class CodexTelegramController {
         event.target,
         event.assistantName,
       );
+      const responseHash =
+        event.kind === "assistant_final" ||
+          event.kind === "assistant_progress"
+          ? createHash("sha256").update(event.message).digest("hex")
+          : null;
+      const terminal = terminalFencedEvent(event.kind)
+        ? this.terminalTurnForEvent(attachment, event, responseHash)
+        : null;
+      if (terminal) {
+        await this.reconcileTerminalReplay(
+          attachment,
+          event,
+          terminal,
+          responseHash,
+        );
+        continue;
+      }
       if (attachment.message_thread_id > 0) {
         const model = responseModelLabel(event);
         this.dependencies.store.updateTopicSetup(
@@ -1993,6 +2012,13 @@ export class CodexTelegramController {
             event.target,
             event.sessionId,
             event.turnId,
+          ) ??
+          this.dependencies.store.codexResponseCheckpointForAbort(
+            attachment.chat_id,
+            attachment.owner_user_id,
+            event.target,
+            event.sessionId,
+            event.turnStartedAt,
           );
         const abortedMarkdown = checkpoint
           ? checkpoint.event_id === event.id
@@ -2018,7 +2044,7 @@ export class CodexTelegramController {
             attachment.owner_user_id,
             event.target,
             event.sessionId,
-            event.turnId,
+            checkpoint.turn_id,
             event.id,
             checkpoint.telegram_message_id,
             checkpoint.message_hash,
@@ -2070,6 +2096,16 @@ export class CodexTelegramController {
             event.target,
           );
         }
+        this.recordTerminalTurn(
+          attachment,
+          event,
+          "turn_aborted",
+          "",
+          checkpointMarkedAborted
+            ? checkpoint?.telegram_message_id ?? null
+            : null,
+          checkpoint?.turn_id,
+        );
         continue;
       }
       if (event.kind === "agent_reasoning") {
@@ -2083,20 +2119,6 @@ export class CodexTelegramController {
           attachment,
           event.target,
         );
-        continue;
-      }
-      const finalHash = event.kind === "assistant_final"
-        ? createHash("sha256").update(event.message).digest("hex")
-        : null;
-      if (
-        finalHash &&
-        this.dependencies.store.isRecentDuplicateCodexFinal(
-          attachment.chat_id,
-          attachment.owner_user_id,
-          event.target,
-          finalHash,
-        )
-      ) {
         continue;
       }
       if (
@@ -2227,7 +2249,7 @@ export class CodexTelegramController {
               attachment.owner_user_id,
               event.target,
               event.sessionId,
-              finalHash!,
+              responseHash!,
             )
           )
         : null;
@@ -2292,6 +2314,8 @@ export class CodexTelegramController {
             outputThinking,
           )
           : null;
+      let legacyFallbackAllowed =
+        richMarkdown === null || richMarkdown.length > 30_000;
       if (richMarkdown !== null && richMarkdown.length <= 30_000) {
         const markdown = richMarkdown;
         if (responseCheckpoint) {
@@ -2334,10 +2358,14 @@ export class CodexTelegramController {
           if (richResult?.ok) {
             checkpointMessageId = richResult.result.message_id;
             deliveredMessageCount = 1;
+          } else {
+            legacyFallbackAllowed =
+              tgCanFallbackAfterRichFailure(richResult);
           }
         }
       }
       if (!deliveredAsRichMessage) {
+        if (!legacyFallbackAllowed) return false;
         const chunks = formatCodexEvent(
           event,
           this.profile(),
@@ -2452,7 +2480,15 @@ export class CodexTelegramController {
           attachment.chat_id,
           attachment.owner_user_id,
           event.target,
-          finalHash!,
+          responseHash!,
+        );
+        this.recordTerminalTurn(
+          attachment,
+          event,
+          "assistant_final",
+          responseHash!,
+          checkpointMessageId,
+          responseCheckpoint?.turn_id,
         );
         this.dependencies.store.clearCodexResponseCheckpoint(
           attachment.chat_id,
@@ -2490,6 +2526,128 @@ export class CodexTelegramController {
       }
     }
     return true;
+  }
+
+  private terminalTurnForEvent(
+    attachment: CodexAttachmentRow,
+    event: CodexEvent,
+    messageHash: string | null,
+  ): CodexTerminalTurnRow | null {
+    const exact = this.dependencies.store.codexTerminalTurn(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      attachment.message_thread_id,
+      event.sessionId,
+      event.turnId,
+    );
+    if (exact || !messageHash) return exact;
+    const fallback = this.dependencies.store.codexTerminalTurnForMessage(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      attachment.message_thread_id,
+      event.sessionId,
+      messageHash,
+    );
+    if (!fallback) return null;
+    const eventIsProvisional = isProvisionalTurnId(event.turnId);
+    const fallbackIsProvisional = isProvisionalTurnId(fallback.turn_id);
+    if (
+      !eventIsProvisional &&
+      (!fallbackIsProvisional || !event.turnStartedAt)
+    ) {
+      return null;
+    }
+    if (
+      event.turnStartedAt &&
+      event.turnStartedAt > fallback.delivered_at
+    ) {
+      return null;
+    }
+    return fallback;
+  }
+
+  private recordTerminalTurn(
+    attachment: CodexAttachmentRow,
+    event: CodexEvent,
+    terminalKind: "assistant_final" | "turn_aborted",
+    messageHash: string,
+    telegramMessageId: number | null,
+    aliasTurnId?: string,
+  ): void {
+    this.dependencies.store.recordCodexTerminalTurn(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      attachment.message_thread_id,
+      event.sessionId,
+      event.turnId,
+      terminalKind,
+      event.id,
+      messageHash,
+      telegramMessageId,
+    );
+    if (aliasTurnId && aliasTurnId !== event.turnId) {
+      this.dependencies.store.recordCodexTerminalTurn(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        attachment.message_thread_id,
+        event.sessionId,
+        aliasTurnId,
+        terminalKind,
+        event.id,
+        messageHash,
+        telegramMessageId,
+      );
+    }
+  }
+
+  private async reconcileTerminalReplay(
+    attachment: CodexAttachmentRow,
+    event: CodexEvent,
+    terminal: CodexTerminalTurnRow,
+    messageHash: string | null,
+  ): Promise<void> {
+    if (
+      event.kind !== "assistant_progress" &&
+      event.kind !== "assistant_final"
+    ) {
+      return;
+    }
+    const checkpoint =
+      this.dependencies.store.codexResponseCheckpoint(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        event.target,
+        event.sessionId,
+        event.turnId,
+      ) ??
+      (
+        messageHash
+          ? this.dependencies.store.codexResponseCheckpointForFinal(
+              attachment.chat_id,
+              attachment.owner_user_id,
+              event.target,
+              event.sessionId,
+              messageHash,
+            )
+          : null
+      );
+    if (!checkpoint || terminal.terminal_kind === "turn_aborted") return;
+    if (
+      checkpoint.telegram_message_id !== terminal.telegram_message_id
+    ) {
+      await tgDeleteMessage(
+        this.dependencies.env,
+        attachment.chat_id,
+        checkpoint.telegram_message_id,
+      ).catch(() => undefined);
+    }
+    this.dependencies.store.clearCodexResponseCheckpoint(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      event.target,
+      checkpoint.session_id,
+      checkpoint.turn_id,
+    );
   }
 
   private async routeForumHandoff(
@@ -3319,7 +3477,7 @@ export class CodexTelegramController {
       keyboard,
       attachment.message_thread_id || undefined,
     ).catch(() => null);
-    if (!sent?.ok) {
+    if (!sent?.ok && tgCanFallbackAfterRichFailure(sent)) {
       sent = await tgSend(
         this.dependencies.env,
         attachment.chat_id,
@@ -4672,6 +4830,23 @@ function isCoalescableTransientStatus(kind: TransientStatusKind): boolean {
 
 function isDeferrableAfterResponse(kind: TransientStatusKind): boolean {
   return isCoalescableTransientStatus(kind) || kind === "state_goal";
+}
+
+function terminalFencedEvent(kind: CodexEvent["kind"]): boolean {
+  return (
+    kind === "assistant_final" ||
+    kind === "assistant_progress" ||
+    kind === "agent_reasoning" ||
+    kind === "state_compacting" ||
+    kind === "state_working" ||
+    kind === "state_waiting_terminal" ||
+    kind === "state_activity" ||
+    kind === "turn_aborted"
+  );
+}
+
+function isProvisionalTurnId(turnId: string): boolean {
+  return turnId.startsWith("transcript-") || turnId.startsWith("hook-");
 }
 
 export function formatCodexTransientRichHtml(

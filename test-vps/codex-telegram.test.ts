@@ -2293,6 +2293,8 @@ describe("Codex Telegram attachments", () => {
       id: number;
       kind:
         | "state_working"
+        | "state_activity"
+        | "agent_reasoning"
         | "assistant_progress"
         | "assistant_final"
         | "turn_aborted";
@@ -2302,6 +2304,7 @@ describe("Codex Telegram attachments", () => {
       assistantName: "Sol";
       message: string;
       createdAt: number;
+      turnStartedAt?: number;
     }> = [
       {
         id: 1,
@@ -2408,13 +2411,103 @@ describe("Codex Telegram attachments", () => {
       "transcript-session",
     )).toBeNull();
     expect(acknowledged).toEqual(new Set([1, 2, 3]));
+    expect(store.codexTerminalTurn(
+      -10092,
+      42,
+      11,
+      "session",
+      "actual-turn",
+    )).toMatchObject({
+      terminal_kind: "assistant_final",
+      telegram_message_id: 1_000,
+    });
+    expect(store.codexTerminalTurn(
+      -10092,
+      42,
+      11,
+      "session",
+      "transcript-session",
+    )).toMatchObject({ terminal_kind: "assistant_final" });
+
+    calls.length = 0;
+    events.push(
+      {
+        id: 4,
+        kind: "agent_reasoning",
+        target: pane,
+        sessionId: "session",
+        turnId: "actual-turn",
+        assistantName: "Sol",
+        message: "Late thinking",
+        createdAt: 3_100,
+      },
+      {
+        id: 5,
+        kind: "state_activity",
+        target: pane,
+        sessionId: "session",
+        turnId: "actual-turn",
+        assistantName: "Sol",
+        message: "1\u001f0\u001f1\u001f0",
+        createdAt: 3_200,
+      },
+      {
+        id: 6,
+        kind: "assistant_progress",
+        target: pane,
+        sessionId: "session",
+        turnId: "actual-turn",
+        assistantName: "Sol",
+        message: "Checkpoint.",
+        createdAt: 3_300,
+      },
+    );
+    await controller.deliverEventsOnce();
+    expect(calls).toHaveLength(0);
+    expect(topicPresence.markWorking).toHaveBeenCalledTimes(1);
+    expect(store.codexThinkingSection(-10092, 42, pane)).toBeNull();
+    expect(store.codexResponseCheckpoint(
+      -10092,
+      42,
+      pane,
+      "session",
+      "actual-turn",
+    )).toBeNull();
+
+    calls.length = 0;
+    const secondTurnStartedAt = Date.now() + 1_000;
+    events.push({
+      id: 7,
+      kind: "assistant_final",
+      target: pane,
+      sessionId: "session",
+      turnId: "new-turn",
+      assistantName: "Sol",
+      message: "Checkpoint.",
+      createdAt: secondTurnStartedAt + 1_000,
+      turnStartedAt: secondTurnStartedAt,
+    });
+    await controller.deliverEventsOnce();
+    expect(calls.some((call) => call.method === "sendRichMessage")).toBe(true);
+    expect(store.codexTerminalTurn(
+      -10092,
+      42,
+      11,
+      "session",
+      "new-turn",
+    )).toMatchObject({ terminal_kind: "assistant_final" });
+    acknowledged.delete(7);
+    calls.length = 0;
+    await controller.deliverEventsOnce();
+    expect(calls).toHaveLength(0);
+    expect(acknowledged.has(7)).toBe(true);
 
     store.recordCodexResponseCheckpoint(
       -10092,
       42,
       pane,
       "session",
-      "aborted-turn",
+      "transcript-aborted-turn",
       99,
       2_000,
       "checkpoint-hash",
@@ -2422,14 +2515,14 @@ describe("Codex Telegram attachments", () => {
     );
     calls.length = 0;
     events.push({
-      id: 4,
+      id: 8,
       kind: "turn_aborted",
       target: pane,
       sessionId: "session",
       turnId: "aborted-turn",
       assistantName: "Sol",
       message: "interrupted",
-      createdAt: 4_000,
+      createdAt: 6_000,
     });
     await controller.deliverEventsOnce();
     expect(calls[0]).toMatchObject({
@@ -2440,23 +2533,51 @@ describe("Codex Telegram attachments", () => {
     expect(JSON.stringify(calls[0]?.body))
       .toContain("<footer>cont. · aborted</footer>");
     expect(calls.some((call) => call.method === "sendRichMessage")).toBe(false);
-    expect(topicPresence.markReady).toHaveBeenCalledTimes(2);
+    expect(topicPresence.markReady).toHaveBeenCalledTimes(3);
     expect(store.codexResponseCheckpoint(
       -10092,
       42,
       pane,
       "session",
-      "aborted-turn",
+      "transcript-aborted-turn",
     )).toMatchObject({
-      event_id: 4,
+      event_id: 8,
       telegram_message_id: 2_000,
       rendered_markdown: expect.stringContaining("task aborted"),
     });
-    acknowledged.delete(4);
+    expect(store.codexTerminalTurn(
+      -10092,
+      42,
+      11,
+      "session",
+      "aborted-turn",
+    )).toMatchObject({ terminal_kind: "turn_aborted" });
+    expect(store.codexTerminalTurn(
+      -10092,
+      42,
+      11,
+      "session",
+      "transcript-aborted-turn",
+    )).toMatchObject({ terminal_kind: "turn_aborted" });
+    acknowledged.delete(8);
     calls.length = 0;
     await controller.deliverEventsOnce();
     expect(calls).toHaveLength(0);
-    expect(acknowledged.has(4)).toBe(true);
+    expect(acknowledged.has(8)).toBe(true);
+    events.push({
+      id: 9,
+      kind: "assistant_progress",
+      target: pane,
+      sessionId: "session",
+      turnId: "transcript-aborted-turn",
+      assistantName: "Sol",
+      message: "Partial.",
+      createdAt: 6_100,
+    });
+    calls.length = 0;
+    await controller.deliverEventsOnce();
+    expect(calls).toHaveLength(0);
+    expect(acknowledged.has(9)).toBe(true);
     store.close();
   });
 
@@ -2731,6 +2852,7 @@ describe("Codex Telegram attachments", () => {
     }));
 
     expect(calls.some((call) => call.method === "deleteMessage")).toBe(false);
+    expect(calls.some((call) => call.method === "sendMessage")).toBe(false);
     expect(store.codexStatus(42, 42, pane)).toMatchObject({
       telegram_message_id: 700,
       reply_to_message_id: 100,

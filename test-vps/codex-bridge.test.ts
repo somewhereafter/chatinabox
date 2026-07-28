@@ -325,6 +325,11 @@ describe("Codex bridge", () => {
         },
       }) +
         line({
+          timestamp: "2026-07-28T10:00:00.500Z",
+          type: "event_msg",
+          payload: { type: "task_started", turn_id: turnId },
+        }) +
+        line({
           timestamp: "2026-07-28T10:00:01.000Z",
           type: "event_msg",
           payload: {
@@ -379,6 +384,13 @@ describe("Codex bridge", () => {
       if (!progressResponse.ok || !("events" in progressResponse)) {
         throw new Error("Expected bridge events");
       }
+      expect(progressResponse.events).toContainEqual(
+        expect.objectContaining({
+          kind: "state_working",
+          sessionId,
+          turnId,
+        }),
+      );
       const progress = progressResponse.events.filter(
         (event) =>
           event.kind === "assistant_progress" ||

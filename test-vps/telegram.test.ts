@@ -8,6 +8,28 @@ afterEach(() => {
 });
 
 describe("Telegram API backoff", () => {
+  it("allows legacy fallback only after an explicit rich-message rejection", async () => {
+    const { tgCanFallbackAfterRichFailure } = await import("../src/telegram");
+
+    expect(tgCanFallbackAfterRichFailure(null)).toBe(false);
+    expect(tgCanFallbackAfterRichFailure({
+      ok: false,
+      result: undefined,
+      error_code: 429,
+    })).toBe(false);
+    expect(tgCanFallbackAfterRichFailure({
+      ok: false,
+      result: undefined,
+      error_code: 500,
+    })).toBe(false);
+    expect(tgCanFallbackAfterRichFailure({
+      ok: false,
+      result: undefined,
+      error_code: 400,
+      description: "Bad Request: can't parse rich message",
+    })).toBe(true);
+  });
+
   it("honors retry_after without hammering Telegram during the quiet window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-07-27T04:00:00Z"));

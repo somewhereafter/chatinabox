@@ -2824,11 +2824,13 @@ export class CodexBridge {
         continue;
       }
       if (compactionSignal === "started") {
+        const turnId = activity?.turnId ??
+          `transcript-compacting:${binding.session_id}:${recordOffset}`;
         this.insertMessageEvent(
           "state_compacting",
           target,
           binding.session_id,
-          `transcript-compacting:${binding.session_id}:${recordOffset}`,
+          turnId,
           "compacting",
           `transcript-compacting:${binding.session_id}:${recordOffset}`,
         );
@@ -2870,7 +2872,7 @@ export class CodexBridge {
           "state_working",
           target,
           binding.session_id,
-          `transcript-state:${binding.session_id}:${recordOffset}`,
+          turnId,
           "working",
           `transcript-state:${binding.session_id}:${recordOffset}`,
         );
@@ -3011,11 +3013,13 @@ export class CodexBridge {
         const waiting = toolName === "wait" || toolName === "write_stdin";
         if (waiting) {
           flushActivity(recordOffset);
+          const turnId = activity?.turnId ??
+            `transcript-state:${binding.session_id}:${recordOffset}`;
           this.insertMessageEvent(
             "state_waiting_terminal",
             target,
             binding.session_id,
-            `transcript-state:${binding.session_id}:${recordOffset}`,
+            turnId,
             "waiting_terminal",
             `transcript-state:${binding.session_id}:${recordOffset}`,
           );
@@ -3120,6 +3124,14 @@ export class CodexBridge {
         pendingAgent = null;
         pendingKey = null;
         pendingAt = null;
+        this.insertMessageEvent(
+          "turn_aborted",
+          target,
+          binding.session_id,
+          abortedTurnId,
+          reason,
+          `transcript-aborted:${binding.session_id}:${recordOffset}`,
+        );
         this.deleteTurnActivity(target);
         activity = null;
         activityDirty = false;
@@ -3131,14 +3143,6 @@ export class CodexBridge {
           target.serverPid,
           target.paneId,
           target.panePid,
-        );
-        this.insertMessageEvent(
-          "turn_aborted",
-          target,
-          binding.session_id,
-          abortedTurnId,
-          reason,
-          `transcript-aborted:${binding.session_id}:${recordOffset}`,
         );
         continue;
       }

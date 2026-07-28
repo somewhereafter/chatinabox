@@ -4,6 +4,18 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.4.7 — 2026-07-28
+
+- Made completion durable per Telegram topic, Codex session, and turn. Once a
+  response reaches `fin` or is aborted, late transcript progress, thinking,
+  and activity can no longer recreate a `cont.` response or switch the topic
+  back to working.
+- Replaced short-lived text-only final deduplication with turn identity, so
+  replayed completion events remain safe across restarts while two real turns
+  can still give the same answer.
+- Recovered provisional checkpoints when a turn is aborted. Rich-message
+  delivery now falls back only when Telegram explicitly rejects the request.
+
 ## 2.4.6 — 2026-07-28
 
 - Made forum topic icons switch to working when a turn starts and back to done

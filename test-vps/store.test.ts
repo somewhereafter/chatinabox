@@ -218,7 +218,107 @@ describe("ChatinaboxStore", () => {
     now += 30_001;
     expect(store.isRecentDuplicateCodexFinal(42, 42, pane, "same-final"))
       .toBe(false);
+    store.recordCodexTerminalTurn(
+      42,
+      42,
+      0,
+      "session",
+      "turn-1",
+      "assistant_final",
+      10,
+      "same-final",
+      901,
+    );
+    now += 1;
+    store.recordCodexTerminalTurn(
+      42,
+      42,
+      0,
+      "session",
+      "turn-2",
+      "assistant_final",
+      11,
+      "same-final",
+      902,
+    );
+    expect(store.codexTerminalTurn(
+      42,
+      42,
+      0,
+      "session",
+      "turn-1",
+    )).toMatchObject({
+      terminal_kind: "assistant_final",
+      telegram_message_id: 901,
+    });
+    expect(store.codexTerminalTurn(
+      42,
+      42,
+      0,
+      "session",
+      "turn-2",
+    )).toMatchObject({
+      terminal_kind: "assistant_final",
+      telegram_message_id: 902,
+    });
+    expect(store.codexTerminalTurnForMessage(
+      42,
+      42,
+      0,
+      "session",
+      "same-final",
+    )?.turn_id).toBe("turn-2");
+    store.recordCodexTerminalTurn(
+      42,
+      42,
+      1,
+      "session",
+      "turn-1",
+      "assistant_final",
+      12,
+      "same-final",
+      904,
+    );
+    expect(store.codexTerminalTurn(
+      42,
+      42,
+      1,
+      "session",
+      "turn-1",
+    )?.telegram_message_id).toBe(904);
     expect(store.detachCodex(42, 42)).toBe(true);
+    store.close();
+  });
+
+  it("persists terminal turn fences across controller restarts", async () => {
+    const root = await temporaryRoot();
+    const databasePath = path.join(root, "state.sqlite");
+    let store = new ChatinaboxStore(databasePath);
+    store.recordCodexTerminalTurn(
+      42,
+      42,
+      0,
+      "session",
+      "turn",
+      "assistant_final",
+      12,
+      "hash",
+      903,
+    );
+    store.close();
+
+    store = new ChatinaboxStore(databasePath);
+    expect(store.codexTerminalTurn(
+      42,
+      42,
+      0,
+      "session",
+      "turn",
+    )).toMatchObject({
+      terminal_kind: "assistant_final",
+      event_id: 12,
+      telegram_message_id: 903,
+    });
     store.close();
   });
 
