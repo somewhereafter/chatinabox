@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -120,12 +121,10 @@ describe("Codex bridge", () => {
       writeFileSync(
         transcriptPath,
         line({
-          timestamp: "2026-07-27T10:00:00.000Z",
           type: "event_msg",
           payload: { type: "task_started", turn_id: "maintenance-turn" },
         }) +
           line({
-            timestamp: "2026-07-27T10:00:00.100Z",
             type: "event_msg",
             payload: {
               type: "user_message",
@@ -134,7 +133,6 @@ describe("Codex bridge", () => {
             },
           }) +
           line({
-            timestamp: "2026-07-27T10:00:01.000Z",
             type: "response_item",
             payload: {
               type: "reasoning",
@@ -142,7 +140,6 @@ describe("Codex bridge", () => {
             },
           }) +
           line({
-            timestamp: "2026-07-27T10:00:02.000Z",
             type: "response_item",
             payload: {
               type: "message",
@@ -154,7 +151,6 @@ describe("Codex bridge", () => {
             },
           }) +
           line({
-            timestamp: "2026-07-27T10:00:03.000Z",
             type: "event_msg",
             payload: { type: "task_complete", turn_id: "maintenance-turn" },
           }),
@@ -303,6 +299,109 @@ describe("Codex bridge", () => {
       expect(
         response.events.filter((event) => event.kind === "assistant_final"),
       ).toHaveLength(1);
+    } finally {
+      await bridge.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not turn a pending final into progress just because time elapsed", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-final-wait-"));
+    const databasePath = path.join(directory, "bridge.sqlite");
+    const transcriptPath = path.join(directory, "rollout.jsonl");
+    const sessionId = "pending-final-session";
+    const turnId = "short-completed-turn";
+    const target = { serverPid: 100, paneId: "%4", panePid: 200 };
+    writeFileSync(
+      transcriptPath,
+      line({
+        timestamp: "2026-07-28T10:00:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: turnId },
+      }) +
+        line({
+          timestamp: "2026-07-28T10:00:01.000Z",
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: "This should be delivered once as the final.",
+          },
+        }),
+    );
+    const bridge = new CodexBridge({
+      socketPath: path.join(directory, "bridge.sock"),
+      databasePath,
+    });
+    await bridge.listen();
+    const testBridge = bridge as unknown as {
+      mirrorTranscriptsOnce(): Promise<void>;
+    };
+    try {
+      const db = new DatabaseSync(databasePath);
+      db.prepare(`
+        INSERT INTO transcript_bindings (
+          server_pid, pane_id, pane_pid, session_id, transcript_path,
+          cursor, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, ?)
+      `).run(
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        sessionId,
+        transcriptPath,
+        Date.now(),
+      );
+      db.prepare(`
+        INSERT INTO hook_sessions (
+          server_pid, pane_id, pane_pid, session_id, permission_mode, cwd,
+          active, busy, updated_at
+        ) VALUES (?, ?, ?, ?, '', ?, 1, 1, ?)
+      `).run(
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        sessionId,
+        directory,
+        Date.now(),
+      );
+      db.close();
+
+      await testBridge.mirrorTranscriptsOnce();
+      const aged = new DatabaseSync(databasePath);
+      aged.prepare(`
+        UPDATE transcript_bindings SET pending_at = ?
+        WHERE session_id = ?
+      `).run(Date.now() - 60_000, sessionId);
+      aged.close();
+
+      await testBridge.mirrorTranscriptsOnce();
+      appendFileSync(
+        transcriptPath,
+        line({
+          timestamp: "2026-07-28T10:00:02.000Z",
+          type: "event_msg",
+          payload: { type: "task_complete", turn_id: turnId },
+        }),
+      );
+      await testBridge.mirrorTranscriptsOnce();
+
+      const response = await bridge.dispatch({ op: "events", limit: 100 });
+      if (!response.ok || !("events" in response)) {
+        throw new Error("Expected bridge events");
+      }
+      const assistantEvents = response.events.filter(
+        (event) =>
+          event.kind === "assistant_progress" ||
+          event.kind === "assistant_final",
+      );
+      expect(assistantEvents).toEqual([
+        expect.objectContaining({
+          kind: "assistant_final",
+          sessionId,
+          turnId,
+          message: "This should be delivered once as the final.",
+        }),
+      ]);
     } finally {
       await bridge.close();
       rmSync(directory, { recursive: true, force: true });

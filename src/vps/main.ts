@@ -369,11 +369,13 @@ async function main(): Promise<void> {
   mkdirSync(env.DATA_DIR, { recursive: true, mode: 0o700 });
   const store = new ChatinaboxStore(path.join(env.DATA_DIR, "chatinabox.sqlite"));
   const progressPacer = new TelegramProgressPacer();
+  const topics = new TopicSessionController({ env, store, profile });
   const codex = new CodexTelegramController({
     env,
     store,
     profile,
     progressPacer,
+    topicPresence: topics,
   });
   const overview = new OverviewController({
     env,
@@ -381,7 +383,6 @@ async function main(): Promise<void> {
     profile,
     progressPacer,
   });
-  const topics = new TopicSessionController({ env, store, profile });
   const manager = new ManagerController({ env, store, profile });
   const forum = new ForumSetupController({
     env,

@@ -807,7 +807,7 @@ describe("Topic session setup", () => {
         TG_ALLOWED_USER_IDS: "42",
         DATA_DIR: root,
         CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
-        DEFAULT_CWD: "/root",
+        DEFAULT_CWD: root,
       },
       store,
       bridge: bridge as never,
@@ -835,6 +835,83 @@ describe("Topic session setup", () => {
     expect(iconEdits).toHaveLength(2);
     expect(iconEdits[1]?.icon_custom_emoji_id).toBe("done-id");
     expect(store.topicSetup(-10042, 42, 7)?.last_icon_status).toBe("done");
+    store.close();
+  });
+
+  it("updates short-turn topic presence immediately from delivery events", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-event-presence-"));
+    roots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const now = 5_000;
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "review",
+      windowIndex: 0,
+      cwd: root,
+      active: true,
+      busy: false,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+    };
+    store.attachCodex(-10042, 42, pane, 7);
+    const iconEdits: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      if (url.includes("getForumTopicIconStickers")) {
+        return {
+          json: async () => ({
+            ok: true,
+            result: [
+              { emoji: "🧪", custom_emoji_id: "working-id" },
+              { emoji: "✅", custom_emoji_id: "done-id" },
+              { emoji: "📁", custom_emoji_id: "closed-id" },
+            ],
+          }),
+        };
+      }
+      iconEdits.push(
+        JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+      );
+      return { json: async () => ({ ok: true, result: true }) };
+    }));
+    const controller = new TopicSessionController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      now: () => now,
+    });
+    const attachment = store.codexAttachment(-10042, 42, 7)!;
+
+    await controller.markWorking(attachment);
+    await controller.markWorking(attachment);
+    expect(iconEdits).toHaveLength(1);
+    expect(iconEdits[0]).toMatchObject({
+      message_thread_id: 7,
+      icon_custom_emoji_id: "working-id",
+    });
+    expect(store.topicSetup(-10042, 42, 7)).toMatchObject({
+      idle_since: 0,
+      last_icon_status: "working",
+    });
+
+    await controller.markReady(attachment);
+    await controller.markReady(attachment);
+    expect(iconEdits).toHaveLength(2);
+    expect(iconEdits[1]).toMatchObject({
+      message_thread_id: 7,
+      icon_custom_emoji_id: "done-id",
+    });
+    expect(store.topicSetup(-10042, 42, 7)).toMatchObject({
+      idle_since: now,
+      last_icon_status: "done",
+    });
     store.close();
   });
 

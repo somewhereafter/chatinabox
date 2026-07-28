@@ -2644,25 +2644,6 @@ export class CodexBridge {
           generated.callId,
       );
     };
-    if (
-      pendingAgent &&
-      pendingKey &&
-      pendingAt &&
-      internalTurnId === null &&
-      Date.now() - pendingAt >= 1_500
-    ) {
-      this.insertMessageEvent(
-        "assistant_progress",
-        target,
-        binding.session_id,
-        pendingKey,
-        pendingAgent,
-        pendingKey,
-      );
-      pendingAgent = null;
-      pendingKey = null;
-      pendingAt = null;
-    }
     if (fileStat.size <= binding.cursor) {
       this.updateBindingCursor(binding, binding.cursor, {
         pendingAgent,

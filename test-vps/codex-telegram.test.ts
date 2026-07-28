@@ -288,7 +288,7 @@ describe("Codex Telegram attachments", () => {
       sessionName: "codex",
       windowName: "voice",
       windowIndex: 0,
-      cwd: "/root",
+      cwd: root,
       active: true,
       busy: false,
       codexPid: 300,
@@ -2223,6 +2223,107 @@ describe("Codex Telegram attachments", () => {
     expect(JSON.stringify(calls[0]?.body)).toContain("Second batch");
     expect(store.codexStatus(-10089, 42, pane)?.telegram_message_id)
       .toBe(700);
+    store.close();
+  });
+
+  it("drives topic presence from working and delivered-final events", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-topic-events-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "review",
+      windowIndex: 0,
+      cwd: root,
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(-10092, 42, pane, 11);
+    store.recordCodexPrompt(-10092, 42, pane, 650);
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      const method = url.split("/").pop() ?? "";
+      return {
+        json: async () => ({
+          ok: true,
+          result:
+            method === "editMessageText" || method === "pinChatMessage"
+              ? true
+              : { message_id: 1_000 },
+        }),
+      };
+    }));
+    const events = [
+      {
+        id: 1,
+        kind: "state_working" as const,
+        target: pane,
+        sessionId: "session",
+        turnId: "turn",
+        assistantName: "Sol" as const,
+        message: "working",
+        createdAt: 1_000,
+      },
+      {
+        id: 2,
+        kind: "assistant_final" as const,
+        target: pane,
+        sessionId: "session",
+        turnId: "turn",
+        assistantName: "Sol" as const,
+        message: "Done.",
+        createdAt: 2_000,
+      },
+    ];
+    const acknowledged = new Set<number>();
+    const bridge = {
+      request: vi.fn(async (request: { op: string; eventId?: number }) => {
+        if (request.op === "events") {
+          return {
+            ok: true,
+            events: events.filter((event) => !acknowledged.has(event.id)),
+          };
+        }
+        if (request.op === "ack") {
+          acknowledged.add(request.eventId!);
+          return { ok: true, acknowledged: true };
+        }
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const topicPresence = {
+      markWorking: vi.fn(async () => undefined),
+      markReady: vi.fn(async () => undefined),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+      topicPresence,
+    });
+
+    await controller.deliverEventsOnce();
+
+    expect(topicPresence.markWorking).toHaveBeenCalledTimes(1);
+    expect(topicPresence.markWorking).toHaveBeenCalledWith(
+      store.codexAttachment(-10092, 42, 11),
+    );
+    expect(topicPresence.markReady).toHaveBeenCalledTimes(1);
+    expect(topicPresence.markReady).toHaveBeenCalledWith(
+      store.codexAttachment(-10092, 42, 11),
+    );
+    expect(acknowledged).toEqual(new Set([1, 2]));
     store.close();
   });
 

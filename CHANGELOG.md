@@ -4,6 +4,16 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.4.6 — 2026-07-28
+
+- Made forum topic icons switch to working when a turn starts and back to done
+  when its final response is delivered. The 30-second presence pass now repairs
+  missed state instead of being the only way short turns can update their icon.
+- Stopped elapsed time alone from turning a pending final answer into a
+  continuation. Continuations now require later transcript evidence that work
+  actually continued, preventing the same response from arriving as both
+  `cont.` and `fin`.
+
 ## 2.4.5 — 2026-07-28
 
 - Relaxed routine Telegram activity, thinking, and timer edits to one combined

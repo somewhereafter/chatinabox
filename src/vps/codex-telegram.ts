@@ -98,10 +98,16 @@ const GOAL_SYNC_INTERVAL_MS = 30_000;
 const TRANSIENT_REFRESH_INTERVAL_MS = 10_000;
 const POST_RESPONSE_TRANSIENT_GRACE_MS = 5_000;
 
+interface TopicPresenceSink {
+  markWorking(attachment: CodexAttachmentRow): Promise<void>;
+  markReady(attachment: CodexAttachmentRow): Promise<void>;
+}
+
 interface CodexTelegramDependencies {
   readonly env: ChatinaboxEnv;
   readonly store: ChatinaboxStore;
   readonly bridge?: CodexBridgeClient;
+  readonly topicPresence?: TopicPresenceSink;
   readonly profile?: () => ExperienceProfile;
   readonly now?: () => number;
   readonly thinkingFlushIntervalMs?: number;
@@ -1186,6 +1192,8 @@ export class CodexTelegramController {
           attachment.message_thread_id || undefined,
         );
       }
+      await this.dependencies.topicPresence?.markReady(attachment)
+        .catch(() => undefined);
       return false;
     }
     this.dependencies.store.recordCodexPrompt(
@@ -1484,6 +1492,8 @@ export class CodexTelegramController {
       `⚠️ ${escapeTelegramHtml(message)}`,
       replyToMessageId,
     ).catch(() => undefined);
+    await this.dependencies.topicPresence?.markReady(attachment)
+      .catch(() => undefined);
   }
 
   async run(signal: AbortSignal): Promise<void> {
@@ -2287,6 +2297,8 @@ export class CodexTelegramController {
           event.target,
           finalHash!,
         );
+        await this.dependencies.topicPresence?.markReady(attachment)
+          .catch(() => undefined);
         if (
           attachment.message_thread_id > 0 &&
           checkpointMessageId !== null
@@ -2973,6 +2985,13 @@ export class CodexTelegramController {
     forceRender = false,
     snapshotOverride?: CodexStatusSnapshot,
   ): Promise<void> {
+    if (kind === "state_interrupted") {
+      await this.dependencies.topicPresence?.markReady(attachment)
+        .catch(() => undefined);
+    } else {
+      await this.dependencies.topicPresence?.markWorking(attachment)
+        .catch(() => undefined);
+    }
     const mutation = this.beginTransientMutation(attachment, target);
     const existing = this.dependencies.store.codexStatus(
       attachment.chat_id,
