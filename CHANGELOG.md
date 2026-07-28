@@ -4,6 +4,14 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.4.4 — 2026-07-28
+
+- Made resumed sessions atomically take ownership of their transcript so a
+  closed pane cannot keep mirroring the same work and create duplicate
+  Telegram progress messages.
+- Allowed a known, validated transcript binding to recover a session when
+  Codex's saved-session index no longer contains it.
+
 ## 2.4.3 — 2026-07-28
 
 - Restored final Telegram replies for resumed or rebound Codex sessions whose

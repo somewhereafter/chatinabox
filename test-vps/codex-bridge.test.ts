@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -37,6 +38,7 @@ import {
 } from "../src/vps/codex-bridge";
 import {
   assistantNameForModel,
+  type CodexPane,
   isPaneIdentity,
   normalizeAssistantName,
   samePaneIdentity,
@@ -303,6 +305,228 @@ describe("Codex bridge", () => {
       ).toHaveLength(1);
     } finally {
       await bridge.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("transfers transcript ownership when a resumed pane binds the same session", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-transfer-"));
+    const databasePath = path.join(directory, "bridge.sqlite");
+    const transcriptRoot = path.join(directory, "sessions");
+    const transcriptPath = path.join(transcriptRoot, "rollout-session.jsonl");
+    const sessionId = "019f0000-0000-7000-8000-000000000001";
+    const oldTarget = { serverPid: 100, paneId: "%4", panePid: 200 };
+    const newTarget = { serverPid: 100, paneId: "%5", panePid: 201 };
+    mkdirSync(transcriptRoot, { recursive: true });
+    writeFileSync(
+      transcriptPath,
+      line({
+        type: "session_meta",
+        payload: { id: sessionId, session_id: sessionId },
+      }),
+    );
+    const previousTranscriptRoot = process.env.CODEX_TRANSCRIPT_ROOT;
+    process.env.CODEX_TRANSCRIPT_ROOT = transcriptRoot;
+    const bridge = new CodexBridge({
+      socketPath: path.join(directory, "bridge.sock"),
+      databasePath,
+    });
+    await bridge.listen();
+    try {
+      const db = new DatabaseSync(databasePath);
+      db.prepare(`
+        INSERT INTO transcript_bindings (
+          server_pid, pane_id, pane_pid, session_id, transcript_path,
+          cursor, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, ?)
+      `).run(
+        oldTarget.serverPid,
+        oldTarget.paneId,
+        oldTarget.panePid,
+        sessionId,
+        transcriptPath,
+        Date.now(),
+      );
+      db.prepare(`
+        INSERT INTO hook_sessions (
+          server_pid, pane_id, pane_pid, session_id, permission_mode, cwd,
+          active, busy, updated_at
+        ) VALUES (?, ?, ?, ?, '', ?, 1, 1, ?)
+      `).run(
+        oldTarget.serverPid,
+        oldTarget.paneId,
+        oldTarget.panePid,
+        sessionId,
+        directory,
+        Date.now(),
+      );
+      db.prepare(`
+        INSERT INTO turn_activity (
+          server_pid, pane_id, pane_pid, session_id, turn_id,
+          tool_calls, edited_files, explored_things, reasoning_summary_keys,
+          active_shells, started_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, '[]', 0, '[]', '[]', ?, ?)
+      `).run(
+        oldTarget.serverPid,
+        oldTarget.paneId,
+        oldTarget.panePid,
+        sessionId,
+        "old-turn",
+        Date.now(),
+        Date.now(),
+      );
+      db.close();
+
+      await (
+        bridge as unknown as {
+          bindTranscript(
+            target: typeof newTarget,
+            sessionId: string,
+            transcriptPath: string,
+          ): Promise<boolean>;
+        }
+      ).bindTranscript(newTarget, sessionId, transcriptPath);
+
+      const verification = new DatabaseSync(databasePath);
+      expect(
+        verification.prepare(`
+          SELECT pane_id, pane_pid, session_id, cursor
+          FROM transcript_bindings WHERE session_id = ?
+        `).all(sessionId),
+      ).toEqual([
+        expect.objectContaining({
+          pane_id: newTarget.paneId,
+          pane_pid: newTarget.panePid,
+          session_id: sessionId,
+          cursor: Buffer.byteLength(readFileSync(transcriptPath)),
+        }),
+      ]);
+      expect(
+        verification.prepare(`
+          SELECT active, busy FROM hook_sessions
+          WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+        `).get(
+          oldTarget.serverPid,
+          oldTarget.paneId,
+          oldTarget.panePid,
+        ),
+      ).toMatchObject({ active: 0, busy: 0 });
+      expect(
+        verification.prepare(`
+          SELECT count(*) AS count FROM turn_activity
+          WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+        `).get(
+          oldTarget.serverPid,
+          oldTarget.paneId,
+          oldTarget.panePid,
+        ),
+      ).toMatchObject({ count: 0 });
+      verification.close();
+    } finally {
+      await bridge.close();
+      if (previousTranscriptRoot === undefined) {
+        delete process.env.CODEX_TRANSCRIPT_ROOT;
+      } else {
+        process.env.CODEX_TRANSCRIPT_ROOT = previousTranscriptRoot;
+      }
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("resumes a known bound transcript when Codex's session index is missing it", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-resume-"));
+    const databasePath = path.join(directory, "bridge.sqlite");
+    const transcriptRoot = path.join(directory, "sessions");
+    const transcriptPath = path.join(
+      transcriptRoot,
+      "rollout-019f0000-0000-7000-8000-000000000001.jsonl",
+    );
+    const sessionIndexPath = path.join(directory, "session_index.jsonl");
+    const sessionId = "019f0000-0000-7000-8000-000000000001";
+    mkdirSync(transcriptRoot, { recursive: true });
+    writeFileSync(sessionIndexPath, "");
+    writeFileSync(
+      transcriptPath,
+      line({
+        type: "session_meta",
+        payload: { id: sessionId, session_id: sessionId },
+      }),
+    );
+    const previousSessionIndex = process.env.CODEX_SESSION_INDEX;
+    const previousTranscriptRoot = process.env.CODEX_TRANSCRIPT_ROOT;
+    process.env.CODEX_SESSION_INDEX = sessionIndexPath;
+    process.env.CODEX_TRANSCRIPT_ROOT = transcriptRoot;
+    const bridge = new CodexBridge({
+      socketPath: path.join(directory, "bridge.sock"),
+      databasePath,
+      defaultCwd: directory,
+    });
+    await bridge.listen();
+    try {
+      const db = new DatabaseSync(databasePath);
+      db.prepare(`
+        INSERT INTO transcript_bindings (
+          server_pid, pane_id, pane_pid, session_id, transcript_path,
+          cursor, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, ?)
+      `).run(100, "%4", 200, sessionId, transcriptPath, Date.now());
+      db.close();
+
+      const pane: CodexPane = {
+        serverPid: 100,
+        paneId: "%9",
+        panePid: 300,
+        sessionName: "webterm",
+        windowName: "Recovered chat",
+        windowIndex: 9,
+        cwd: directory,
+        active: false,
+        busy: false,
+        codexPid: 301,
+        assistantName: "Sol",
+        sessionId,
+      };
+      let launchedCommand = "";
+      const testBridge = bridge as unknown as {
+        listCodexPanes(): Promise<CodexPane[]>;
+        startTmuxCodex(input: {
+          readonly command: string;
+        }): Promise<{ readonly ok: true; readonly pane: CodexPane }>;
+      };
+      testBridge.listCodexPanes = async () => [];
+      testBridge.startTmuxCodex = async (input) => {
+        launchedCommand = input.command;
+        return { ok: true, pane };
+      };
+
+      await expect(bridge.dispatch({
+        op: "resume",
+        sessionId,
+        name: "Recovered chat",
+        cwd: directory,
+        model: "sol",
+        reasoningEffort: "high",
+        fast: false,
+      })).resolves.toMatchObject({
+        ok: true,
+        pane: expect.objectContaining({ paneId: "%9", sessionId }),
+      });
+      expect(launchedCommand).toContain(`resume ${sessionId}`);
+      expect(launchedCommand).toContain(
+        `model_reasoning_summary="detailed"`,
+      );
+    } finally {
+      await bridge.close();
+      if (previousSessionIndex === undefined) {
+        delete process.env.CODEX_SESSION_INDEX;
+      } else {
+        process.env.CODEX_SESSION_INDEX = previousSessionIndex;
+      }
+      if (previousTranscriptRoot === undefined) {
+        delete process.env.CODEX_TRANSCRIPT_ROOT;
+      } else {
+        process.env.CODEX_TRANSCRIPT_ROOT = previousTranscriptRoot;
+      }
       rmSync(directory, { recursive: true, force: true });
     }
   });
