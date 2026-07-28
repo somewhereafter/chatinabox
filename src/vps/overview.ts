@@ -7,6 +7,7 @@ import {
 } from "../telegram-callback";
 import {
   tgAnswerCallbackQuery,
+  tgDeleteMessage,
   tgEditRichHtml,
   tgSetChatPhoto,
   tgSetChatTitle,
@@ -46,8 +47,9 @@ import {
 } from "./progress-pacer";
 
 const NEXUS_POLL_MS = 5_000;
-const NEXUS_TIMESTAMP_REFRESH_MS = 60_000;
+const NEXUS_TIMESTAMP_REFRESH_MS = 120_000;
 const NEXUS_AUTOMATIC_RENDER_INTERVAL_MS = 30_000;
+const NEXUS_STALE_CLEANUP_INTERVAL_MS = 30_000;
 
 type BridgeClient = Pick<CodexBridgeClient, "request">;
 
@@ -307,8 +309,13 @@ export class OverviewController {
   }
 
   private async refreshDashboard(chatId: number, force: boolean): Promise<void> {
-    const row = this.dependencies.store.overviewDashboard(chatId);
+    let row = this.dependencies.store.overviewDashboard(chatId);
     if (!row) return;
+    if (row.stale_message_id !== null) {
+      await this.cleanupStaleDashboardMessage(row, false);
+      row = this.dependencies.store.overviewDashboard(chatId);
+      if (!row) return;
+    }
     const response = await this.bridge.request({
       op: "list",
       ...(force ? { refreshUsage: true } : {}),
@@ -404,6 +411,12 @@ export class OverviewController {
     signature: string,
     keyboard: ReturnType<typeof buildInlineKeyboard>,
   ): Promise<void> {
+    if (
+      row.stale_message_id !== null &&
+      !await this.cleanupStaleDashboardMessage(row, true)
+    ) {
+      return;
+    }
     const sent = await tgSendRichHtml(
       this.dependencies.env,
       row.chat_id,
@@ -425,6 +438,49 @@ export class OverviewController {
       row.message_thread_id,
       this.now(),
     );
+    const updated = this.dependencies.store.overviewDashboard(row.chat_id);
+    if (updated && updated.stale_message_id !== null) {
+      await this.cleanupStaleDashboardMessage(updated, true);
+    }
+  }
+
+  private async cleanupStaleDashboardMessage(
+    row: OverviewDashboardRow,
+    force: boolean,
+  ): Promise<boolean> {
+    const staleMessageId = row.stale_message_id;
+    if (staleMessageId === null) return true;
+    if (staleMessageId === row.dashboard_message_id) {
+      this.dependencies.store.clearOverviewDashboardStaleMessage(
+        row.chat_id,
+        staleMessageId,
+      );
+      return true;
+    }
+    if (
+      !force &&
+      this.now() - row.stale_cleanup_at < NEXUS_STALE_CLEANUP_INTERVAL_MS
+    ) {
+      return false;
+    }
+    this.dependencies.store.markOverviewDashboardStaleCleanupAttempt(
+      row.chat_id,
+      staleMessageId,
+    );
+    const deleted = await tgDeleteMessage(
+      this.dependencies.env,
+      row.chat_id,
+      staleMessageId,
+    ).catch(() => null);
+    const alreadyGone =
+      deleted?.error_code === 400 &&
+      /message to delete not found/iu.test(deleted.description ?? "");
+    if (!deleted?.ok && !alreadyGone) return false;
+    this.dependencies.store.clearOverviewDashboardStaleMessage(
+      row.chat_id,
+      staleMessageId,
+    );
+    return true;
   }
 }
 

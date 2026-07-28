@@ -1685,10 +1685,17 @@ describe("Codex Telegram attachments", () => {
       edited_files: 1,
       explored_things: 4,
     });
+
+    now += 9_000;
+    await controller.refreshStaleTransientTimersOnce();
+    expect(calls.filter((call) => call.method === "editMessageText"))
+      .toHaveLength(1);
+    expect(JSON.stringify(calls[0]?.body)).toContain("ran");
+    expect(JSON.stringify(calls[0]?.body)).toContain("<b>4</b>");
     store.close();
   });
 
-  it("refreshes a silent working timer every five seconds without faking activity", async () => {
+  it("refreshes a silent working timer every ten seconds without faking activity", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-heartbeat-"));
     temporaryRoots.push(root);
     let now = 1_800_000_000_000;
@@ -1743,7 +1750,7 @@ describe("Codex Telegram attachments", () => {
       now: () => now,
     });
 
-    now += 4_999;
+    now += 9_999;
     await controller.refreshStaleTransientTimersOnce();
     expect(calls).toHaveLength(0);
 
@@ -1751,20 +1758,20 @@ describe("Codex Telegram attachments", () => {
     await controller.refreshStaleTransientTimersOnce();
     expect(calls).toHaveLength(1);
     expect(calls[0]?.method).toBe("editMessageText");
-    expect(JSON.stringify(calls[0]?.body)).toContain("1m 5s");
+    expect(JSON.stringify(calls[0]?.body)).toContain("1m 10s");
     expect(JSON.stringify(calls[0]?.body)).not.toContain("since update");
     expect(store.codexStatus(-10042, 42, pane)?.updated_at)
       .toBe(actualUpdatedAt);
 
-    now += 5_000;
-    await controller.refreshStaleTransientTimersOnce();
-    expect(calls).toHaveLength(2);
-    expect(JSON.stringify(calls[1]?.body)).toContain("1m 10s");
-
     now += 10_000;
     await controller.refreshStaleTransientTimersOnce();
+    expect(calls).toHaveLength(2);
+    expect(JSON.stringify(calls[1]?.body)).toContain("1m 20s");
+
+    now += 20_000;
+    await controller.refreshStaleTransientTimersOnce();
     expect(calls).toHaveLength(3);
-    expect(JSON.stringify(calls[2]?.body)).toContain("1m 20s");
+    expect(JSON.stringify(calls[2]?.body)).toContain("1m 40s");
     store.close();
   });
 
@@ -1873,7 +1880,7 @@ describe("Codex Telegram attachments", () => {
     expect(calls).toHaveLength(0);
     expect(acknowledged).toEqual(new Set([1, 2]));
 
-    now += 5_000;
+    now += 10_000;
     await controller.deliverEventsOnce();
     const firstThinking = calls.find(
       (call) =>
@@ -1918,6 +1925,183 @@ describe("Codex Telegram attachments", () => {
       message_id: 101,
     });
     expect(calls.at(-1)?.method).toBe("pinChatMessage");
+    store.close();
+  });
+
+  it("waits five seconds after responses and carries delayed thinking into the next checkpoint", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-response-grace-"));
+    temporaryRoots.push(root);
+    let now = 1_800_000_000_000;
+    const store = new ChatinaboxStore(
+      path.join(root, "state.sqlite"),
+      () => now,
+    );
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "response-grace",
+      windowIndex: 0,
+      cwd: "/root",
+      active: true,
+      busy: true,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(-10091, 42, pane, 10);
+    store.setCodexStatus(-10091, 42, pane, 700, {
+      statusKind: "state_working",
+      toolCalls: 1,
+      editedFiles: 0,
+      exploredThings: 1,
+      activeShells: 0,
+      queuedMessages: 0,
+      replyToMessageId: 650,
+      startedAt: now - 1_000,
+    });
+    store.appendCodexThinkingSummary(
+      -10091,
+      42,
+      pane,
+      "Thinking before the checkpoint",
+    );
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    let nextMessageId = 1_000;
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ method, body });
+      return {
+        json: async () => ({
+          ok: true,
+          result:
+            method === "editMessageText" ||
+              method === "deleteMessage" ||
+              method === "pinChatMessage"
+              ? true
+              : { message_id: nextMessageId++ },
+        }),
+      };
+    }));
+    type EventKind =
+      | "state_working"
+      | "agent_reasoning"
+      | "assistant_progress"
+      | "assistant_final";
+    const events: Array<{
+      id: number;
+      kind: EventKind;
+      target: typeof pane;
+      sessionId: string;
+      turnId: string;
+      assistantName: "Sol";
+      message: string;
+      createdAt: number;
+    }> = [];
+    const acknowledged = new Set<number>();
+    const bridge = {
+      request: vi.fn(async (request: { op: string; eventId?: number }) => {
+        if (request.op === "events") {
+          return {
+            ok: true,
+            events: events.filter((event) => !acknowledged.has(event.id)),
+          };
+        }
+        if (request.op === "ack") {
+          acknowledged.add(request.eventId!);
+          return { ok: true, acknowledged: true };
+        }
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+      now: () => now,
+    });
+    const addEvent = (kind: EventKind, message: string) => {
+      events.push({
+        id: events.length + 1,
+        kind,
+        target: pane,
+        sessionId: "session",
+        turnId: "turn",
+        assistantName: "Sol",
+        message,
+        createdAt: now,
+      });
+    };
+
+    addEvent("assistant_progress", "First checkpoint.");
+    await controller.deliverEventsOnce();
+    expect(calls.map((call) => call.method)).toEqual(["editMessageText"]);
+    expect(JSON.stringify(calls[0]?.body))
+      .toContain("Thinking before the checkpoint");
+    expect(store.codexStatus(-10091, 42, pane)).toBeNull();
+    expect(store.codexThinkingSection(-10091, 42, pane)).toBeNull();
+
+    calls.length = 0;
+    now += 1_000;
+    addEvent("state_working", "working");
+    addEvent("agent_reasoning", "Thinking after the checkpoint");
+    await controller.deliverEventsOnce();
+    expect(calls).toHaveLength(0);
+    expect(store.codexStatus(-10091, 42, pane)).toBeNull();
+    expect(store.codexThinkingSection(-10091, 42, pane)?.summaries_json)
+      .toContain("Thinking after the checkpoint");
+
+    now += 3_999;
+    await controller.flushDeferredTransientStartsOnce();
+    expect(calls).toHaveLength(0);
+
+    now += 1;
+    await controller.flushDeferredTransientStartsOnce();
+    expect(calls.map((call) => call.method)).toEqual(["sendRichMessage"]);
+    expect(JSON.stringify(calls[0]?.body))
+      .toContain("Thinking after the checkpoint");
+    expect(store.codexStatus(-10091, 42, pane)?.telegram_message_id)
+      .toBe(1_000);
+
+    calls.length = 0;
+    now += 1_000;
+    addEvent("agent_reasoning", "Thinking before another checkpoint");
+    addEvent("assistant_progress", "Second checkpoint.");
+    await controller.deliverEventsOnce();
+    expect(calls.map((call) => call.method)).toEqual(["editMessageText"]);
+    expect(JSON.stringify(calls[0]?.body))
+      .toContain("Thinking before another checkpoint");
+
+    calls.length = 0;
+    addEvent("state_working", "working");
+    addEvent("agent_reasoning", "Thinking that bypasses the transient");
+    await controller.deliverEventsOnce();
+    expect(calls).toHaveLength(0);
+
+    now += 4_000;
+    addEvent("assistant_final", "Done before the grace period elapsed.");
+    await controller.deliverEventsOnce();
+    const final = calls.find((call) =>
+      call.method === "sendRichMessage" &&
+      JSON.stringify(call.body).includes("Done before the grace period elapsed.")
+    );
+    expect(JSON.stringify(final?.body))
+      .toContain("Thinking that bypasses the transient");
+    expect(store.codexThinkingSection(-10091, 42, pane)).toBeNull();
+
+    calls.length = 0;
+    now += 1_000;
+    await controller.flushDeferredTransientStartsOnce();
+    expect(calls).toHaveLength(0);
+    expect(store.codexStatus(-10091, 42, pane)).toBeNull();
     store.close();
   });
 
@@ -2032,7 +2216,7 @@ describe("Codex Telegram attachments", () => {
 
     calls.length = 0;
     store.appendCodexThinkingSummary(-10089, 42, pane, "Second batch");
-    now += 5_000;
+    now += 10_000;
     await controller.deliverEventsOnce();
     expect(calls.map((call) => call.method)).toEqual(["editMessageText"]);
     expect(calls[0]?.body).toMatchObject({ message_id: 700 });

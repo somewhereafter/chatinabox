@@ -138,6 +138,8 @@ export interface OverviewDashboardRow {
   owner_user_id: number;
   message_thread_id: number;
   dashboard_message_id: number | null;
+  stale_message_id: number | null;
+  stale_cleanup_at: number;
   render_signature: string;
   rendered_at: number;
   updated_at: number;
@@ -379,6 +381,8 @@ export class ChatinaboxStore {
         owner_user_id INTEGER NOT NULL,
         message_thread_id INTEGER NOT NULL,
         dashboard_message_id INTEGER,
+        stale_message_id INTEGER,
+        stale_cleanup_at INTEGER NOT NULL DEFAULT 0,
         render_signature TEXT NOT NULL DEFAULT '',
         rendered_at INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL
@@ -418,6 +422,7 @@ export class ChatinaboxStore {
     this.migrateCodexStatuses();
     this.migrateCodexTopicRouting();
     this.migrateTopicSetups();
+    this.migrateOverviewDashboards();
     this.migrateOverviewWorkTopicCollisions();
   }
 
@@ -1529,12 +1534,56 @@ export class ChatinaboxStore {
     messageId: number,
     renderSignature: string,
   ): void {
+    const existing = this.overviewDashboard(chatId);
+    const replacedMessageId =
+      existing?.dashboard_message_id !== null &&
+        existing?.dashboard_message_id !== undefined &&
+        existing.dashboard_message_id !== messageId
+        ? existing.dashboard_message_id
+        : null;
+    const staleMessageId =
+      existing?.stale_message_id ?? replacedMessageId;
     this.db.prepare(`
       UPDATE nexus_dashboards
-      SET dashboard_message_id = ?, render_signature = ?,
+      SET dashboard_message_id = ?, stale_message_id = ?,
+          stale_cleanup_at = CASE
+            WHEN ? IS NOT NULL THEN 0
+            ELSE stale_cleanup_at
+          END,
+          render_signature = ?,
           rendered_at = ?, updated_at = ?
       WHERE chat_id = ?
-    `).run(messageId, renderSignature, this.now(), this.now(), chatId);
+    `).run(
+      messageId,
+      staleMessageId,
+      replacedMessageId,
+      renderSignature,
+      this.now(),
+      this.now(),
+      chatId,
+    );
+  }
+
+  markOverviewDashboardStaleCleanupAttempt(
+    chatId: number,
+    messageId: number,
+  ): void {
+    this.db.prepare(`
+      UPDATE nexus_dashboards
+      SET stale_cleanup_at = ?
+      WHERE chat_id = ? AND stale_message_id = ?
+    `).run(this.now(), chatId, messageId);
+  }
+
+  clearOverviewDashboardStaleMessage(
+    chatId: number,
+    messageId: number,
+  ): void {
+    this.db.prepare(`
+      UPDATE nexus_dashboards
+      SET stale_message_id = NULL, stale_cleanup_at = 0
+      WHERE chat_id = ? AND stale_message_id = ?
+    `).run(chatId, messageId);
   }
 
   // ── Forum manager topic ───────────────────────────────
@@ -1838,6 +1887,25 @@ export class ChatinaboxStore {
               nexus_dashboards.message_thread_id
         )
     `).run(this.now());
+  }
+
+  private migrateOverviewDashboards(): void {
+    const columns = new Set(
+      (this.db.prepare(`PRAGMA table_info(nexus_dashboards)`).all() as
+        unknown as Array<{ name: string }>).map((column) => column.name),
+    );
+    if (!columns.has("stale_message_id")) {
+      this.db.exec(`
+        ALTER TABLE nexus_dashboards
+        ADD COLUMN stale_message_id INTEGER
+      `);
+    }
+    if (!columns.has("stale_cleanup_at")) {
+      this.db.exec(`
+        ALTER TABLE nexus_dashboards
+        ADD COLUMN stale_cleanup_at INTEGER NOT NULL DEFAULT 0
+      `);
+    }
   }
 
   private migrateCodexTopicRouting(): void {
