@@ -4,6 +4,13 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.4.3 — 2026-07-28
+
+- Restored final Telegram replies for resumed or rebound Codex sessions whose
+  hooks register successfully but do not emit a final Stop event. Transcript
+  completion now shares the native hook's deduplication key, so recovery cannot
+  produce duplicate replies.
+
 ## 2.4.2 — 2026-07-28
 
 - Stopped failed saved-session resumes from silently creating a blank Codex
