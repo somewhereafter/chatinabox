@@ -1522,6 +1522,40 @@ export class ChatinaboxStore {
     ) ?? null;
   }
 
+  /**
+   * Recover a transcript checkpoint whose provisional turn id was recorded
+   * before Codex exposed the authoritative completion turn id.
+   */
+  codexResponseCheckpointForFinal(
+    chatId: number,
+    ownerUserId: number,
+    target: CodexPaneIdentity,
+    sessionId: string,
+    messageHash: string,
+  ): CodexResponseCheckpointRow | null {
+    return (
+      this.db.prepare(`
+        SELECT * FROM codex_response_checkpoints
+        WHERE chat_id = ? AND owner_user_id = ?
+          AND server_pid = ? AND pane_id = ? AND pane_pid = ?
+          AND session_id = ? AND message_hash = ?
+          AND turn_id LIKE 'transcript-%'
+          AND updated_at >= ?
+        ORDER BY updated_at DESC
+        LIMIT 1
+      `).get(
+        chatId,
+        ownerUserId,
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        sessionId,
+        messageHash,
+        this.now() - 30 * 60 * 1_000,
+      ) as CodexResponseCheckpointRow | undefined
+    ) ?? null;
+  }
+
   recordCodexResponseCheckpoint(
     chatId: number,
     ownerUserId: number,

@@ -316,8 +316,13 @@ describe("Codex bridge", () => {
       transcriptPath,
       line({
         timestamp: "2026-07-28T10:00:00.000Z",
-        type: "event_msg",
-        payload: { type: "task_started", turn_id: turnId },
+        type: "turn_context",
+        payload: {
+          turn_id: turnId,
+          model: "gpt-5.6-sol",
+          effort: "high",
+          cwd: directory,
+        },
       }) +
         line({
           timestamp: "2026-07-28T10:00:01.000Z",

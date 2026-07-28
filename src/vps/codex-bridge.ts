@@ -2714,6 +2714,22 @@ export class CodexBridge {
           target,
           assistantNameForModel(payload.model),
         );
+        const contextTurnId = stringField(payload, "turn_id", 200);
+        if (contextTurnId && !activity) {
+          activity = {
+            sessionId: binding.session_id,
+            turnId: contextTurnId,
+            toolCalls: 0,
+            editedFiles: new Set(),
+            exploredThings: 0,
+            reasoningSummaryKeys: new Set(),
+            activeShells: new Set(),
+            pendingShellCalls: new Map(),
+            startedAt: transcriptRecordTime(record) ?? Date.now(),
+          };
+          this.saveTurnActivity(target, activity);
+          activityDirty = false;
+        }
       }
       if (
         record.type === "turn_context" ||

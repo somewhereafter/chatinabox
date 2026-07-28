@@ -138,6 +138,22 @@ describe("Codex Telegram attachments", () => {
       "<p><mark><i>Checking ordering</i></mark></p>",
     );
     expect(thinking).not.toContain("•");
+    const legacy = formatCodexEvent({
+      id: 1,
+      kind: "assistant_final",
+      target: { serverPid: 1, paneId: "%1", panePid: 2 },
+      sessionId: "session",
+      turnId: "turn",
+      assistantName: "Sol",
+      message: "Finished.",
+      createdAt: 1,
+    }, personalProfile, {
+      summaries_json: JSON.stringify(["Inspecting the queue state"]),
+      omitted_count: 0,
+    })[0];
+    expect(legacy).toContain("<blockquote><b>show thinking</b>");
+    expect(legacy).toContain("<i>Inspecting the queue state</i>");
+    expect(legacy).not.toMatch(/<(?:details|summary|mark|p|footer)>/u);
   });
 
   it("keeps native goal state inside the live transient", () => {
@@ -2302,7 +2318,7 @@ describe("Codex Telegram attachments", () => {
         kind: "assistant_progress" as const,
         target: pane,
         sessionId: "session",
-        turnId: "turn",
+        turnId: "transcript-session",
         assistantName: "Sol" as const,
         message: "Checkpoint.",
         createdAt: 2_000,
@@ -2353,7 +2369,7 @@ describe("Codex Telegram attachments", () => {
       42,
       pane,
       "session",
-      "turn",
+      "transcript-session",
     )).toMatchObject({ telegram_message_id: 1_000 });
 
     acknowledged.delete(2);
@@ -2367,7 +2383,7 @@ describe("Codex Telegram attachments", () => {
       kind: "assistant_final" as const,
       target: pane,
       sessionId: "session",
-      turnId: "turn",
+      turnId: "actual-turn",
       assistantName: "Sol" as const,
       message: "Checkpoint.",
       createdAt: 3_000,
@@ -2389,7 +2405,7 @@ describe("Codex Telegram attachments", () => {
       42,
       pane,
       "session",
-      "turn",
+      "transcript-session",
     )).toBeNull();
     expect(acknowledged).toEqual(new Set([1, 2, 3]));
 

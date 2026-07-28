@@ -99,8 +99,14 @@ async function tgCall<T>(
     // "message is not modified" is a benign no-op from progress-polling edits.
     const desc = data.description ?? "";
     if (!/not modified/i.test(desc)) {
+      const diagnostic = desc
+        .replace(/[\u0000-\u001f\u007f]+/gu, " ")
+        .replace(/\s+/gu, " ")
+        .trim()
+        .slice(0, 300);
       console.error(
-        `[Telegram] ${method} failed (code=${data.error_code ?? "unknown"})`,
+        `[Telegram] ${method} failed (code=${data.error_code ?? "unknown"})` +
+          (diagnostic ? `: ${diagnostic}` : ""),
       );
     }
   }

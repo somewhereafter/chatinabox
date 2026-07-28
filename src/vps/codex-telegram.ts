@@ -2214,12 +2214,21 @@ export class CodexTelegramController {
         : this.takeTransientStatus(attachment, event.target);
       const checkpointTransient = preserveGoalEditor ? null : transient;
       const responseCheckpoint = event.kind === "assistant_final"
-        ? this.dependencies.store.codexResponseCheckpoint(
-            attachment.chat_id,
-            attachment.owner_user_id,
-            event.target,
-            event.sessionId,
-            event.turnId,
+        ? (
+            this.dependencies.store.codexResponseCheckpoint(
+              attachment.chat_id,
+              attachment.owner_user_id,
+              event.target,
+              event.sessionId,
+              event.turnId,
+            ) ??
+            this.dependencies.store.codexResponseCheckpointForFinal(
+              attachment.chat_id,
+              attachment.owner_user_id,
+              event.target,
+              event.sessionId,
+              finalHash!,
+            )
           )
         : null;
       const pendingThrough = (
@@ -2450,7 +2459,7 @@ export class CodexTelegramController {
           attachment.owner_user_id,
           event.target,
           event.sessionId,
-          event.turnId,
+          responseCheckpoint?.turn_id ?? event.turnId,
         );
         await this.dependencies.topicPresence?.markReady(attachment)
           .catch(() => undefined);
@@ -4766,12 +4775,12 @@ function formatCodexTransientFallback(
     "summaries_json" | "omitted_count"
   > | null = null,
 ): string {
-  return formatCodexTransientRichHtml(
+  const status = formatCodexTransientRichHtml(
     snapshot,
     Date.now(),
     profile,
     goal,
-    thinking,
+    null,
   )
     .replaceAll("<mark>", "<b>")
     .replaceAll("</mark>", "</b>")
@@ -4779,6 +4788,10 @@ function formatCodexTransientFallback(
     .replaceAll("</p>", "\n")
     .replaceAll("<br/>", "\n")
     .trim();
+  return (
+    status +
+    (thinking ? `\n${formatThinkingSectionLegacyHtml(thinking)}` : "")
+  );
 }
 
 export function formatCodexActivityStatus(
@@ -5314,7 +5327,7 @@ export function formatCodexEvent(
   return bodyChunks.map(
     (chunk, index) =>
       `${index === 0 && thinking
-        ? `${formatThinkingSectionRichHtml(thinking)}\n\n`
+        ? `${formatThinkingSectionLegacyHtml(thinking)}\n\n`
         : ""}` +
       `${index === 0 ? heading : ""}${chunk}` +
       `${index === bodyChunks.length - 1 ? footer : ""}`,
@@ -5347,6 +5360,26 @@ export function formatThinkingSectionRichHtml(
     omitted +
     body +
     "</details>"
+  );
+}
+
+function formatThinkingSectionLegacyHtml(
+  row: Pick<CodexThinkingSectionRow, "summaries_json" | "omitted_count">,
+): string {
+  const summaries = parseThinkingSummaries(row.summaries_json);
+  const omitted = row.omitted_count > 0
+    ? `\n<i>${row.omitted_count} earlier ` +
+      `${row.omitted_count === 1 ? "thought" : "thoughts"} omitted</i>`
+    : "";
+  const body = summaries.map(
+    (summary) =>
+      `<i>${escapeTelegramHtml(agentReasoningText(summary))}</i>`,
+  ).join("\n");
+  return (
+    "<blockquote><b>show thinking</b>" +
+    omitted +
+    (body ? `\n${body}` : "") +
+    "</blockquote>"
   );
 }
 
