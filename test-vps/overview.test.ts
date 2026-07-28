@@ -251,6 +251,169 @@ describe("Overview dashboard", () => {
     expect(card).not.toContain("<p><b>✓ Review</b>");
   });
 
+  it("deletes the old dashboard after creating a replacement", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-overview-replace-"));
+    let now = 1_800_000_000_000;
+    const store = new ChatinaboxStore(
+      path.join(root, "state.sqlite"),
+      () => now,
+    );
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ method, body });
+      if (method === "editMessageText") {
+        return {
+          json: async () => ({
+            ok: false,
+            error_code: 400,
+            description: "message cannot be edited",
+          }),
+        };
+      }
+      if (method === "sendRichMessage") {
+        return {
+          json: async () => ({ ok: true, result: { message_id: 901 } }),
+        };
+      }
+      return { json: async () => ({ ok: true, result: true }) };
+    }));
+    try {
+      store.registerOverview(-10042, 42, 7);
+      store.setOverviewDashboardMessage(-10042, 900, "old");
+      const controller = new OverviewController({
+        env: {
+          TG_BOT_TOKEN: "test-token",
+          TG_ALLOWED_USER_IDS: "42",
+          DATA_DIR: root,
+          CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+          DEFAULT_CWD: root,
+        },
+        store,
+        bridge: {
+          request: vi.fn(async () => ({
+            ok: true as const,
+            totalSessions: 1,
+            recent: [],
+            usage: null,
+            panes: [pane("Build", "Sol", true)],
+          })),
+        },
+        now: () => now,
+      });
+      const refresh = (
+        controller as unknown as {
+          refreshDashboard(chatId: number, force: boolean): Promise<void>;
+        }
+      ).refreshDashboard.bind(controller);
+
+      await refresh(-10042, true);
+
+      expect(calls.map((call) => call.method)).toEqual([
+        "editMessageText",
+        "sendRichMessage",
+        "deleteMessage",
+      ]);
+      expect(calls[2]?.body).toMatchObject({ message_id: 900 });
+      expect(store.overviewDashboard(-10042)).toMatchObject({
+        dashboard_message_id: 901,
+        stale_message_id: null,
+        stale_cleanup_at: 0,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retains a failed stale cleanup without creating another replacement", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-overview-stale-"));
+    let now = 1_800_000_000_000;
+    const store = new ChatinaboxStore(
+      path.join(root, "state.sqlite"),
+      () => now,
+    );
+    const calls: Array<{ method: string; body: Record<string, unknown> }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+      const method = url.split("/").pop() ?? "";
+      const body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+      calls.push({ method, body });
+      if (method === "editMessageText") {
+        return {
+          json: async () => ({
+            ok: false,
+            error_code: 400,
+            description: "message cannot be edited",
+          }),
+        };
+      }
+      if (method === "sendRichMessage") {
+        return {
+          json: async () => ({ ok: true, result: { message_id: 901 } }),
+        };
+      }
+      return {
+        json: async () => ({
+          ok: false,
+          error_code: 500,
+          description: "temporary delete failure",
+        }),
+      };
+    }));
+    try {
+      store.registerOverview(-10042, 42, 7);
+      store.setOverviewDashboardMessage(-10042, 900, "old");
+      const controller = new OverviewController({
+        env: {
+          TG_BOT_TOKEN: "test-token",
+          TG_ALLOWED_USER_IDS: "42",
+          DATA_DIR: root,
+          CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+          DEFAULT_CWD: root,
+        },
+        store,
+        bridge: {
+          request: vi.fn(async () => ({
+            ok: true as const,
+            totalSessions: 1,
+            recent: [],
+            usage: null,
+            panes: [pane("Build", "Sol", true)],
+          })),
+        },
+        now: () => now,
+      });
+      const refresh = (
+        controller as unknown as {
+          refreshDashboard(chatId: number, force: boolean): Promise<void>;
+        }
+      ).refreshDashboard.bind(controller);
+
+      await refresh(-10042, true);
+      expect(store.overviewDashboard(-10042)).toMatchObject({
+        dashboard_message_id: 901,
+        stale_message_id: 900,
+        stale_cleanup_at: now,
+      });
+
+      calls.length = 0;
+      now += 1_000;
+      await refresh(-10042, true);
+      expect(calls.filter((call) => call.method === "sendRichMessage"))
+        .toHaveLength(0);
+      expect(store.overviewDashboard(-10042)).toMatchObject({
+        dashboard_message_id: 901,
+        stale_message_id: 900,
+      });
+    } finally {
+      vi.unstubAllGlobals();
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("caps automatic renders at thirty seconds and forces manual usage refresh", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-overview-"));
     let now = 1_800_000_000_000;
@@ -307,6 +470,66 @@ describe("Overview dashboard", () => {
         op: "list",
         refreshUsage: true,
       });
+    } finally {
+      vi.unstubAllGlobals();
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refreshes an unchanged synced timestamp only every two minutes", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-overview-quiet-"));
+    let now = 1_800_000_000_000;
+    const store = new ChatinaboxStore(
+      path.join(root, "state.sqlite"),
+      () => now,
+    );
+    const response = {
+      ok: true as const,
+      totalSessions: 1,
+      recent: [],
+      usage: null,
+      panes: [pane("Build", "Sol", true)],
+    };
+    const bridge = {
+      request: vi.fn(async () => response),
+    };
+    const fetchMock = vi.fn(async () => ({
+      json: async () => ({ ok: true, result: true }),
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    try {
+      store.registerOverview(-10042, 42, 7);
+      store.setOverviewDashboardMessage(
+        -10042,
+        900,
+        overviewRenderSignature(overviewStatsFromBridge(response)),
+      );
+      const controller = new OverviewController({
+        env: {
+          TG_BOT_TOKEN: "test-token",
+          TG_ALLOWED_USER_IDS: "42",
+          DATA_DIR: root,
+          CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+          DEFAULT_CWD: root,
+        },
+        store,
+        bridge,
+        now: () => now,
+      });
+      const refresh = (
+        controller as unknown as {
+          refreshDashboard(chatId: number, force: boolean): Promise<void>;
+        }
+      ).refreshDashboard.bind(controller);
+
+      now += 119_999;
+      await refresh(-10042, false);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      now += 1;
+      await refresh(-10042, false);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
     } finally {
       vi.unstubAllGlobals();
       store.close();

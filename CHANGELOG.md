@@ -4,6 +4,20 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.4.5 — 2026-07-28
+
+- Relaxed routine Telegram activity, thinking, and timer edits to one combined
+  update every ten seconds without delaying responses or reducing Codex work.
+- After recycling the current transient as the next response when possible,
+  waits for five seconds of assistant silence before creating another one.
+  Thinking remains buffered independently and moves into the response it
+  precedes.
+- Reduced unchanged Overview timestamp-only edits from once a minute to once
+  every two minutes.
+- Deleted superseded Overview cards after replacement and retained failed
+  cleanup targets for retry so an edit failure cannot accumulate duplicate
+  dashboards.
+
 ## 2.4.4 — 2026-07-28
 
 - Made resumed sessions atomically take ownership of their transcript so a

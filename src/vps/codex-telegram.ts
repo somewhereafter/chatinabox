@@ -93,9 +93,10 @@ const CODEX_ATTACHMENT_MAX_TOTAL_BYTES = 50 * 1024 * 1024;
 const CODEX_ATTACHMENT_RETENTION_MS = 24 * 60 * 60 * 1_000;
 const TELEGRAM_MEDIA_GROUP_DEBOUNCE_MS = 900;
 const TELEGRAM_TEXT_BURST_DEBOUNCE_MS = 700;
-const THINKING_SECTION_FLUSH_INTERVAL_MS = 5_000;
+const THINKING_SECTION_FLUSH_INTERVAL_MS = 10_000;
 const GOAL_SYNC_INTERVAL_MS = 30_000;
-const TRANSIENT_TIMER_REFRESH_INTERVAL_MS = 5_000;
+const TRANSIENT_REFRESH_INTERVAL_MS = 10_000;
+const POST_RESPONSE_TRANSIENT_GRACE_MS = 5_000;
 
 interface CodexTelegramDependencies {
   readonly env: ChatinaboxEnv;
@@ -105,6 +106,8 @@ interface CodexTelegramDependencies {
   readonly now?: () => number;
   readonly thinkingFlushIntervalMs?: number;
   readonly goalSyncIntervalMs?: number;
+  readonly transientRefreshIntervalMs?: number;
+  readonly postResponseTransientGraceMs?: number;
   readonly progressPacer?: ProgressPacer;
 }
 
@@ -153,6 +156,13 @@ interface ScreenReplacement {
   readonly isPhoto: boolean;
 }
 
+interface DeferredTransientStart {
+  readonly attachment: CodexAttachmentRow;
+  readonly target: CodexPaneIdentity;
+  readonly snapshot: CodexStatusSnapshot;
+  readonly dueAt: number;
+}
+
 type TransientStatusKind =
   | "state_compacting"
   | "state_working"
@@ -173,11 +183,16 @@ export class CodexTelegramController {
   private readonly transientRenderedAt = new Map<string, number>();
   private readonly transientRenderedReplyTo = new Map<string, number | null>();
   private readonly transientTimerRenderedAt = new Map<string, number>();
+  private readonly deferredTransientStarts =
+    new Map<string, DeferredTransientStart>();
+  private readonly transientGraceUntil = new Map<string, number>();
   private readonly profile: () => ExperienceProfile;
   private readonly now: () => number;
   private readonly progressPacer: ProgressPacer;
   private readonly thinkingFlushIntervalMs: number;
   private readonly goalSyncIntervalMs: number;
+  private readonly transientRefreshIntervalMs: number;
+  private readonly postResponseTransientGraceMs: number;
   private lastGoalSyncAt = 0;
 
   constructor(private readonly dependencies: CodexTelegramDependencies) {
@@ -195,6 +210,12 @@ export class CodexTelegramController {
     this.goalSyncIntervalMs =
       dependencies.goalSyncIntervalMs ??
       GOAL_SYNC_INTERVAL_MS;
+    this.transientRefreshIntervalMs =
+      dependencies.transientRefreshIntervalMs ??
+      TRANSIENT_REFRESH_INTERVAL_MS;
+    this.postResponseTransientGraceMs =
+      dependencies.postResponseTransientGraceMs ??
+      POST_RESPONSE_TRANSIENT_GRACE_MS;
   }
 
   isAttached(
@@ -771,6 +792,7 @@ export class CodexTelegramController {
     );
     if (!attachment) return false;
     const target = attachmentTarget(attachment);
+    this.clearPostResponseTransientGrace(attachment, target);
     const goal = this.dependencies.store.codexGoal(
       chatId,
       ownerUserId!,
@@ -938,6 +960,7 @@ export class CodexTelegramController {
     );
     if (!attachment) return false;
     const target = attachmentTarget(attachment);
+    this.clearPostResponseTransientGrace(attachment, target);
 
     await this.setTransientStatus(
       attachment,
@@ -989,6 +1012,7 @@ export class CodexTelegramController {
     );
     if (!attachment) return false;
     const target = attachmentTarget(attachment);
+    this.clearPostResponseTransientGrace(attachment, target);
 
     await this.setTransientStatus(
       attachment,
@@ -1483,6 +1507,7 @@ export class CodexTelegramController {
         if (this.now() - this.lastGoalSyncAt >= this.goalSyncIntervalMs) {
           await this.syncGoalsOnce();
         }
+        await this.flushDeferredTransientStartsOnce();
         await this.refreshStaleTransientTimersOnce();
       } catch {
         if (!signal.aborted) {
@@ -1987,6 +2012,10 @@ export class CodexTelegramController {
           event.target,
           event.message,
         );
+        await this.ensureDeferredTransientForThinking(
+          attachment,
+          event.target,
+        );
         continue;
       }
       const finalHash = event.kind === "assistant_final"
@@ -2237,6 +2266,12 @@ export class CodexTelegramController {
             checkpointMessageId = messageId;
           }
         }
+      }
+      if (
+        event.kind === "assistant_progress" ||
+        event.kind === "assistant_final"
+      ) {
+        this.beginPostResponseTransientGrace(attachment, event.target);
       }
       if (outputThinking) {
         this.dependencies.store.clearCodexThinkingSection(
@@ -2577,6 +2612,128 @@ export class CodexTelegramController {
     }
   }
 
+  private beginPostResponseTransientGrace(
+    attachment: CodexAttachmentRow,
+    target: CodexPaneIdentity,
+  ): void {
+    const key = codexOwnerTargetKey(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      target,
+    );
+    this.deferredTransientStarts.delete(key);
+    this.transientGraceUntil.set(
+      key,
+      this.now() + this.postResponseTransientGraceMs,
+    );
+  }
+
+  private clearPostResponseTransientGrace(
+    attachment: CodexAttachmentRow,
+    target: CodexPaneIdentity,
+  ): void {
+    const key = codexOwnerTargetKey(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      target,
+    );
+    this.deferredTransientStarts.delete(key);
+    this.transientGraceUntil.delete(key);
+  }
+
+  private async ensureDeferredTransientForThinking(
+    attachment: CodexAttachmentRow,
+    target: CodexPaneIdentity,
+  ): Promise<void> {
+    const key = codexOwnerTargetKey(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      target,
+    );
+    if (
+      this.dependencies.store.codexStatus(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        target,
+      ) ||
+      this.deferredTransientStarts.has(key) ||
+      this.now() >= (this.transientGraceUntil.get(key) ?? 0)
+    ) {
+      return;
+    }
+    await this.setTransientStatus(
+      attachment,
+      target,
+      "state_working",
+    );
+  }
+
+  async flushDeferredTransientStartsOnce(): Promise<void> {
+    const now = this.now();
+    for (const [key, graceUntil] of this.transientGraceUntil) {
+      if (graceUntil <= now) this.transientGraceUntil.delete(key);
+    }
+    for (const [key, pending] of this.deferredTransientStarts) {
+      if (now < pending.dueAt) continue;
+      if (this.deferredTransientStarts.get(key) !== pending) continue;
+      const attachment =
+        this.dependencies.store.codexAttachmentForTarget(
+          pending.attachment.chat_id,
+          pending.attachment.owner_user_id,
+          pending.target,
+        );
+      if (
+        !attachment ||
+        attachment.message_thread_id !== pending.attachment.message_thread_id
+      ) {
+        this.deferredTransientStarts.delete(key);
+        this.transientGraceUntil.delete(key);
+        continue;
+      }
+      if (
+        this.dependencies.store.codexStatus(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          pending.target,
+        )
+      ) {
+        this.deferredTransientStarts.delete(key);
+        this.transientGraceUntil.delete(key);
+        continue;
+      }
+      this.deferredTransientStarts.delete(key);
+      this.transientGraceUntil.delete(key);
+      const expectedMutationVersion =
+        (this.transientMutationVersions.get(key) ?? 0) + 1;
+      await this.setTransientStatus(
+        attachment,
+        pending.target,
+        pending.snapshot.statusKind as TransientStatusKind,
+        undefined,
+        undefined,
+        undefined,
+        true,
+        undefined,
+        true,
+        pending.snapshot,
+      );
+      if (
+        this.transientMutationVersions.get(key) === expectedMutationVersion &&
+        !this.dependencies.store.codexStatus(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          pending.target,
+        ) &&
+        !this.deferredTransientStarts.has(key)
+      ) {
+        this.deferredTransientStarts.set(key, {
+          ...pending,
+          dueAt: now + this.transientRefreshIntervalMs,
+        });
+      }
+    }
+  }
+
   async refreshStaleTransientTimersOnce(): Promise<void> {
     const now = this.now();
     let panes: readonly CodexPane[] | null = null;
@@ -2608,8 +2765,7 @@ export class CodexTelegramController {
       if (
         status.status_kind === "state_goal" ||
         status.status_kind === "state_interrupting" ||
-        status.status_kind === "state_interrupted" ||
-        now - status.updated_at < TRANSIENT_TIMER_REFRESH_INTERVAL_MS
+        status.status_kind === "state_interrupted"
       ) {
         continue;
       }
@@ -2618,10 +2774,11 @@ export class CodexTelegramController {
         attachment.owner_user_id,
         target,
       );
-      if (
-        now - (this.transientTimerRenderedAt.get(key) ?? 0) <
-          TRANSIENT_TIMER_REFRESH_INTERVAL_MS
-      ) {
+      const lastRenderedAt =
+        this.transientRenderedAt.get(key) ??
+        this.transientTimerRenderedAt.get(key) ??
+        status.updated_at;
+      if (now - lastRenderedAt < this.transientRefreshIntervalMs) {
         continue;
       }
       if (
@@ -2673,6 +2830,7 @@ export class CodexTelegramController {
         telegramEditSucceeded(edited)
       ) {
         this.transientTimerRenderedAt.set(key, now);
+        this.transientRenderedAt.set(key, now);
         if (thinking) {
           this.dependencies.store.markCodexThinkingSectionRendered(
             attachment.chat_id,
@@ -2792,6 +2950,14 @@ export class CodexTelegramController {
       attachment.message_thread_id,
       this.now(),
     );
+    this.transientRenderedAt.set(
+      codexOwnerTargetKey(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        target,
+      ),
+      this.now(),
+    );
     return true;
   }
 
@@ -2805,6 +2971,7 @@ export class CodexTelegramController {
     preserveExisting = false,
     _assistantNameOverride?: CodexAssistantName,
     forceRender = false,
+    snapshotOverride?: CodexStatusSnapshot,
   ): Promise<void> {
     const mutation = this.beginTransientMutation(attachment, target);
     const existing = this.dependencies.store.codexStatus(
@@ -2812,8 +2979,18 @@ export class CodexTelegramController {
       attachment.owner_user_id,
       target,
     );
-    const snapshot = mergeTransientStatus(
-      existing,
+    const deferred = this.deferredTransientStarts.get(mutation.key);
+    const mergeBase = existing ?? (
+      deferred
+        ? transientStatusRowFromSnapshot(
+          deferred.snapshot,
+          attachment,
+          target,
+        )
+        : null
+    );
+    const snapshot = snapshotOverride ?? mergeTransientStatus(
+      mergeBase,
       kind,
       queuedCount,
       activityMessage,
@@ -2845,6 +3022,26 @@ export class CodexTelegramController {
         snapshot,
       );
       return;
+    }
+    const graceUntil = this.transientGraceUntil.get(mutation.key) ?? 0;
+    if (
+      !existing &&
+      !forceRender &&
+      isDeferrableAfterResponse(kind) &&
+      this.now() < graceUntil
+    ) {
+      if (!this.isCurrentTransientMutation(mutation)) return;
+      this.deferredTransientStarts.set(mutation.key, {
+        attachment,
+        target,
+        snapshot,
+        dueAt: graceUntil,
+      });
+      return;
+    }
+    this.deferredTransientStarts.delete(mutation.key);
+    if (graceUntil <= this.now()) {
+      this.transientGraceUntil.delete(mutation.key);
     }
     if (
       existing &&
@@ -3115,6 +3312,10 @@ export class CodexTelegramController {
     target: CodexPaneIdentity,
   ): CodexStatusRow | null {
     const mutation = this.beginTransientMutation(attachment, target);
+    this.deferredTransientStarts.delete(mutation.key);
+    this.transientGraceUntil.delete(mutation.key);
+    this.transientRenderedAt.delete(mutation.key);
+    this.transientTimerRenderedAt.delete(mutation.key);
     this.transientRenderedReplyTo.delete(mutation.key);
     return this.dependencies.store.clearCodexStatus(
       attachment.chat_id,
@@ -4230,6 +4431,30 @@ export function mergeTransientStatus(
   };
 }
 
+function transientStatusRowFromSnapshot(
+  snapshot: CodexStatusSnapshot,
+  attachment: CodexAttachmentRow,
+  target: CodexPaneIdentity,
+): CodexStatusRow {
+  return {
+    chat_id: attachment.chat_id,
+    owner_user_id: attachment.owner_user_id,
+    server_pid: target.serverPid,
+    pane_id: target.paneId,
+    pane_pid: target.panePid,
+    telegram_message_id: 0,
+    status_kind: snapshot.statusKind,
+    tool_calls: snapshot.toolCalls,
+    edited_files: snapshot.editedFiles,
+    explored_things: snapshot.exploredThings,
+    active_shells: snapshot.activeShells,
+    queued_messages: snapshot.queuedMessages,
+    reply_to_message_id: snapshot.replyToMessageId,
+    started_at: snapshot.startedAt,
+    updated_at: snapshot.startedAt,
+  };
+}
+
 function parseActivityCounters(value: string): {
   readonly toolCalls: number;
   readonly editedFiles: number;
@@ -4260,6 +4485,10 @@ function isCoalescableTransientStatus(kind: TransientStatusKind): boolean {
     kind === "state_waiting_terminal" ||
     kind === "state_activity"
   );
+}
+
+function isDeferrableAfterResponse(kind: TransientStatusKind): boolean {
+  return isCoalescableTransientStatus(kind) || kind === "state_goal";
 }
 
 export function formatCodexTransientRichHtml(
