@@ -4,6 +4,12 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.4.2 — 2026-07-28
+
+- Stopped failed saved-session resumes from silently creating a blank Codex
+  chat. The original session remains recoverable, and Telegram explains how to
+  reconnect it when it is already open in a terminal.
+
 ## 2.4.1 — 2026-07-28
 
 - Repaired legacy forum state where the Overview and a normal work topic shared
