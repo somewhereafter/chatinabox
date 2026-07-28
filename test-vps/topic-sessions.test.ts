@@ -687,7 +687,7 @@ describe("Topic session setup", () => {
     store.close();
   });
 
-  it("keeps a failed wake message visible and does not consume it silently", async () => {
+  it("never replaces a failed saved-session resume with a blank chat", async () => {
     const { controller, store, requests, sends } = setup(
       undefined,
       async () => ({
@@ -716,9 +716,16 @@ describe("Topic session setup", () => {
     expect(consumed).toBe(true);
     expect(requests.map((request) => (
       request as { op?: string }
-    ).op)).toEqual(["resume", "new"]);
+    ).op)).toEqual(["resume"]);
     expect(store.codexAttachment(-10042, 42, 7)).toBeNull();
+    expect(store.topicSetup(-10042, 42, 7)).toMatchObject({
+      closed_session_id: sessionId,
+      closed_at: 1_000,
+    });
     expect(JSON.stringify(sends.at(-1))).toContain("Your message was not sent");
+    expect(JSON.stringify(sends.at(-1))).toContain(
+      "saved chat was not replaced",
+    );
     expect(JSON.stringify(sends.at(-1))).toContain("restart session");
     store.close();
   });

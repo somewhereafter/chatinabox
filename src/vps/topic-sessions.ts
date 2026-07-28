@@ -1411,25 +1411,30 @@ export class TopicSessionController {
         reasoningEffort: row.reasoning_effort,
         fast: row.fast === 1,
       } as const;
-      let launched = row.closed_session_id
+      const resumingSavedSession = row.closed_session_id !== null;
+      const launched = resumingSavedSession
         ? await this.bridge.request({
             op: "resume",
-            sessionId: row.closed_session_id,
+            sessionId: row.closed_session_id!,
             ...profile,
           }).catch(() => null)
-        : null;
-      if (!launched?.ok || !("pane" in launched)) {
-        launched = await this.bridge.request({
+        : await this.bridge.request({
           op: "new",
           ...profile,
         }).catch(() => null);
-      }
       if (!launched?.ok || !("pane" in launched)) {
         await tgEditRichHtml(
           this.dependencies.env,
           chatId,
           messageId,
-          formatRestingCard(row, "Restart failed. Tap to try again."),
+          formatRestingCard(
+            row,
+            resumingSavedSession
+              ? "Resume failed. Your saved chat was not replaced. " +
+                "If it is already open in a terminal, reconnect it from " +
+                "/setup → existing Codex."
+              : "Restart failed. Tap to try again.",
+          ),
           await this.restartKeyboard(row),
         );
         return;
@@ -1808,7 +1813,9 @@ export function formatMessageWakeReady(row: TopicSetupRow): string {
 export function formatMessageWakeFailure(row: TopicSetupRow): string {
   return (
     `⚠️ <b>${escapeTelegramHtml(row.topic_name)} could not resume.</b>\n\n` +
-    "Your message was not sent. Tap below to try again, then resend it."
+    "Your message was not sent, and your saved chat was not replaced. " +
+    "Tap below to try again, or reconnect an already-running terminal " +
+    "session from <code>/setup</code>."
   );
 }
 
