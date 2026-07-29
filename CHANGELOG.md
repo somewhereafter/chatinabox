@@ -4,6 +4,17 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.5.1 — 2026-07-29
+
+- Made stopped topics wait for a real Codex session before attaching, and
+  recover stale pane bindings before routing text, images, files, media groups,
+  voice, or audio.
+- Stopped deferred activity and inactive transcript bindings from reviving a
+  dead topic, eliminating the repeated working/done loop and its Telegram
+  rate-limit pressure.
+- Preserved each attached Codex session ID so an unexpectedly closed pane can
+  return to its saved chat instead of losing continuity.
+
 ## 2.5.0 — 2026-07-29
 
 - Added durable one-time, interval, and timezone-aware cron schedules for

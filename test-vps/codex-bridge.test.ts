@@ -456,6 +456,104 @@ describe("Codex bridge", () => {
     }
   });
 
+  it("does not mirror an explicitly inactive pane binding", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-inactive-binding-"));
+    const databasePath = path.join(directory, "bridge.sqlite");
+    const transcriptPath = path.join(directory, "rollout.jsonl");
+    const sessionId = "shared-session";
+    const target = { serverPid: 100, paneId: "%4", panePid: 200 };
+    writeFileSync(
+      transcriptPath,
+      line({
+        timestamp: "2026-07-29T10:00:00.000Z",
+        type: "event_msg",
+        payload: { type: "task_started", turn_id: "other-terminal-turn" },
+      }) +
+        line({
+          timestamp: "2026-07-29T10:00:01.000Z",
+          type: "event_msg",
+          payload: {
+            type: "agent_message",
+            message: "This belongs to another terminal.",
+            phase: "commentary",
+          },
+        }),
+    );
+    const bridge = new CodexBridge({
+      socketPath: path.join(directory, "bridge.sock"),
+      databasePath,
+    });
+    await bridge.listen();
+    const testBridge = bridge as unknown as {
+      mirrorTranscriptsOnce(): Promise<void>;
+    };
+    try {
+      const db = new DatabaseSync(databasePath);
+      db.prepare(`
+        INSERT INTO transcript_bindings (
+          server_pid, pane_id, pane_pid, session_id, transcript_path,
+          cursor, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, ?)
+      `).run(
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        sessionId,
+        transcriptPath,
+        Date.now(),
+      );
+      db.prepare(`
+        INSERT INTO hook_sessions (
+          server_pid, pane_id, pane_pid, session_id, permission_mode, cwd,
+          active, busy, updated_at
+        ) VALUES (?, ?, ?, ?, '', ?, 0, 0, ?)
+      `).run(
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        sessionId,
+        directory,
+        Date.now(),
+      );
+      db.prepare(`
+        INSERT INTO turn_activity (
+          server_pid, pane_id, pane_pid, session_id, turn_id,
+          tool_calls, edited_files, explored_things, active_shells,
+          pending_shell_calls, started_at, reasoning_summary_keys, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, '[]', 0, '[]', '{}', ?, '[]', ?)
+      `).run(
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        sessionId,
+        "stale-turn",
+        Date.now(),
+        Date.now(),
+      );
+      db.close();
+
+      await testBridge.mirrorTranscriptsOnce();
+
+      const response = await bridge.dispatch({ op: "events", limit: 100 });
+      if (!response.ok || !("events" in response)) {
+        throw new Error("Expected bridge events");
+      }
+      expect(response.events).toEqual([]);
+      const inspected = new DatabaseSync(databasePath);
+      const activity = inspected.prepare(`
+        SELECT count(*) AS count FROM turn_activity
+        WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+      `).get(target.serverPid, target.paneId, target.panePid) as {
+        count: number;
+      };
+      inspected.close();
+      expect(activity.count).toBe(0);
+    } finally {
+      await bridge.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("gives resumed transcript-only turns distinct fallback identities", async () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-fallback-turn-"));
     const databasePath = path.join(directory, "bridge.sqlite");

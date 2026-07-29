@@ -1951,6 +1951,9 @@ describe("Codex Telegram attachments", () => {
           acknowledged.add(request.eventId!);
           return { ok: true, acknowledged: true };
         }
+        if (request.op === "list") {
+          return { ok: true, panes: [pane], recent: [], workspaces: [] };
+        }
         throw new Error(`Unexpected request: ${request.op}`);
       }),
     };
@@ -2123,6 +2126,14 @@ describe("Codex Telegram attachments", () => {
           acknowledged.add(request.eventId!);
           return { ok: true, acknowledged: true };
         }
+        if (request.op === "list") {
+          return {
+            ok: true,
+            panes: [pane],
+            recent: [],
+            workspaces: [],
+          };
+        }
         throw new Error(`Unexpected request: ${request.op}`);
       }),
     };
@@ -2211,6 +2222,95 @@ describe("Codex Telegram attachments", () => {
     now += 1_000;
     await controller.flushDeferredTransientStartsOnce();
     expect(calls).toHaveLength(0);
+    expect(store.codexStatus(-10091, 42, pane)).toBeNull();
+    store.close();
+  });
+
+  it("drops deferred activity when its pane has disappeared", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-dead-pane-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const now = 10_000;
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "dead-pane",
+      windowIndex: 0,
+      cwd: "/root",
+      active: false,
+      busy: false,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(-10091, 42, pane, 10);
+    store.appendCodexThinkingSummary(
+      -10091,
+      42,
+      pane,
+      "Thinking from a pane that exited",
+    );
+    const attachment = store.codexAttachment(-10091, 42, 10)!;
+    const bridge = {
+      request: vi.fn(async (request: { op: string }) => {
+        if (request.op === "list") {
+          return { ok: true, panes: [], recent: [], workspaces: [] };
+        }
+        throw new Error(`Unexpected request: ${request.op}`);
+      }),
+    };
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+      now: () => now,
+    });
+    const key = [
+      attachment.chat_id,
+      attachment.owner_user_id,
+      pane.serverPid,
+      pane.paneId,
+      pane.panePid,
+    ].join("\u001f");
+    const internal = controller as unknown as {
+      deferredTransientStarts: Map<string, unknown>;
+      transientGraceUntil: Map<string, number>;
+    };
+    internal.transientGraceUntil.set(key, now);
+    internal.deferredTransientStarts.set(key, {
+      attachment,
+      target: pane,
+      snapshot: {
+        statusKind: "state_working",
+        toolCalls: 0,
+        editedFiles: 0,
+        exploredThings: 0,
+        activeShells: 0,
+        queuedMessages: 0,
+        replyToMessageId: null,
+        startedAt: now - 1_000,
+      },
+      dueAt: now,
+    });
+
+    await controller.flushDeferredTransientStartsOnce();
+    await controller.flushDeferredTransientStartsOnce();
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(bridge.request).toHaveBeenCalledTimes(1);
+    expect(internal.deferredTransientStarts.size).toBe(0);
+    expect(internal.transientGraceUntil.size).toBe(0);
+    expect(store.codexThinkingSection(-10091, 42, pane)).toBeNull();
     expect(store.codexStatus(-10091, 42, pane)).toBeNull();
     store.close();
   });

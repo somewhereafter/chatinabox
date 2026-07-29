@@ -22,6 +22,7 @@ export interface CodexAttachmentRow {
   server_pid: number;
   pane_id: string;
   pane_pid: number;
+  session_id: string | null;
   session_name: string;
   window_name: string;
   assistant_name: CodexAssistantName;
@@ -303,6 +304,7 @@ export class ChatinaboxStore {
         server_pid INTEGER NOT NULL,
         pane_id TEXT NOT NULL,
         pane_pid INTEGER NOT NULL,
+        session_id TEXT,
         session_name TEXT NOT NULL,
         window_name TEXT NOT NULL,
         assistant_name TEXT NOT NULL DEFAULT 'Codex',
@@ -679,12 +681,13 @@ export class ChatinaboxStore {
     this.db.prepare(`
       INSERT INTO codex_attachments (
         chat_id, owner_user_id, message_thread_id, server_pid, pane_id, pane_pid,
-        session_name, window_name, assistant_name, cwd, attached_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        session_id, session_name, window_name, assistant_name, cwd, attached_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(chat_id, owner_user_id, message_thread_id) DO UPDATE SET
         server_pid = excluded.server_pid,
         pane_id = excluded.pane_id,
         pane_pid = excluded.pane_pid,
+        session_id = excluded.session_id,
         session_name = excluded.session_name,
         window_name = excluded.window_name,
         assistant_name = excluded.assistant_name,
@@ -697,6 +700,7 @@ export class ChatinaboxStore {
       pane.serverPid,
       pane.paneId,
       pane.panePid,
+      pane.sessionId ?? null,
       pane.sessionName,
       pane.windowName,
       pane.assistantName ?? "Codex",
@@ -2661,6 +2665,12 @@ export class ChatinaboxStore {
       this.db.exec(`
         ALTER TABLE codex_attachments
         ADD COLUMN assistant_name TEXT NOT NULL DEFAULT 'Codex'
+      `);
+    }
+    if (!columns.has("session_id")) {
+      this.db.exec(`
+        ALTER TABLE codex_attachments
+        ADD COLUMN session_id TEXT
       `);
     }
   }
