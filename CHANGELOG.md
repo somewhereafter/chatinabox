@@ -4,6 +4,18 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.5.4 — 2026-07-29
+
+- Recognizes the current Codex CLI prompt and resumed-session process identity
+  directly, so a visibly ready saved chat no longer waits for delayed hook
+  metadata or gets orphaned behind the startup deadline.
+- Recovers an already-running resumed pane instead of launching a duplicate,
+  and gives genuinely slow saved chats a bounded five-minute readiness window
+  with a client deadline that cannot expire first.
+- Routes plain Telegram prompts before working-card updates, confirms idle
+  prompts reached Codex before recording delivery, and wakes then retries once
+  when a session exits during dispatch.
+
 ## 2.5.3 — 2026-07-29
 
 - Routes the message that woke a saved topic as soon as the bridge proves the

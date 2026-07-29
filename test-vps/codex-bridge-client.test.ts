@@ -5,7 +5,7 @@ describe("Codex bridge client timeouts", () => {
   it.each(["new", "resume", "lobby"] as const)(
     "allows %s startup to outlive ordinary bridge calls",
     (op) => {
-      expect(bridgeRequestTimeoutMs({ op })).toBe(90_000);
+      expect(bridgeRequestTimeoutMs({ op })).toBe(360_000);
     },
   );
 
@@ -13,7 +13,11 @@ describe("Codex bridge client timeouts", () => {
     expect(bridgeRequestTimeoutMs({ op: "list" })).toBe(3_000);
   });
 
+  it("allows prompt delivery to wait for Codex acceptance", () => {
+    expect(bridgeRequestTimeoutMs({ op: "send" })).toBe(10_000);
+  });
+
   it("does not shorten an explicitly longer caller deadline", () => {
-    expect(bridgeRequestTimeoutMs({ op: "resume" }, 120_000)).toBe(120_000);
+    expect(bridgeRequestTimeoutMs({ op: "resume" }, 420_000)).toBe(420_000);
   });
 });

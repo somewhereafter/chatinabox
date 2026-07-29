@@ -63,6 +63,9 @@ const TRANSCRIPT_COMPLETION_TIMEOUT_MS = 6 * 60 * 60 * 1_000;
 const MANAGED_STARTUP_ATTEMPTS = 80;
 const MANAGED_STARTUP_INTERVAL_MS = 250;
 const SESSION_ID_STARTUP_ATTEMPTS = 600;
+const RESUME_STARTUP_ATTEMPTS = 1_200;
+const RESUME_STARTUP_INTERVAL_MS = 250;
+const PROMPT_ACCEPTANCE_ATTEMPTS = 50;
 const TMUX = resolveExecutable("CHATINABOX_TMUX_PATH", [
   "/usr/bin/tmux",
   "/usr/local/bin/tmux",
@@ -525,8 +528,11 @@ export class CodexBridge {
       if (!/^%\d{1,10}$/u.test(paneId)) continue;
       const panePid = parsePositiveInteger(panePidRaw);
       const windowIndex = parseNonNegativeInteger(windowIndexRaw);
-      const codexPid = findCodexDescendant(panePid, children);
-      if (codexPid === null) continue;
+      const codexProcess = findCodexDescendant(panePid, children);
+      if (codexProcess === null) continue;
+      const resumedSessionId = codexResumeSessionIdFromArgs(
+        codexProcess.args,
+      );
       const session = this.db
         .prepare(`
           SELECT session_id, busy FROM hook_sessions
@@ -560,17 +566,21 @@ export class CodexBridge {
         cwd: normalizeCwd(cwd),
         active: activeRaw === "1",
         busy: session?.busy === 1 || mirroredBusy,
-        codexPid,
+        codexPid: codexProcess.pid,
         assistantName: this.assistantNameForTarget({
           serverPid,
           paneId,
           panePid,
         }),
         ...(
-          session?.session_id || transcriptBinding?.session_id
+          session?.session_id ||
+            transcriptBinding?.session_id ||
+            resumedSessionId
             ? {
                 sessionId:
-                  session?.session_id ?? transcriptBinding!.session_id,
+                  session?.session_id ??
+                  transcriptBinding?.session_id ??
+                  resumedSessionId!,
               }
             : {}
         ),
@@ -690,29 +700,16 @@ export class CodexBridge {
         "That Codex session is no longer available.",
       );
     }
-    const queueForNextTurn = request.mode === "queue" && target.busy;
-    if (deliveryId) {
-      this.db.prepare(`
-        INSERT INTO accepted_deliveries (
-          delivery_id, server_pid, pane_id, pane_pid,
-          queued_for_next_turn, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?)
-      `).run(
-        deliveryId,
-        target.serverPid,
-        target.paneId,
-        target.panePid,
-        queueForNextTurn ? 1 : 0,
-        Date.now(),
+    if (this.hasExplicitlyInactiveHook(target)) {
+      return failure(
+        "STALE_TARGET",
+        "That Codex session finished while your message was arriving.",
       );
-      this.db.prepare(`
-        DELETE FROM accepted_deliveries
-        WHERE created_at < ?
-      `).run(Date.now() - 7 * 24 * 60 * 60 * 1_000);
     }
+    const queueForNextTurn = request.mode === "queue" && target.busy;
     const bufferName = `codex-tg-${randomBytes(8).toString("hex")}`;
     const originId = this.recordPromptOrigin(target, request.text);
-    let sent = false;
+    let accepted = false;
     try {
       await run(TMUX, ["load-buffer", "-b", bufferName, "-"], request.text);
       await run(TMUX, [
@@ -730,13 +727,29 @@ export class CodexBridge {
         target.paneId,
         queueForNextTurn ? "Tab" : "Enter",
       ]);
-      sent = true;
-      if (!this.hasHookRegistration(target)) {
+      const hookTracked = this.hasHookRegistration(target);
+      if (!hookTracked) {
         void this.watchTranscriptFallback(
           target,
           request.text,
           Date.now(),
         ).catch(() => undefined);
+      } else if (!queueForNextTurn && !target.busy) {
+        const promptState = await this.waitForPromptAcceptance(originId, target);
+        if (promptState === "stale") {
+          return failure(
+            "STALE_TARGET",
+            "That Codex session finished before it accepted your message.",
+          );
+        }
+      }
+      accepted = true;
+      if (deliveryId) {
+        this.recordAcceptedDelivery(
+          deliveryId,
+          target,
+          queueForNextTurn,
+        );
       }
       return {
         ok: true,
@@ -744,16 +757,50 @@ export class CodexBridge {
         queuedUntilNextToolCall: queueForNextTurn,
       };
     } finally {
-      if (!sent) {
+      if (!accepted) {
         this.deletePromptOrigin(originId);
-        if (deliveryId) {
-          this.db.prepare(`
-            DELETE FROM accepted_deliveries WHERE delivery_id = ?
-          `).run(deliveryId);
-        }
       }
       await run(TMUX, ["delete-buffer", "-b", bufferName]).catch(() => undefined);
     }
+  }
+
+  private async waitForPromptAcceptance(
+    originId: number,
+    target: CodexPaneIdentity,
+  ): Promise<"accepted" | "stale" | "unknown"> {
+    for (let attempt = 0; attempt < PROMPT_ACCEPTANCE_ATTEMPTS; attempt += 1) {
+      const pending = this.db.prepare(`
+        SELECT 1 FROM prompt_origins WHERE id = ?
+      `).get(originId);
+      if (!pending) return "accepted";
+      if (this.hasExplicitlyInactiveHook(target)) return "stale";
+      await delay(100);
+    }
+    return "unknown";
+  }
+
+  private recordAcceptedDelivery(
+    deliveryId: string,
+    target: CodexPaneIdentity,
+    queuedForNextTurn: boolean,
+  ): void {
+    this.db.prepare(`
+      INSERT INTO accepted_deliveries (
+        delivery_id, server_pid, pane_id, pane_pid,
+        queued_for_next_turn, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      deliveryId,
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      queuedForNextTurn ? 1 : 0,
+      Date.now(),
+    );
+    this.db.prepare(`
+      DELETE FROM accepted_deliveries
+      WHERE created_at < ?
+    `).run(Date.now() - 7 * 24 * 60 * 60 * 1_000);
   }
 
   private async interrupt(
@@ -997,7 +1044,18 @@ export class CodexBridge {
     const alreadyRunning = existing.find(
       (pane) => pane.sessionId === request.sessionId,
     );
-    if (alreadyRunning) return { ok: true, pane: alreadyRunning };
+    if (alreadyRunning) {
+      const ready = await this.waitForResumedPaneReady(
+        alreadyRunning,
+        request.sessionId,
+      );
+      return ready
+        ? { ok: true, pane: ready }
+        : failure(
+          "START_FAILED",
+          "The saved Codex session exited before it became ready.",
+        );
+    }
     const name = normalizeRequestedName(request.name ?? saved.name);
     if (
       request.model !== undefined &&
@@ -1048,6 +1106,7 @@ export class CodexBridge {
       name,
       cwd: profile.cwd,
       command,
+      expectedSessionId: request.sessionId,
     });
     if (response.ok && "pane" in response) {
       if (response.pane.sessionId !== request.sessionId) {
@@ -1272,8 +1331,16 @@ export class CodexBridge {
     readonly name: string;
     readonly cwd: string;
     readonly command: string;
+    readonly expectedSessionId?: string;
   }): Promise<CodexBridgeResponse> {
-    const { existing, tmuxSession, name, cwd, command } = input;
+    const {
+      existing,
+      tmuxSession,
+      name,
+      cwd,
+      command,
+      expectedSessionId,
+    } = input;
 
     const sessionExists = await run(TMUX, ["has-session", "-t", tmuxSession])
       .then(() => true)
@@ -1313,15 +1380,17 @@ export class CodexBridge {
     if (!pane) {
       return failure("START_FAILED", "Codex session did not become ready.");
     }
-    const readyPane = pane.sessionId
-      ? pane
-      : await waitForPane(
-        () => this.listCodexPanes(),
-        (candidate) =>
-          samePaneIdentity(candidate, pane) &&
-          typeof candidate.sessionId === "string",
-        SESSION_ID_STARTUP_ATTEMPTS,
-      );
+    const readyPane = expectedSessionId
+      ? await this.waitForResumedPaneReady(pane, expectedSessionId)
+      : pane.sessionId
+        ? pane
+        : await waitForPane(
+          () => this.listCodexPanes(),
+          (candidate) =>
+            samePaneIdentity(candidate, pane) &&
+            typeof candidate.sessionId === "string",
+          SESSION_ID_STARTUP_ATTEMPTS,
+        );
     if (!readyPane) {
       await run(TMUX, ["kill-pane", "-t", pane.paneId])
         .catch(() => undefined);
@@ -1331,6 +1400,7 @@ export class CodexBridge {
       );
     }
     if (
+      expectedSessionId === undefined &&
       this.isManagedCwd(cwd) &&
       !await this.ensureManagedCodexReady(readyPane)
     ) {
@@ -1342,6 +1412,42 @@ export class CodexBridge {
       );
     }
     return { ok: true, pane: readyPane };
+  }
+
+  private async waitForResumedPaneReady(
+    pane: CodexPane,
+    expectedSessionId: string,
+  ): Promise<CodexPane | null> {
+    for (
+      let attempt = 0;
+      attempt < RESUME_STARTUP_ATTEMPTS;
+      attempt += 1
+    ) {
+      const candidate = (await this.listCodexPanes()).find(
+        (current) => samePaneIdentity(current, pane),
+      );
+      if (!candidate) return null;
+      if (
+        candidate.sessionId === expectedSessionId &&
+        this.hasActiveHookSession(candidate, expectedSessionId)
+      ) {
+        return candidate;
+      }
+      const screen = await run(TMUX, [
+        "capture-pane",
+        "-p",
+        "-t",
+        candidate.paneId,
+      ]).catch(() => "");
+      if (
+        candidate.sessionId === expectedSessionId &&
+        managedCodexStartupState(screen) === "ready"
+      ) {
+        return candidate;
+      }
+      await delay(RESUME_STARTUP_INTERVAL_MS);
+    }
+    return null;
   }
 
   private isManagedCwd(cwd: string): boolean {
@@ -2003,6 +2109,23 @@ export class CodexBridge {
       SELECT 1 FROM hook_sessions
       WHERE server_pid = ? AND pane_id = ? AND pane_pid = ? AND active = 1
     `).get(target.serverPid, target.paneId, target.panePid);
+    return row !== undefined;
+  }
+
+  private hasActiveHookSession(
+    target: CodexPaneIdentity,
+    sessionId: string,
+  ): boolean {
+    const row = this.db.prepare(`
+      SELECT 1 FROM hook_sessions
+      WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+        AND session_id = ? AND active = 1
+    `).get(
+      target.serverPid,
+      target.paneId,
+      target.panePid,
+      sessionId,
+    );
     return row !== undefined;
   }
 
@@ -3648,7 +3771,7 @@ function indexChildren(rows: readonly ProcessRow[]): Map<number, ProcessRow[]> {
 function findCodexDescendant(
   panePid: number,
   children: ReadonlyMap<number, readonly ProcessRow[]>,
-): number | null {
+): ProcessRow | null {
   const queue = [...(children.get(panePid) ?? [])];
   const seen = new Set<number>();
   while (queue.length > 0) {
@@ -3660,11 +3783,18 @@ function findCodexDescendant(
       /(?:^|\s|\/)codex(?:\s|$)/u.test(normalized) &&
       !/\b(?:app-server|exec-server|mcp-server)\b/u.test(normalized)
     ) {
-      return process.pid;
+      return process;
     }
     queue.push(...(children.get(process.pid) ?? []));
   }
   return null;
+}
+
+export function codexResumeSessionIdFromArgs(args: string): string | null {
+  const match =
+    /(?:^|\s)resume\s+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=\s|$)/iu
+      .exec(args);
+  return match?.[1]?.toLowerCase() ?? null;
 }
 
 async function run(
@@ -3956,7 +4086,9 @@ export function managedCodexStartupState(
     /^\s*›(?:\s|$)/mu.test(screen) &&
     (
       /\bgpt-[\w.-]+\b/iu.test(screen) ||
-      /Use \/skills to list available skills/iu.test(screen)
+      /Use \/skills to list available skills/iu.test(screen) ||
+      /\b\d{1,3}%\s+context left\b/iu.test(screen) ||
+      /\btab to queue message\b/iu.test(screen)
     )
   ) {
     return "ready";

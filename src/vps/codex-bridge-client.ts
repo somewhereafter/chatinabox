@@ -9,7 +9,8 @@ const MAX_RESPONSE_BYTES = 6 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 3_000;
 const SCREEN_REQUEST_TIMEOUT_MS = 20_000;
 const GOAL_REQUEST_TIMEOUT_MS = 20_000;
-const STARTUP_REQUEST_TIMEOUT_MS = 90_000;
+const STARTUP_REQUEST_TIMEOUT_MS = 6 * 60_000;
+const PROMPT_REQUEST_TIMEOUT_MS = 10_000;
 
 export function bridgeRequestTimeoutMs(
   request: Pick<CodexBridgeRequest, "op">,
@@ -24,6 +25,9 @@ export function bridgeRequestTimeoutMs(
   }
   if (request.op === "screen") {
     return Math.max(baselineMs, SCREEN_REQUEST_TIMEOUT_MS);
+  }
+  if (request.op === "send") {
+    return Math.max(baselineMs, PROMPT_REQUEST_TIMEOUT_MS);
   }
   if (
     request.op === "goals" ||
