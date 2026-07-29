@@ -104,9 +104,11 @@ export class TopicSessionController {
 
   async refreshPresence(): Promise<void> {
     const icons = await this.loadStatusIcons();
-    if (!icons) return;
     const listed = await this.bridge.request({ op: "list" }).catch(() => null);
-    const panes = listed?.ok && "panes" in listed ? listed.panes : [];
+    if (!listed?.ok || !("panes" in listed)) {
+      return;
+    }
+    const panes = listed.panes;
     for (const attachment of this.dependencies.store.codexAttachments()) {
       if (attachment.chat_id >= 0 || attachment.message_thread_id <= 0) {
         continue;
@@ -132,6 +134,18 @@ export class TopicSessionController {
         paneId: attachment.pane_id,
         panePid: attachment.pane_pid,
       };
+      let row = this.dependencies.store.ensureTopicSetup(
+        attachment.chat_id,
+        attachment.owner_user_id,
+        attachment.message_thread_id,
+        attachment.window_name,
+        attachment.cwd,
+        sessionDefaults(this.profile()),
+      );
+      if (!pane) {
+        await this.retireMissingAttachment(row, attachment, icons, true);
+        continue;
+      }
       let activeStatus = this.dependencies.store.codexStatus(
         attachment.chat_id,
         attachment.owner_user_id,
@@ -163,14 +177,6 @@ export class TopicSessionController {
         }
       }
       const activeTurn = activeStatus !== null;
-      let row = this.dependencies.store.ensureTopicSetup(
-        attachment.chat_id,
-        attachment.owner_user_id,
-        attachment.message_thread_id,
-        attachment.window_name,
-        attachment.cwd,
-        sessionDefaults(this.profile()),
-      );
       if (pane && attachment.window_name !== pane.windowName) {
         this.dependencies.store.renameAttachedCodexTarget(
           {
@@ -198,7 +204,7 @@ export class TopicSessionController {
             { idle_since: 0 },
           ) ?? row;
         }
-        await this.setTopicIconStatus(row, "working", icons);
+        if (icons) await this.setTopicIconStatus(row, "working", icons);
         continue;
       }
       if (row.idle_since === 0) {
@@ -222,7 +228,7 @@ export class TopicSessionController {
       ) {
         continue;
       } else {
-        await this.setTopicIconStatus(row, "done", icons);
+        if (icons) await this.setTopicIconStatus(row, "done", icons);
       }
     }
   }
@@ -274,12 +280,30 @@ export class TopicSessionController {
     ownerUserId: number,
     messageThreadId: number,
   ): Promise<CodexAttachmentRow | null> {
-    const existing = this.dependencies.store.codexAttachment(
+    let existing = this.dependencies.store.codexAttachment(
       chatId,
       ownerUserId,
       messageThreadId,
     );
-    if (existing) return existing;
+    if (existing) {
+      const live = await this.attachmentIsLive(existing);
+      if (live !== false) return existing;
+      const staleSetup = this.dependencies.store.ensureTopicSetup(
+        chatId,
+        ownerUserId,
+        messageThreadId,
+        existing.window_name,
+        existing.cwd,
+        sessionDefaults(this.profile()),
+      );
+      await this.retireMissingAttachment(
+        staleSetup,
+        existing,
+        await this.loadStatusIcons(),
+        false,
+      );
+      existing = null;
+    }
     const setup = this.dependencies.store.topicSetup(
       chatId,
       ownerUserId,
@@ -355,11 +379,37 @@ export class TopicSessionController {
       return true;
     }
 
-    const attachment = this.dependencies.store.codexAttachment(
+    let attachment = this.dependencies.store.codexAttachment(
       identity.chatId,
       identity.ownerUserId,
       identity.messageThreadId,
     );
+    const routableInput =
+      typeof message.text === "string" ||
+      Boolean(message.photo?.length) ||
+      Boolean(message.document) ||
+      Boolean(message.voice) ||
+      Boolean(message.audio);
+    if (attachment && routableInput) {
+      const live = await this.attachmentIsLive(attachment);
+      if (live === false) {
+        const staleSetup = this.dependencies.store.ensureTopicSetup(
+          identity.chatId,
+          identity.ownerUserId,
+          identity.messageThreadId,
+          attachment.window_name,
+          attachment.cwd,
+          sessionDefaults(this.profile()),
+        );
+        await this.retireMissingAttachment(
+          staleSetup,
+          attachment,
+          await this.loadStatusIcons(),
+          false,
+        );
+        attachment = null;
+      }
+    }
     if (attachment && typeof message.text === "string") {
       this.dependencies.store.updateTopicSetup(
         identity.chatId,
@@ -386,11 +436,7 @@ export class TopicSessionController {
       !attachment &&
       setup?.closed_at &&
       command === null &&
-      (
-        typeof message.text === "string" ||
-        Boolean(message.photo?.length) ||
-        Boolean(message.document)
-      )
+      routableInput
     ) {
       // Returning false after a successful wake lets the normal Codex router
       // relay this exact Telegram update. A failed wake consumes it after
@@ -1378,7 +1424,7 @@ export class TopicSessionController {
   private async closeInactiveTopic(
     row: TopicSetupRow,
     attachment: CodexAttachmentRow,
-    icons: StatusIcons,
+    icons: StatusIcons | null,
   ): Promise<void> {
     const target = {
       serverPid: attachment.server_pid,
@@ -1424,7 +1470,7 @@ export class TopicSessionController {
       },
     );
     if (!updated) return;
-    await this.setTopicIconStatus(updated, "closed", icons);
+    if (icons) await this.setTopicIconStatus(updated, "closed", icons);
     updated = this.dependencies.store.topicSetup(
       row.chat_id,
       row.owner_user_id,
@@ -1446,6 +1492,107 @@ export class TopicSessionController {
         { resting_message_id: sent.result.message_id },
       );
     }
+  }
+
+  private async attachmentIsLive(
+    attachment: CodexAttachmentRow,
+  ): Promise<boolean | null> {
+    const listed = await this.bridge.request({ op: "list" }).catch(() => null);
+    if (!listed?.ok || !("panes" in listed)) return null;
+    return listed.panes.some((pane) =>
+      samePaneIdentity(pane, {
+        serverPid: attachment.server_pid,
+        paneId: attachment.pane_id,
+        panePid: attachment.pane_pid,
+      })
+    );
+  }
+
+  private async retireMissingAttachment(
+    row: TopicSetupRow,
+    attachment: CodexAttachmentRow,
+    icons: StatusIcons | null,
+    announce: boolean,
+  ): Promise<TopicSetupRow> {
+    const target = {
+      serverPid: attachment.server_pid,
+      paneId: attachment.pane_id,
+      panePid: attachment.pane_pid,
+    };
+    const recovered = await this.bridge.request({
+      op: "close",
+      target,
+    }).catch(() => null);
+    const closed = recovered?.ok && "closed" in recovered
+      ? recovered
+      : null;
+    const transient = this.dependencies.store.clearCodexStatus(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      target,
+    );
+    this.dependencies.store.clearCodexThinkingSection(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      target,
+    );
+    if (transient) {
+      await tgDeleteMessage(
+        this.dependencies.env,
+        attachment.chat_id,
+        transient.telegram_message_id,
+      ).catch(() => undefined);
+    }
+    this.dependencies.store.detachCodex(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      attachment.message_thread_id,
+    );
+    let updated = this.dependencies.store.updateTopicSetup(
+      row.chat_id,
+      row.owner_user_id,
+      row.message_thread_id,
+      {
+        model: closed?.profile.model ?? row.model,
+        reasoning_effort:
+          closed?.profile.reasoningEffort ?? row.reasoning_effort,
+        fast: closed ? (closed.profile.fast ? 1 : 0) : row.fast,
+        cwd: closed?.profile.cwd ?? row.cwd,
+        idle_since: 0,
+        closed_session_id:
+          closed?.sessionId ?? attachment.session_id ??
+          row.closed_session_id,
+        closed_at: this.now(),
+        resting_message_id: null,
+        last_icon_status: "",
+      },
+    ) ?? row;
+    if (icons) {
+      await this.setTopicIconStatus(updated, "closed", icons);
+      updated = this.dependencies.store.topicSetup(
+        row.chat_id,
+        row.owner_user_id,
+        row.message_thread_id,
+      ) ?? updated;
+    }
+    if (!announce) return updated;
+    const sent = await tgSendRichHtml(
+      this.dependencies.env,
+      updated.chat_id,
+      formatRestingCard(updated),
+      undefined,
+      await this.restartKeyboard(updated),
+      updated.message_thread_id,
+    ).catch(() => null);
+    if (sent?.ok) {
+      updated = this.dependencies.store.updateTopicSetup(
+        updated.chat_id,
+        updated.owner_user_id,
+        updated.message_thread_id,
+        { resting_message_id: sent.result.message_id },
+      ) ?? updated;
+    }
+    return updated;
   }
 
   private async restartTopicSession(

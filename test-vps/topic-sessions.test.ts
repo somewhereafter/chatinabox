@@ -645,6 +645,124 @@ describe("Topic session setup", () => {
     store.close();
   });
 
+  it.each([
+    ["photo", {
+      photo: [{
+        file_id: "photo",
+        file_unique_id: "photo-unique",
+        width: 640,
+        height: 480,
+      }],
+      caption: "Inspect this image.",
+    }],
+    ["document", {
+      document: {
+        file_id: "document",
+        file_unique_id: "document-unique",
+        file_name: "notes.md",
+        mime_type: "text/markdown",
+        file_size: 120,
+      },
+      caption: "Read this file.",
+    }],
+    ["voice", {
+      voice: {
+        file_id: "voice",
+        file_unique_id: "voice-unique",
+        duration: 4,
+      },
+    }],
+  ])("retires a stale attachment and wakes before routing %s input", async (
+    _kind,
+    media,
+  ) => {
+    let pane!: ReturnType<typeof setup>["pane"];
+    const resumedPane = () => ({
+      ...pane,
+      paneId: "%5",
+      panePid: 201,
+    });
+    const result = setup(undefined, async (request) => {
+      const op = (request as { op?: string }).op;
+      if (op === "list") {
+        return { ok: true, panes: [], recent: [], workspaces: [] };
+      }
+      if (op === "close") {
+        return {
+          ok: true,
+          closed: true,
+          sessionId: pane.sessionId,
+          profile: {
+            model: "sol",
+            reasoningEffort: "high",
+            fast: false,
+            cwd: pane.cwd,
+          },
+        };
+      }
+      if (op === "resume") return { ok: true, pane: resumedPane() };
+      throw new Error(`Unexpected request: ${op}`);
+    });
+    pane = result.pane;
+    const { controller, store, requests } = result;
+    store.rememberTopic(-10042, 42, 7, pane.windowName, pane.cwd);
+    store.attachCodex(-10042, 42, pane, 7);
+
+    const consumed = await controller.handleMessage({
+      message_id: 88,
+      chat: { id: -10042, type: "supergroup" },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      date: 1,
+      ...media,
+    } as never, null);
+
+    expect(consumed).toBe(false);
+    expect(requests.map((request) => (
+      request as { op?: string }
+    ).op)).toEqual(["list", "close", "resume"]);
+    expect(store.codexAttachment(-10042, 42, 7)).toMatchObject({
+      pane_id: "%5",
+      session_id: pane.sessionId,
+    });
+    expect(store.topicSetup(-10042, 42, 7)).toMatchObject({
+      closed_session_id: null,
+      closed_at: null,
+    });
+    store.close();
+  });
+
+  it("retires a disappeared pane without losing its saved session", async () => {
+    const { controller, store, pane, requests } = setup(
+      undefined,
+      async (request) => {
+        const op = (request as { op?: string }).op;
+        if (op === "list") {
+          return { ok: true, panes: [], recent: [], workspaces: [] };
+        }
+        if (op === "close") {
+          return { ok: false, error: "Pane not found" };
+        }
+        throw new Error(`Unexpected request: ${op}`);
+      },
+    );
+    store.rememberTopic(-10042, 42, 7, pane.windowName, pane.cwd);
+    store.attachCodex(-10042, 42, pane, 7);
+
+    await controller.refreshPresence();
+
+    expect(requests.map((request) => (
+      request as { op?: string }
+    ).op)).toEqual(["list", "close"]);
+    expect(store.codexAttachment(-10042, 42, 7)).toBeNull();
+    expect(store.topicSetup(-10042, 42, 7)).toMatchObject({
+      closed_session_id: pane.sessionId,
+    });
+    expect(store.topicSetup(-10042, 42, 7)?.closed_at).not.toBeNull();
+    store.close();
+  });
+
   it("restarts a polluted Review topic as a fresh worker outside Lobby", async () => {
     const { controller, store, requests } = setup();
     store.rememberTopic(

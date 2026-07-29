@@ -1049,6 +1049,14 @@ export class CodexBridge {
       command,
     });
     if (response.ok && "pane" in response) {
+      if (response.pane.sessionId !== request.sessionId) {
+        await run(TMUX, ["kill-pane", "-t", response.pane.paneId])
+          .catch(() => undefined);
+        return failure(
+          "START_FAILED",
+          "The saved Codex session exited before it became ready.",
+        );
+      }
       const assistantName = assistantNameForModel(profile.model);
       this.saveAssistantName(response.pane, assistantName);
       this.savePaneProfile(response.pane, profile);
@@ -1304,18 +1312,35 @@ export class CodexBridge {
     if (!pane) {
       return failure("START_FAILED", "Codex session did not become ready.");
     }
+    const readyPane = pane.sessionId
+      ? pane
+      : await waitForPane(
+        () => this.listCodexPanes(),
+        (candidate) =>
+          samePaneIdentity(candidate, pane) &&
+          typeof candidate.sessionId === "string",
+        50,
+      );
+    if (!readyPane) {
+      await run(TMUX, ["kill-pane", "-t", pane.paneId])
+        .catch(() => undefined);
+      return failure(
+        "START_FAILED",
+        "Codex session exited before it became ready.",
+      );
+    }
     if (
       this.isManagedCwd(cwd) &&
-      !await this.ensureManagedCodexReady(pane)
+      !await this.ensureManagedCodexReady(readyPane)
     ) {
-      await run(TMUX, ["kill-pane", "-t", pane.paneId])
+      await run(TMUX, ["kill-pane", "-t", readyPane.paneId])
         .catch(() => undefined);
       return failure(
         "START_BLOCKED",
         "The managed Codex session did not reach a usable prompt.",
       );
     }
-    return { ok: true, pane };
+    return { ok: true, pane: readyPane };
   }
 
   private isManagedCwd(cwd: string): boolean {
@@ -1980,6 +2005,16 @@ export class CodexBridge {
     return row !== undefined;
   }
 
+  private hasExplicitlyInactiveHook(target: CodexPaneIdentity): boolean {
+    const row = this.db.prepare(`
+      SELECT active FROM hook_sessions
+      WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+    `).get(target.serverPid, target.paneId, target.panePid) as
+      | { active: number }
+      | undefined;
+    return row?.active === 0;
+  }
+
   private hasHookRegistrationSince(
     target: CodexPaneIdentity,
     startedAt: number,
@@ -2590,6 +2625,19 @@ export class CodexBridge {
         SELECT * FROM transcript_bindings ORDER BY updated_at
       `).all() as unknown as TranscriptBindingRow[];
       for (const binding of bindings) {
+        const target = {
+          serverPid: binding.server_pid,
+          paneId: binding.pane_id,
+          panePid: binding.pane_pid,
+        };
+        // A rollout can continue growing when the same Codex thread is opened
+        // directly in another terminal. Once this exact tmux pane has emitted
+        // SessionEnd, its old binding no longer owns that rollout and must not
+        // relay the other terminal's activity back to Telegram.
+        if (this.hasExplicitlyInactiveHook(target)) {
+          this.deleteTurnActivity(target);
+          continue;
+        }
         await this.mirrorBinding(binding);
       }
     } finally {
@@ -3691,8 +3739,9 @@ async function runBuffer(
 async function waitForPane(
   list: () => Promise<CodexPane[]>,
   predicate: (pane: CodexPane) => boolean,
+  attempts = 30,
 ): Promise<CodexPane | null> {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const found = (await list()).find(predicate);
     if (found) return found;
     await new Promise((resolve) => setTimeout(resolve, 100));

@@ -3044,6 +3044,7 @@ export class CodexTelegramController {
 
   async flushDeferredTransientStartsOnce(): Promise<void> {
     const now = this.now();
+    let livePanes: readonly CodexPane[] | null | undefined;
     for (const [key, graceUntil] of this.transientGraceUntil) {
       if (graceUntil <= now) this.transientGraceUntil.delete(key);
     }
@@ -3062,6 +3063,22 @@ export class CodexTelegramController {
       ) {
         this.deferredTransientStarts.delete(key);
         this.transientGraceUntil.delete(key);
+        continue;
+      }
+      if (livePanes === undefined) {
+        livePanes = await this.listPanes().catch(() => null);
+      }
+      if (livePanes === null) return;
+      if (!livePanes.some((pane) =>
+        samePaneIdentity(pane, pending.target)
+      )) {
+        this.deferredTransientStarts.delete(key);
+        this.transientGraceUntil.delete(key);
+        this.dependencies.store.clearCodexThinkingSection(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          pending.target,
+        );
         continue;
       }
       if (
