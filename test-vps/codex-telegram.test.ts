@@ -2878,6 +2878,194 @@ describe("Codex Telegram attachments", () => {
     store.close();
   });
 
+  it("does not hold a plain prompt behind the Telegram working card", async () => {
+    vi.useFakeTimers();
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-prompt-first-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "chatinabox",
+      windowIndex: 0,
+      cwd: root,
+      active: true,
+      busy: false,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(42, 42, pane);
+    let releaseTelegram!: () => void;
+    const telegramReleased = new Promise<void>((resolve) => {
+      releaseTelegram = resolve;
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => {
+      await telegramReleased;
+      return {
+        json: async () => ({
+          ok: true,
+          result: { message_id: 1_000 },
+        }),
+      };
+    }));
+    let confirmBridge!: () => void;
+    const bridgeCalled = new Promise<void>((resolve) => {
+      confirmBridge = resolve;
+    });
+    const bridge = {
+      request: vi.fn(async () => {
+        confirmBridge();
+        return {
+          ok: true,
+          sent: true,
+          queuedUntilNextToolCall: false,
+        };
+      }),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    const routed = controller.routeAttachedMessage(message({
+      message_id: 100,
+      chat: { id: 42 },
+      from: { id: 42 },
+      text: "deliver before status",
+    }));
+    await vi.advanceTimersByTimeAsync(701);
+    await bridgeCalled;
+    expect(bridge.request).toHaveBeenCalledWith(expect.objectContaining({
+      op: "send",
+      text: "deliver before status",
+    }));
+
+    releaseTelegram();
+    await routed;
+    await vi.advanceTimersByTimeAsync(1);
+    store.close();
+  });
+
+  it("wakes and retries once when a prompt reaches a stale topic pane", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-stale-retry-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const oldPane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "chatinabox",
+      windowIndex: 0,
+      cwd: root,
+      active: true,
+      busy: false,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    const newPane = {
+      ...oldPane,
+      paneId: "%5",
+      panePid: 201,
+      codexPid: 301,
+    };
+    store.attachCodex(-10042, 42, oldPane, 26);
+    const oldAttachment = store.codexAttachment(-10042, 42, 26)!;
+    vi.stubGlobal("fetch", vi.fn(async () => ({
+      json: async () => ({
+        ok: true,
+        result: { message_id: 1_000 },
+      }),
+    })));
+    const bridge = {
+      request: vi.fn()
+        .mockResolvedValueOnce({
+          ok: false,
+          code: "STALE_TARGET",
+          error: "stale",
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          sent: true,
+          queuedUntilNextToolCall: false,
+        }),
+    };
+    const topicPresence = {
+      markWorking: vi.fn(async () => undefined),
+      markReady: vi.fn(async () => undefined),
+      ensureTopicAwake: vi.fn(async () => {
+        store.attachCodex(-10042, 42, newPane, 26);
+        return store.codexAttachment(-10042, 42, 26);
+      }),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+      topicPresence,
+    });
+    const internal = controller as unknown as {
+      relayPrompt(
+        attachment: typeof oldAttachment,
+        target: {
+          serverPid: number;
+          paneId: string;
+          panePid: number;
+        },
+        text: string,
+        replyToMessageId: number,
+        reportFailure: boolean,
+        sourceMessageCount: number,
+        mode: "steer" | "queue",
+        deliveryId: string,
+      ): Promise<boolean>;
+    };
+
+    await expect(internal.relayPrompt(
+      oldAttachment,
+      { serverPid: 100, paneId: "%4", panePid: 200 },
+      "retry me",
+      100,
+      true,
+      1,
+      "steer",
+      "tg:test",
+    )).resolves.toBe(true);
+    expect(topicPresence.ensureTopicAwake).toHaveBeenCalledOnce();
+    expect(bridge.request).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        target: { serverPid: 100, paneId: "%4", panePid: 200 },
+        deliveryId: "tg:test",
+      }),
+    );
+    expect(bridge.request).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        target: { serverPid: 100, paneId: "%5", panePid: 201 },
+        deliveryId: "tg:test",
+      }),
+    );
+    store.close();
+  });
+
   it("coalesces rapid prompts before reanchoring beneath the newest message", async () => {
     vi.useFakeTimers();
     const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-telegram-"));

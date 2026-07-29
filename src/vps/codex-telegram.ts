@@ -103,6 +103,11 @@ const POST_RESPONSE_TRANSIENT_GRACE_MS = 5_000;
 interface TopicPresenceSink {
   markWorking(attachment: CodexAttachmentRow): Promise<void>;
   markReady(attachment: CodexAttachmentRow): Promise<void>;
+  ensureTopicAwake?(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId: number,
+  ): Promise<CodexAttachmentRow | null>;
 }
 
 interface CodexTelegramDependencies {
@@ -921,6 +926,14 @@ export class CodexTelegramController {
       return true;
     }
 
+    const queuedCount = this.dependencies.store.queueCodexPrompt(
+      attachment.chat_id,
+      attachment.owner_user_id,
+      target,
+      message.message_id,
+      buildTelegramTextPrompt(message),
+    );
+    this.scheduleTextBurst(burstKey);
     await this.setTransientStatus(
       attachment,
       target,
@@ -929,13 +942,6 @@ export class CodexTelegramController {
       undefined,
       undefined,
       true,
-    );
-    const queuedCount = this.dependencies.store.queueCodexPrompt(
-      attachment.chat_id,
-      attachment.owner_user_id,
-      target,
-      message.message_id,
-      buildTelegramTextPrompt(message),
     );
     if (queuedCount > 1 && !hadActivityStatus) {
       await this.setTransientStatus(
@@ -946,7 +952,6 @@ export class CodexTelegramController {
         queuedCount,
       );
     }
-    this.scheduleTextBurst(burstKey);
     return true;
   }
 
@@ -1154,16 +1159,8 @@ export class CodexTelegramController {
     mode: "steer" | "queue" = "steer",
     deliveryId?: string,
     acknowledgeImmediateQueue = true,
+    retryStaleTarget = true,
   ): Promise<boolean> {
-    await this.setTransientStatus(
-      attachment,
-      target,
-      "state_working",
-      replyToMessageId,
-      undefined,
-      undefined,
-      true,
-    );
     const response = await this.bridge.request({
       op: "send",
       target,
@@ -1172,6 +1169,36 @@ export class CodexTelegramController {
       deliveryId: deliveryId ??
         telegramDeliveryId(attachment, replyToMessageId),
     }).catch(() => null);
+    if (
+      response &&
+      !response.ok &&
+      response.code === "STALE_TARGET" &&
+      retryStaleTarget &&
+      attachment.chat_id < 0 &&
+      attachment.message_thread_id > 0
+    ) {
+      const replacement = await this.dependencies.topicPresence
+        ?.ensureTopicAwake?.(
+          attachment.chat_id,
+          attachment.owner_user_id,
+          attachment.message_thread_id,
+        )
+        .catch(() => null);
+      if (replacement) {
+        return this.relayPrompt(
+          replacement,
+          attachmentTarget(replacement),
+          text,
+          replyToMessageId,
+          reportFailure,
+          sourceMessageCount,
+          mode,
+          deliveryId,
+          acknowledgeImmediateQueue,
+          false,
+        );
+      }
+    }
     if (!response?.ok) {
       const transient = this.takeTransientStatus(attachment, target);
       if (transient) {
@@ -1244,6 +1271,15 @@ export class CodexTelegramController {
       "queuedUntilNextToolCall" in response &&
         response.queuedUntilNextToolCall,
       attachment.message_thread_id,
+    );
+    await this.setTransientStatus(
+      attachment,
+      target,
+      "state_working",
+      replyToMessageId,
+      undefined,
+      undefined,
+      true,
     );
     if (
       "queuedUntilNextToolCall" in response &&

@@ -14,6 +14,7 @@ import path from "node:path";
 import {
   CodexBridge,
   buildClarityTerminalHtml,
+  codexResumeSessionIdFromArgs,
   consumeTranscriptLines,
   discoverCodexWorkspaces,
   fullAccessCodexCommand,
@@ -51,6 +52,19 @@ function line(record: unknown): string {
 }
 
 describe("Codex bridge", () => {
+  it("discovers the requested session directly from a resumed Codex process", () => {
+    const sessionId = "01900000-0000-7000-8000-000000000001";
+    expect(codexResumeSessionIdFromArgs(
+      `/usr/bin/codex --enable hooks resume ${sessionId}`,
+    )).toBe(sessionId);
+    expect(codexResumeSessionIdFromArgs(
+      `/usr/bin/codex resume ${sessionId} --search`,
+    )).toBe(sessionId);
+    expect(codexResumeSessionIdFromArgs(
+      "/usr/bin/codex --enable hooks",
+    )).toBeNull();
+  });
+
   it("discovers bounded Git workspaces beneath configured roots", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-workspaces-"));
     mkdirSync(path.join(root, "alpha", ".git"), { recursive: true });
@@ -1129,6 +1143,11 @@ Use /skills to list available skills
 
 gpt-5.6-sol high
     `)).toBe("ready");
+    expect(managedCodexStartupState(`
+›
+
+tab to queue message                                      70% context left
+    `)).toBe("ready");
     expect(managedCodexStartupState("Starting Codex…")).toBe("starting");
   });
 
@@ -1190,6 +1209,64 @@ gpt-5.6-sol high
         code: "BAD_PROMPT",
       });
     } finally {
+      await bridge.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("distinguishes Codex prompt acceptance from a session that exits first", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-bridge-"));
+    const databasePath = path.join(directory, "bridge.sqlite");
+    const bridge = new CodexBridge({
+      socketPath: path.join(directory, "bridge.sock"),
+      databasePath,
+    });
+    await bridge.listen();
+    const target = { serverPid: 100, paneId: "%4", panePid: 200 };
+    const internal = bridge as unknown as {
+      waitForPromptAcceptance(
+        originId: number,
+        pane: typeof target,
+      ): Promise<"accepted" | "stale" | "unknown">;
+    };
+    const db = new DatabaseSync(databasePath);
+    try {
+      db.prepare(`
+        INSERT INTO hook_sessions (
+          server_pid, pane_id, pane_pid, session_id, permission_mode, cwd,
+          active, busy, updated_at
+        ) VALUES (?, ?, ?, ?, '', ?, 1, 0, ?)
+      `).run(100, "%4", 200, "session", directory, Date.now());
+      const acceptedId = Number(db.prepare(`
+        INSERT INTO prompt_origins (
+          server_pid, pane_id, pane_pid, prompt_hash, prompt, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(100, "%4", 200, "hash-a", "accepted", Date.now())
+        .lastInsertRowid);
+      setTimeout(() => {
+        db.prepare(`DELETE FROM prompt_origins WHERE id = ?`).run(acceptedId);
+      }, 10);
+      await expect(
+        internal.waitForPromptAcceptance(acceptedId, target),
+      ).resolves.toBe("accepted");
+
+      const staleId = Number(db.prepare(`
+        INSERT INTO prompt_origins (
+          server_pid, pane_id, pane_pid, prompt_hash, prompt, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?)
+      `).run(100, "%4", 200, "hash-b", "stale", Date.now())
+        .lastInsertRowid);
+      setTimeout(() => {
+        db.prepare(`
+          UPDATE hook_sessions SET active = 0, busy = 0, updated_at = ?
+          WHERE server_pid = ? AND pane_id = ? AND pane_pid = ?
+        `).run(Date.now(), 100, "%4", 200);
+      }, 10);
+      await expect(
+        internal.waitForPromptAcceptance(staleId, target),
+      ).resolves.toBe("stale");
+    } finally {
+      db.close();
       await bridge.close();
       rmSync(directory, { recursive: true, force: true });
     }
