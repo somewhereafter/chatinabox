@@ -53,7 +53,6 @@ import type {
 const SETUP_CALLBACK_TTL_MS = 24 * 60 * 60 * 1_000;
 const RESTART_CALLBACK_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const TOPIC_PRESENCE_POLL_MS = 30_000;
-const TOPIC_WAKE_READY_BUFFER_MS = 900;
 const MODELS = ["sol", "luna", "terra"] as const;
 const EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 
@@ -64,7 +63,6 @@ interface TopicSessionDependencies {
   readonly store: ChatinaboxStore;
   readonly bridge?: BridgeClient;
   readonly now?: () => number;
-  readonly readyBufferMs?: number;
   readonly profile?: () => ExperienceProfile;
 }
 
@@ -77,7 +75,6 @@ interface StatusIcons {
 export class TopicSessionController {
   private readonly bridge: BridgeClient;
   private readonly now: () => number;
-  private readonly readyBufferMs: number;
   private readonly profile: () => ExperienceProfile;
   private readonly starting = new Set<string>();
   private readonly claimingSessions = new Set<string>();
@@ -89,8 +86,6 @@ export class TopicSessionController {
       dependencies.bridge ??
       new CodexBridgeClient(dependencies.env.CODEX_BRIDGE_SOCKET);
     this.now = dependencies.now ?? Date.now;
-    this.readyBufferMs =
-      dependencies.readyBufferMs ?? TOPIC_WAKE_READY_BUFFER_MS;
     this.profile = dependencies.profile ?? (() => DEFAULT_EXPERIENCE_PROFILE);
   }
 
@@ -469,15 +464,10 @@ export class TopicSessionController {
         setup.message_thread_id,
       ).catch(() => null);
     }
-    const noticeMessageId = notice?.ok
-      ? notice.result.message_id
-      : setup.resting_message_id ?? message.message_id;
-
     await this.restartTopicSession(
       setup.chat_id,
       setup.owner_user_id,
       setup.message_thread_id,
-      noticeMessageId,
     );
     const attachment = this.dependencies.store.codexAttachment(
       setup.chat_id,
@@ -509,19 +499,14 @@ export class TopicSessionController {
       return false;
     }
 
-    if (this.readyBufferMs > 0) {
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, this.readyBufferMs);
-        timer.unref();
-      });
-    }
     if (notice?.ok) {
-      await tgEditRichHtml(
+      // The exact Codex session identity is already proven by the bridge.
+      // Do not hold the inbound prompt behind cosmetic Telegram edits or let
+      // a late "waking" card outlive the turn it started.
+      void tgDeleteMessage(
         this.dependencies.env,
         setup.chat_id,
         notice.result.message_id,
-        formatMessageWakeReady(setup),
-        emptyKeyboard(),
       ).catch(() => undefined);
     }
     return true;
@@ -1691,16 +1676,16 @@ export class TopicSessionController {
           last_icon_status: "",
         },
       );
-      const icons = await this.loadStatusIcons();
-      const updated = this.dependencies.store.topicSetup(
-        chatId,
-        ownerUserId,
-        messageThreadId,
-      );
-      if (icons && updated) {
-        await this.setTopicIconStatus(updated, "done", icons);
-      }
       if (messageId !== undefined) {
+        const icons = await this.loadStatusIcons();
+        const updated = this.dependencies.store.topicSetup(
+          chatId,
+          ownerUserId,
+          messageThreadId,
+        );
+        if (icons && updated) {
+          await this.setTopicIconStatus(updated, "done", icons);
+        }
         await tgEditRichHtml(
           this.dependencies.env,
           chatId,
@@ -2073,13 +2058,6 @@ export function formatMessageWakeCard(row: TopicSetupRow): string {
   return (
     `↻ <b>Resuming ${escapeTelegramHtml(row.topic_name)}…</b>\n\n` +
     "I’ll send your message as soon as the session is ready."
-  );
-}
-
-export function formatMessageWakeReady(row: TopicSetupRow): string {
-  return (
-    `✓ <b>${escapeTelegramHtml(row.topic_name)} is back online.</b>\n` +
-    "Sending your message now…"
   );
 }
 

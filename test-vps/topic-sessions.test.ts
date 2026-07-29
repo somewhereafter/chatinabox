@@ -77,7 +77,6 @@ function setup(
     },
     store,
     bridge: bridge as never,
-    readyBufferMs: 0,
     ...(profile ? { profile: () => profile } : {}),
   });
   return { controller, store, pane, requests, sends };
@@ -641,7 +640,51 @@ describe("Topic session setup", () => {
       closed_at: null,
     });
     expect(JSON.stringify(sends[0])).toContain("Resuming 🧪 experiment");
-    expect(JSON.stringify(sends.at(-1))).toContain("Sending your message now");
+    expect(JSON.stringify(sends)).not.toContain("session · waking");
+    expect(sends).toContainEqual(expect.objectContaining({
+      chat_id: -10042,
+      message_id: 100,
+    }));
+    store.close();
+  });
+
+  it("does not hold the resumed prompt behind wake-card cleanup", async () => {
+    const { controller, store, pane } = setup();
+    store.rememberTopic(-10042, 42, 7, pane.windowName, pane.cwd);
+    store.updateTopicSetup(-10042, 42, 7, {
+      closed_session_id: pane.sessionId,
+      closed_at: 1_000,
+    });
+    vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+      if (url.includes("deleteMessage")) {
+        return await new Promise<never>(() => undefined);
+      }
+      return {
+        json: async () => ({
+          ok: true,
+          result: { message_id: 100 },
+        }),
+      };
+    }));
+
+    const handled = controller.handleMessage({
+      message_id: 78,
+      chat: { id: -10042, type: "supergroup" },
+      message_thread_id: 7,
+      is_topic_message: true,
+      from: { id: 42 },
+      text: "Route me as soon as identity is proven.",
+      date: 1,
+    }, null);
+    const result = await Promise.race([
+      handled,
+      new Promise<"timed-out">((resolve) => {
+        setTimeout(() => resolve("timed-out"), 250).unref();
+      }),
+    ]);
+
+    expect(result).toBe(false);
+    expect(store.codexAttachment(-10042, 42, 7)?.pane_id).toBe(pane.paneId);
     store.close();
   });
 
