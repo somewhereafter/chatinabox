@@ -1,6 +1,6 @@
 {
   "name": "chatinabox",
-  "version": "2.4.7",
+  "version": "2.5.0",
   "description": "Real Codex CLI sessions in a private Telegram chat or forum",
   "license": "MIT",
   "author": "somewhereafter",
@@ -35,6 +35,7 @@
     "node": ">=22.13"
   },
   "dependencies": {
+    "croner": "^10.0.1",
     "markdown-it": "^14.3.0",
     "rebrowser-puppeteer-core": "^23.10.3"
   },

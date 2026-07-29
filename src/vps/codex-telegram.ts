@@ -950,6 +950,41 @@ export class CodexTelegramController {
     return true;
   }
 
+  async routeScheduledTask(input: {
+    readonly chatId: number;
+    readonly ownerUserId: number;
+    readonly messageThreadId: number;
+    readonly occurrenceId: number;
+    readonly scheduleId: number;
+    readonly name: string;
+    readonly prompt: string;
+  }): Promise<{ readonly ok: true } | { readonly ok: false; readonly error: string }> {
+    const attachment = this.dependencies.store.codexAttachment(
+      input.chatId,
+      input.ownerUserId,
+      input.messageThreadId,
+    );
+    if (!attachment) {
+      return { ok: false, error: "The target topic has no available Codex session." };
+    }
+    const target = attachmentTarget(attachment);
+    this.clearPostResponseTransientGrace(attachment, target);
+    const delivered = await this.relayPrompt(
+      attachment,
+      target,
+      scheduledTaskPrompt(input.scheduleId, input.name, input.prompt),
+      -input.occurrenceId,
+      false,
+      1,
+      "queue",
+      `schedule:${input.scheduleId}:${input.occurrenceId}`,
+      false,
+    );
+    return delivered
+      ? { ok: true }
+      : { ok: false, error: "The scheduled prompt could not be queued." };
+  }
+
   async routeAttachedMedia(message: TelegramMessage): Promise<boolean> {
     const media = selectTelegramMedia(message);
     const chatId = message.chat.id;
@@ -1117,6 +1152,8 @@ export class CodexTelegramController {
     reportFailure = true,
     sourceMessageCount = 1,
     mode: "steer" | "queue" = "steer",
+    deliveryId?: string,
+    acknowledgeImmediateQueue = true,
   ): Promise<boolean> {
     await this.setTransientStatus(
       attachment,
@@ -1132,7 +1169,8 @@ export class CodexTelegramController {
       target,
       text,
       mode,
-      deliveryId: telegramDeliveryId(attachment, replyToMessageId),
+      deliveryId: deliveryId ??
+        telegramDeliveryId(attachment, replyToMessageId),
     }).catch(() => null);
     if (!response?.ok) {
       const transient = this.takeTransientStatus(attachment, target);
@@ -1217,7 +1255,7 @@ export class CodexTelegramController {
         replyToMessageId,
         sourceMessageCount,
       );
-    } else if (mode === "queue") {
+    } else if (mode === "queue" && acknowledgeImmediateQueue) {
       await tgSend(
         this.dependencies.env,
         attachment.chat_id,
@@ -2351,7 +2389,7 @@ export class CodexTelegramController {
             this.dependencies.env,
             attachment.chat_id,
             markdown,
-            pending?.telegram_message_id,
+            positiveTelegramMessageId(pending?.telegram_message_id),
             attachment.message_thread_id || undefined,
           ).catch(() => null);
           deliveredAsRichMessage = richResult?.ok === true;
@@ -2411,7 +2449,9 @@ export class CodexTelegramController {
               this.dependencies.env,
               attachment.chat_id,
               chunks[index],
-              index === 0 ? pending?.telegram_message_id : undefined,
+              index === 0
+                ? positiveTelegramMessageId(pending?.telegram_message_id)
+                : undefined,
               undefined,
               attachment.message_thread_id || undefined,
             );
@@ -2904,7 +2944,7 @@ export class CodexTelegramController {
       "🎨 <b>Generated image</b>",
       undefined,
       attachment.message_thread_id || undefined,
-      pending.telegram_message_id,
+      positiveTelegramMessageId(pending.telegram_message_id),
     ).catch(() => null);
     if (!sent?.ok) return false;
     this.dependencies.store.recordCodexGeneratedImageDelivery(
@@ -5201,6 +5241,27 @@ function telegramDeliveryId(
     row.message_thread_id,
     telegramMessageId,
   ].join(":");
+}
+
+function positiveTelegramMessageId(
+  value: number | null | undefined,
+): number | undefined {
+  return Number.isSafeInteger(value) && value! > 0 ? value! : undefined;
+}
+
+function scheduledTaskPrompt(
+  scheduleId: number,
+  name: string,
+  prompt: string,
+): string {
+  return (
+    `<codex_internal_context source="chatinabox_schedule" ` +
+    `schedule_id="${scheduleId}">\n` +
+    `The user explicitly scheduled this task. Execute it now in this existing ` +
+    `topic and conversation. Treat the text after this block as the user's ` +
+    `scheduled prompt. The schedule is named ${JSON.stringify(name)}.\n` +
+    `</codex_internal_context>\n\n${prompt}`
+  );
 }
 
 interface HandoffDirective {

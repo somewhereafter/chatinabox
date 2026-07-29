@@ -32,6 +32,7 @@ Chatinabox is an independent open-source project, not an OpenAI product.
 - Keep completed replies pinned as checkpoints in each topic.
 - Queue follow-up messages, send safe terminal keys, and post terminal
   screenshots.
+- Schedule a message or wake a work topic for a future or recurring task.
 - Optionally transcribe voice notes with ElevenLabs Scribe v2.
 - Optionally collect files and web apps from a session in one artifact shelf.
 
@@ -133,6 +134,27 @@ used for other languages or technical terms.
 session's shelf. The shelf is optional; normal file and image delivery works
 without it. If you want to set it up, see
 [Artifact shelf setup](docs/ARTIFACT-PUBLISHER.md).
+
+### Scheduled messages and tasks
+
+Ask the Manager or any attached Codex chat normally: “remind me tomorrow at
+nine,” “send this every Friday,” or “check the build in this topic every
+morning.” A scheduled message goes straight to Telegram. A scheduled task wakes
+the chosen topic, resumes its Codex session if necessary, and queues the prompt
+behind any active turn.
+
+Active schedules and their recent occurrence ledger appear in the Overview.
+Agents manage them through the typed `chatinabox schedule` command, so you can
+also inspect or change them from the host:
+
+```sh
+sudo chatinabox schedule list --json
+sudo chatinabox schedule create message \
+  --at '2026-07-30T09:00:00Z' \
+  --text 'Review the morning plan.' \
+  --json
+sudo chatinabox schedule pause 1 --json
+```
 
 ## Profile
 

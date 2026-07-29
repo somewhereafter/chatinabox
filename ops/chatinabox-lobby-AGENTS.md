@@ -60,6 +60,20 @@ The typed local API is available through `chatinabox`:
   deliver and register one artifact on the current session shelf.
 - `chatinabox artifact list --json` and `artifact sync` — inspect or
   republish the current session shelf.
+- `chatinabox schedule create message|task ... --json` — create an explicitly
+  requested reminder or future task. Use exactly one of `--at`, `--every`, or
+  `--cron`; add `--timezone` for wall-clock recurrence.
+- `chatinabox schedule list|show|update|pause|resume|run|cancel ... --json` —
+  manage schedules, and `schedule occurrences [ID]` for their run ledger.
+- `chatinabox schedule routes --json` — resolve another destination topic
+  before using `--topic`.
+
+Natural language is sufficient: translate the user's requested time and action
+into the typed schedule API and report its exact `nextRunAt`. Ask when a
+wall-clock time has no clear timezone. A scheduled message sends text without
+invoking Codex. A scheduled task wakes and continues
+the chosen topic's existing Codex session. Never create recurring work merely
+because it might be useful; the user must explicitly request or approve it.
 
 Artifact navigation must not constrain artifact creation. Use native delivery
 for simple local files. For a substantial website, application, interactive

@@ -456,6 +456,110 @@ describe("Codex bridge", () => {
     }
   });
 
+  it("gives resumed transcript-only turns distinct fallback identities", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-fallback-turn-"));
+    const databasePath = path.join(directory, "bridge.sqlite");
+    const transcriptPath = path.join(directory, "rollout.jsonl");
+    const sessionId = "resumed-without-task-start";
+    const target = { serverPid: 100, paneId: "%4", panePid: 200 };
+    const transcriptTurn = (reasoning: string, message: string) =>
+      line({
+        timestamp: "2026-07-29T10:00:00.000Z",
+        type: "event_msg",
+        payload: { type: "agent_reasoning", text: reasoning },
+      }) +
+      line({
+        timestamp: "2026-07-29T10:00:01.000Z",
+        type: "event_msg",
+        payload: { type: "agent_message", message, phase: "commentary" },
+      }) +
+      line({
+        timestamp: "2026-07-29T10:00:02.000Z",
+        type: "event_msg",
+        payload: { type: "task_complete" },
+      });
+    writeFileSync(transcriptPath, transcriptTurn("First thought", "First turn"));
+    const bridge = new CodexBridge({
+      socketPath: path.join(directory, "bridge.sock"),
+      databasePath,
+    });
+    await bridge.listen();
+    const testBridge = bridge as unknown as {
+      mirrorTranscriptsOnce(): Promise<void>;
+    };
+    try {
+      const db = new DatabaseSync(databasePath);
+      db.prepare(`
+        INSERT INTO transcript_bindings (
+          server_pid, pane_id, pane_pid, session_id, transcript_path,
+          cursor, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, ?)
+      `).run(
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        sessionId,
+        transcriptPath,
+        Date.now(),
+      );
+      db.prepare(`
+        INSERT INTO turn_activity (
+          server_pid, pane_id, pane_pid, session_id, turn_id,
+          tool_calls, edited_files, explored_things, active_shells,
+          pending_shell_calls, started_at, reasoning_summary_keys, updated_at
+        ) VALUES (?, ?, ?, ?, ?, 0, '[]', 0, '[]', '{}', ?, '[]', ?)
+      `).run(
+        target.serverPid,
+        target.paneId,
+        target.panePid,
+        sessionId,
+        `transcript-${sessionId}`,
+        Date.now(),
+        Date.now(),
+      );
+      db.close();
+
+      await testBridge.mirrorTranscriptsOnce();
+      const first = await bridge.dispatch({ op: "events", limit: 100 });
+      if (!first.ok || !("events" in first)) throw new Error("Expected events");
+      const firstProgress = first.events.find(
+        (event) => event.kind === "assistant_progress",
+      );
+      const firstFinal = first.events.find(
+        (event) => event.kind === "assistant_final",
+      );
+      expect(firstProgress?.turnId).toMatch(
+        /^transcript-fallback-resumed-without-task-start:\d+$/u,
+      );
+      expect(firstFinal?.turnId).toBe(firstProgress?.turnId);
+      for (const event of first.events) {
+        await bridge.dispatch({ op: "ack", eventId: event.id });
+      }
+
+      appendFileSync(
+        transcriptPath,
+        transcriptTurn("Second thought", "Second turn"),
+      );
+      await testBridge.mirrorTranscriptsOnce();
+      const second = await bridge.dispatch({ op: "events", limit: 100 });
+      if (!second.ok || !("events" in second)) throw new Error("Expected events");
+      const secondProgress = second.events.find(
+        (event) => event.kind === "assistant_progress",
+      );
+      const secondFinal = second.events.find(
+        (event) => event.kind === "assistant_final",
+      );
+      expect(secondProgress?.turnId).toMatch(
+        /^transcript-fallback-resumed-without-task-start:\d+$/u,
+      );
+      expect(secondFinal?.turnId).toBe(secondProgress?.turnId);
+      expect(secondProgress?.turnId).not.toBe(firstProgress?.turnId);
+    } finally {
+      await bridge.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("transfers transcript ownership when a resumed pane binds the same session", async () => {
     const directory = mkdtempSync(path.join(os.tmpdir(), "chatinabox-transfer-"));
     const databasePath = path.join(directory, "bridge.sqlite");

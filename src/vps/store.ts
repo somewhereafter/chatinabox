@@ -161,6 +161,57 @@ export interface CodexGoalHistoryRow {
   telegram_message_id: number | null;
 }
 
+export type ScheduledActionKind = "message" | "task";
+export type ScheduledActionTiming = "once" | "interval" | "cron";
+export type ScheduledOccurrenceStatus =
+  | "pending"
+  | "claimed"
+  | "delivered"
+  | "queued"
+  | "failed";
+
+export interface ScheduledActionRow {
+  id: number;
+  chat_id: number;
+  owner_user_id: number;
+  message_thread_id: number;
+  topic_name: string;
+  kind: ScheduledActionKind;
+  name: string;
+  payload: string;
+  timing: ScheduledActionTiming;
+  timing_value: string;
+  timezone: string;
+  enabled: number;
+  next_run_at: number | null;
+  last_run_at: number | null;
+  last_error: string | null;
+  run_count: number;
+  consecutive_failures: number;
+  created_at: number;
+  updated_at: number;
+  cancelled_at: number | null;
+}
+
+export interface ScheduledOccurrenceRow {
+  id: number;
+  schedule_id: number;
+  scheduled_for: number;
+  manual: number;
+  status: ScheduledOccurrenceStatus;
+  attempt_count: number;
+  claimed_at: number | null;
+  completed_at: number | null;
+  telegram_message_id: number | null;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface ClaimedScheduledOccurrence extends ScheduledOccurrenceRow {
+  schedule: ScheduledActionRow;
+}
+
 export interface OverviewDashboardRow {
   chat_id: number;
   owner_user_id: number;
@@ -227,6 +278,8 @@ export class ChatinaboxStore {
     this.db.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA synchronous = NORMAL;
+      PRAGMA busy_timeout = 5000;
+      PRAGMA foreign_keys = ON;
       CREATE TABLE IF NOT EXISTS seen_updates (
         update_id INTEGER PRIMARY KEY,
         seen_at INTEGER NOT NULL,
@@ -442,6 +495,54 @@ export class ChatinaboxStore {
       );
       CREATE INDEX IF NOT EXISTS codex_goal_history_chat_idx
         ON codex_goal_history(chat_id, completed_at DESC);
+      CREATE TABLE IF NOT EXISTS scheduled_actions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id INTEGER NOT NULL,
+        owner_user_id INTEGER NOT NULL,
+        message_thread_id INTEGER NOT NULL DEFAULT 0,
+        topic_name TEXT NOT NULL DEFAULT '',
+        kind TEXT NOT NULL CHECK(kind IN ('message', 'task')),
+        name TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        timing TEXT NOT NULL CHECK(timing IN ('once', 'interval', 'cron')),
+        timing_value TEXT NOT NULL,
+        timezone TEXT NOT NULL DEFAULT 'UTC',
+        enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0, 1)),
+        next_run_at INTEGER,
+        last_run_at INTEGER,
+        last_error TEXT,
+        run_count INTEGER NOT NULL DEFAULT 0,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        cancelled_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS scheduled_actions_due_idx
+        ON scheduled_actions(enabled, next_run_at);
+      CREATE INDEX IF NOT EXISTS scheduled_actions_chat_idx
+        ON scheduled_actions(chat_id, enabled, next_run_at);
+      CREATE TABLE IF NOT EXISTS scheduled_occurrences (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        schedule_id INTEGER NOT NULL
+          REFERENCES scheduled_actions(id) ON DELETE CASCADE,
+        scheduled_for INTEGER NOT NULL,
+        manual INTEGER NOT NULL DEFAULT 0 CHECK(manual IN (0, 1)),
+        status TEXT NOT NULL DEFAULT 'pending' CHECK(
+          status IN ('pending', 'claimed', 'delivered', 'queued', 'failed')
+        ),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        claimed_at INTEGER,
+        completed_at INTEGER,
+        telegram_message_id INTEGER,
+        error TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE(schedule_id, scheduled_for, manual)
+      );
+      CREATE INDEX IF NOT EXISTS scheduled_occurrences_pending_idx
+        ON scheduled_occurrences(status, scheduled_for);
+      CREATE INDEX IF NOT EXISTS scheduled_occurrences_chat_history_idx
+        ON scheduled_occurrences(schedule_id, scheduled_for DESC);
       CREATE TABLE IF NOT EXISTS nexus_dashboards (
         chat_id INTEGER PRIMARY KEY,
         owner_user_id INTEGER NOT NULL,
@@ -1260,6 +1361,429 @@ export class ChatinaboxStore {
       SET telegram_message_id = ?
       WHERE id = ? AND telegram_message_id IS NULL
     `).run(telegramMessageId, id);
+  }
+
+  // ── Scheduled messages and topic tasks ────────────────
+  createScheduledAction(input: {
+    readonly chatId: number;
+    readonly ownerUserId: number;
+    readonly messageThreadId: number;
+    readonly topicName: string;
+    readonly kind: ScheduledActionKind;
+    readonly name: string;
+    readonly payload: string;
+    readonly timing: ScheduledActionTiming;
+    readonly timingValue: string;
+    readonly timezone: string;
+    readonly nextRunAt: number;
+  }): ScheduledActionRow {
+    const timestamp = this.now();
+    const result = this.db.prepare(`
+      INSERT INTO scheduled_actions (
+        chat_id, owner_user_id, message_thread_id, topic_name,
+        kind, name, payload, timing, timing_value, timezone,
+        enabled, next_run_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+    `).run(
+      input.chatId,
+      input.ownerUserId,
+      input.messageThreadId,
+      input.topicName,
+      input.kind,
+      input.name,
+      input.payload,
+      input.timing,
+      input.timingValue,
+      input.timezone,
+      input.nextRunAt,
+      timestamp,
+      timestamp,
+    );
+    const row = this.scheduledAction(Number(result.lastInsertRowid));
+    if (!row) throw new Error("Scheduled action could not be loaded");
+    return row;
+  }
+
+  scheduledAction(id: number): ScheduledActionRow | null {
+    return (
+      (this.db.prepare(`
+        SELECT * FROM scheduled_actions WHERE id = ?
+      `).get(id) as ScheduledActionRow | undefined) ?? null
+    );
+  }
+
+  scheduledActionsForChat(
+    chatId: number,
+    includeInactive = false,
+  ): ScheduledActionRow[] {
+    return this.db.prepare(`
+      SELECT * FROM scheduled_actions
+      WHERE chat_id = ?
+        ${includeInactive ? "" : "AND enabled = 1 AND cancelled_at IS NULL"}
+      ORDER BY
+        CASE WHEN enabled = 1 THEN 0 ELSE 1 END,
+        next_run_at IS NULL,
+        next_run_at,
+        id
+      LIMIT 100
+    `).all(chatId) as unknown as ScheduledActionRow[];
+  }
+
+  scheduledActionsForOwner(
+    ownerUserId: number,
+    includeInactive = false,
+  ): ScheduledActionRow[] {
+    return this.db.prepare(`
+      SELECT * FROM scheduled_actions
+      WHERE owner_user_id = ?
+        ${includeInactive ? "" : "AND enabled = 1 AND cancelled_at IS NULL"}
+      ORDER BY
+        CASE WHEN enabled = 1 THEN 0 ELSE 1 END,
+        next_run_at IS NULL,
+        next_run_at,
+        id
+      LIMIT 250
+    `).all(ownerUserId) as unknown as ScheduledActionRow[];
+  }
+
+  updateScheduledAction(
+    id: number,
+    input: {
+      readonly name?: string;
+      readonly payload?: string;
+      readonly timing?: ScheduledActionTiming;
+      readonly timingValue?: string;
+      readonly timezone?: string;
+      readonly nextRunAt?: number;
+    },
+  ): ScheduledActionRow | null {
+    const current = this.scheduledAction(id);
+    if (!current || current.cancelled_at !== null) return null;
+    this.db.prepare(`
+      UPDATE scheduled_actions
+      SET name = ?,
+          payload = ?,
+          timing = ?,
+          timing_value = ?,
+          timezone = ?,
+          next_run_at = ?,
+          last_error = NULL,
+          consecutive_failures = 0,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      input.name ?? current.name,
+      input.payload ?? current.payload,
+      input.timing ?? current.timing,
+      input.timingValue ?? current.timing_value,
+      input.timezone ?? current.timezone,
+      input.nextRunAt ?? current.next_run_at,
+      this.now(),
+      id,
+    );
+    return this.scheduledAction(id);
+  }
+
+  setScheduledActionEnabled(
+    id: number,
+    enabled: boolean,
+    nextRunAt?: number,
+  ): ScheduledActionRow | null {
+    const current = this.scheduledAction(id);
+    if (!current || current.cancelled_at !== null) return null;
+    this.db.prepare(`
+      UPDATE scheduled_actions
+      SET enabled = ?,
+          next_run_at = CASE WHEN ? = 1 THEN ? ELSE next_run_at END,
+          last_error = CASE WHEN ? = 1 THEN NULL ELSE last_error END,
+          consecutive_failures = CASE WHEN ? = 1 THEN 0 ELSE consecutive_failures END,
+          updated_at = ?
+      WHERE id = ?
+    `).run(
+      enabled ? 1 : 0,
+      enabled ? 1 : 0,
+      nextRunAt ?? current.next_run_at,
+      enabled ? 1 : 0,
+      enabled ? 1 : 0,
+      this.now(),
+      id,
+    );
+    return this.scheduledAction(id);
+  }
+
+  cancelScheduledAction(id: number): ScheduledActionRow | null {
+    const current = this.scheduledAction(id);
+    if (!current) return null;
+    const timestamp = this.now();
+    this.db.prepare(`
+      UPDATE scheduled_actions
+      SET enabled = 0, cancelled_at = COALESCE(cancelled_at, ?), updated_at = ?
+      WHERE id = ?
+    `).run(timestamp, timestamp, id);
+    this.db.prepare(`
+      UPDATE scheduled_occurrences
+      SET status = 'failed',
+          error = 'schedule cancelled before dispatch',
+          completed_at = ?,
+          updated_at = ?
+      WHERE schedule_id = ? AND status = 'pending'
+    `).run(timestamp, timestamp, id);
+    return this.scheduledAction(id);
+  }
+
+  requestScheduledActionRunNow(id: number): ScheduledOccurrenceRow | null {
+    const schedule = this.scheduledAction(id);
+    if (!schedule || schedule.cancelled_at !== null) return null;
+    const latest = this.db.prepare(`
+      SELECT MAX(scheduled_for) AS scheduled_for
+      FROM scheduled_occurrences
+      WHERE schedule_id = ? AND manual = 1
+    `).get(id) as { scheduled_for: number | null };
+    const scheduledFor = Math.max(
+      this.now(),
+      (latest.scheduled_for ?? 0) + 1,
+    );
+    const result = this.db.prepare(`
+      INSERT INTO scheduled_occurrences (
+        schedule_id, scheduled_for, manual, status, created_at, updated_at
+      ) VALUES (?, ?, 1, 'pending', ?, ?)
+    `).run(id, scheduledFor, this.now(), this.now());
+    return this.scheduledOccurrence(Number(result.lastInsertRowid));
+  }
+
+  scheduledOccurrence(id: number): ScheduledOccurrenceRow | null {
+    return (
+      (this.db.prepare(`
+        SELECT * FROM scheduled_occurrences WHERE id = ?
+      `).get(id) as ScheduledOccurrenceRow | undefined) ?? null
+    );
+  }
+
+  claimDueScheduledOccurrences(
+    now: number,
+    nextRun: (
+      schedule: ScheduledActionRow,
+      scheduledFor: number,
+      now: number,
+    ) => number | null,
+    limit = 10,
+  ): ClaimedScheduledOccurrence[] {
+    const safeLimit = Number.isSafeInteger(limit)
+      ? Math.max(1, Math.min(50, limit))
+      : 10;
+    const claimed: ClaimedScheduledOccurrence[] = [];
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      // A claimed occurrence is safe to retry after a dead worker. Task
+      // dispatch is additionally protected by its deterministic bridge
+      // delivery id. Telegram messages are at-least-once across the tiny
+      // crash-after-send window because the Bot API has no idempotency key.
+      this.db.prepare(`
+        UPDATE scheduled_occurrences
+        SET status = 'pending', claimed_at = NULL, updated_at = ?
+        WHERE status = 'claimed' AND claimed_at <= ?
+      `).run(now, now - 5 * 60 * 1_000);
+
+      const pending = this.db.prepare(`
+        SELECT o.*
+        FROM scheduled_occurrences o
+        JOIN scheduled_actions s ON s.id = o.schedule_id
+        WHERE o.status = 'pending'
+          AND o.scheduled_for <= ?
+          AND s.cancelled_at IS NULL
+        ORDER BY o.scheduled_for, o.id
+        LIMIT ?
+      `).all(now, safeLimit) as unknown as ScheduledOccurrenceRow[];
+      for (const occurrence of pending) {
+        this.db.prepare(`
+          UPDATE scheduled_occurrences
+          SET status = 'claimed',
+              attempt_count = attempt_count + 1,
+              claimed_at = ?,
+              updated_at = ?
+          WHERE id = ? AND status = 'pending'
+        `).run(now, now, occurrence.id);
+        const refreshed = this.scheduledOccurrence(occurrence.id);
+        const schedule = this.scheduledAction(occurrence.schedule_id);
+        if (refreshed?.status === "claimed" && schedule) {
+          claimed.push({ ...refreshed, schedule });
+        }
+      }
+
+      const remaining = safeLimit - claimed.length;
+      if (remaining > 0) {
+        const due = this.db.prepare(`
+          SELECT * FROM scheduled_actions
+          WHERE enabled = 1
+            AND cancelled_at IS NULL
+            AND next_run_at IS NOT NULL
+            AND next_run_at <= ?
+          ORDER BY next_run_at, id
+          LIMIT ?
+        `).all(now, remaining) as unknown as ScheduledActionRow[];
+        for (const schedule of due) {
+          const scheduledFor = schedule.next_run_at!;
+          const inserted = this.db.prepare(`
+            INSERT OR IGNORE INTO scheduled_occurrences (
+              schedule_id, scheduled_for, manual, status,
+              attempt_count, claimed_at, created_at, updated_at
+            ) VALUES (?, ?, 0, 'claimed', 1, ?, ?, ?)
+          `).run(
+            schedule.id,
+            scheduledFor,
+            now,
+            now,
+            now,
+          );
+          const following = nextRun(schedule, scheduledFor, now);
+          this.db.prepare(`
+            UPDATE scheduled_actions
+            SET enabled = ?,
+                next_run_at = ?,
+                updated_at = ?
+            WHERE id = ?
+          `).run(following === null ? 0 : 1, following, now, schedule.id);
+          if (inserted.changes > 0) {
+            const occurrence = this.db.prepare(`
+              SELECT * FROM scheduled_occurrences
+              WHERE schedule_id = ? AND scheduled_for = ? AND manual = 0
+            `).get(
+              schedule.id,
+              scheduledFor,
+            ) as ScheduledOccurrenceRow | undefined;
+            const refreshedSchedule = this.scheduledAction(schedule.id);
+            if (occurrence && refreshedSchedule) {
+              claimed.push({ ...occurrence, schedule: refreshedSchedule });
+            }
+          }
+        }
+      }
+      this.db.prepare(`
+        DELETE FROM scheduled_occurrences
+        WHERE id IN (
+          SELECT o.id
+          FROM scheduled_occurrences o
+          WHERE o.completed_at IS NOT NULL AND o.completed_at < ?
+          ORDER BY o.completed_at
+          LIMIT 500
+        )
+      `).run(now - 30 * 24 * 60 * 60 * 1_000);
+      this.db.exec("COMMIT");
+      return claimed;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  completeScheduledOccurrence(
+    id: number,
+    status: Extract<ScheduledOccurrenceStatus, "delivered" | "queued" | "failed">,
+    input: {
+      readonly telegramMessageId?: number;
+      readonly error?: string;
+    } = {},
+  ): ScheduledActionRow | null {
+    const occurrence = this.scheduledOccurrence(id);
+    if (!occurrence || occurrence.status !== "claimed") return null;
+    const timestamp = this.now();
+    const error = input.error?.replace(/\s+/gu, " ").trim().slice(0, 1_000) ||
+      null;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      this.db.prepare(`
+        UPDATE scheduled_occurrences
+        SET status = ?,
+            completed_at = ?,
+            telegram_message_id = ?,
+            error = ?,
+            updated_at = ?
+        WHERE id = ? AND status = 'claimed'
+      `).run(
+        status,
+        timestamp,
+        input.telegramMessageId ?? null,
+        error,
+        timestamp,
+        id,
+      );
+      if (status === "failed") {
+        this.db.prepare(`
+          UPDATE scheduled_actions
+          SET last_run_at = ?,
+              last_error = ?,
+              consecutive_failures = consecutive_failures + 1,
+              next_run_at = CASE
+                WHEN timing = 'once'
+                  AND cancelled_at IS NULL
+                  AND consecutive_failures + 1 < 3
+                THEN ?
+                ELSE next_run_at
+              END,
+              enabled = CASE
+                WHEN cancelled_at IS NOT NULL
+                  OR consecutive_failures + 1 >= 3
+                THEN 0
+                WHEN timing = 'once' THEN 1
+                ELSE enabled
+              END,
+              updated_at = ?
+          WHERE id = ?
+        `).run(
+          occurrence.scheduled_for,
+          error,
+          timestamp + 60_000,
+          timestamp,
+          occurrence.schedule_id,
+        );
+      } else {
+        this.db.prepare(`
+          UPDATE scheduled_actions
+          SET last_run_at = ?,
+              last_error = NULL,
+              run_count = run_count + 1,
+              consecutive_failures = 0,
+              updated_at = ?
+          WHERE id = ?
+        `).run(occurrence.scheduled_for, timestamp, occurrence.schedule_id);
+      }
+      this.db.exec("COMMIT");
+    } catch (failure) {
+      this.db.exec("ROLLBACK");
+      throw failure;
+    }
+    return this.scheduledAction(occurrence.schedule_id);
+  }
+
+  recentScheduledOccurrencesForChat(
+    chatId: number,
+    limit = 20,
+  ): Array<ScheduledOccurrenceRow & {
+    readonly schedule_name: string;
+    readonly schedule_kind: ScheduledActionKind;
+    readonly topic_name: string;
+  }> {
+    const safeLimit = Number.isSafeInteger(limit)
+      ? Math.max(1, Math.min(100, limit))
+      : 20;
+    return this.db.prepare(`
+      SELECT
+        o.*,
+        s.name AS schedule_name,
+        s.kind AS schedule_kind,
+        s.topic_name AS topic_name
+      FROM scheduled_occurrences o
+      JOIN scheduled_actions s ON s.id = o.schedule_id
+      WHERE s.chat_id = ?
+      ORDER BY o.scheduled_for DESC, o.id DESC
+      LIMIT ?
+    `).all(chatId, safeLimit) as unknown as Array<
+      ScheduledOccurrenceRow & {
+        readonly schedule_name: string;
+        readonly schedule_kind: ScheduledActionKind;
+        readonly topic_name: string;
+      }
+    >;
   }
 
   codexStatus(

@@ -36,5 +36,10 @@ defaults, but the conversation itself retains the full host authority described
 above. The profile is stored at `/etc/chatinabox/profile.json`, contains no bot
 token, is read-only to the Telegram service, and is preserved across upgrades.
 
+Scheduled tasks are unattended uses of the same full-access Codex authority.
+Create them only for work you are comfortable running later without a new
+confirmation. Scheduled messages do not invoke Codex, but they still send
+through the configured bot to their stored Telegram route.
+
 Please report vulnerabilities privately through GitHub's security advisory
 flow. Do not include bot tokens, Telegram IDs, transcripts, or terminal images.

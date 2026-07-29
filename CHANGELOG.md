@@ -4,6 +4,21 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.5.0 — 2026-07-29
+
+- Added durable one-time, interval, and timezone-aware cron schedules for
+  Telegram messages and Codex topic tasks. Messages send directly; tasks resume
+  their target topic and queue behind active work.
+- Added a typed agent and host API for creating, listing, updating, pausing,
+  resuming, running, cancelling, and inspecting schedules. Manager and worker
+  guidance turns explicit natural-language requests into exact schedules.
+- Added the `⛅️` schedule surface and recent occurrence ledger to the normal
+  rate-limited Overview update, including durable claims, crash recovery,
+  recurring-run coalescing, and automatic pause after repeated failures.
+- Fixed resumed transcript-only turns reusing an earlier completed turn
+  identity, which could suppress all progress and commentary after a sleeping
+  topic woke up.
+
 ## 2.4.7 — 2026-07-28
 
 - Made completion durable per Telegram topic, Codex session, and turn. Once a

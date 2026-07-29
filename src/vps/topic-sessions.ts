@@ -269,6 +269,46 @@ export class TopicSessionController {
     if (icons) await this.setTopicIconStatus(row, "done", icons);
   }
 
+  async ensureTopicAwake(
+    chatId: number,
+    ownerUserId: number,
+    messageThreadId: number,
+  ): Promise<CodexAttachmentRow | null> {
+    const existing = this.dependencies.store.codexAttachment(
+      chatId,
+      ownerUserId,
+      messageThreadId,
+    );
+    if (existing) return existing;
+    const setup = this.dependencies.store.topicSetup(
+      chatId,
+      ownerUserId,
+      messageThreadId,
+    );
+    if (!setup?.closed_at) return null;
+    await this.restartTopicSession(
+      chatId,
+      ownerUserId,
+      messageThreadId,
+    );
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const attachment = this.dependencies.store.codexAttachment(
+        chatId,
+        ownerUserId,
+        messageThreadId,
+      );
+      if (attachment) return attachment;
+      if (!this.starting.has(`${chatId}:${ownerUserId}:${messageThreadId}`)) {
+        return null;
+      }
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, 100);
+        timer.unref();
+      });
+    }
+    return null;
+  }
+
   async handleMessage(
     message: TelegramMessage,
     command: { readonly name: string; readonly argument: string } | null,
@@ -1412,7 +1452,7 @@ export class TopicSessionController {
     chatId: number,
     ownerUserId: number,
     messageThreadId: number,
-    messageId: number,
+    messageId?: number,
   ): Promise<void> {
     const key = `${chatId}:${ownerUserId}:${messageThreadId}`;
     if (this.starting.has(key)) return;
@@ -1440,13 +1480,15 @@ export class TopicSessionController {
           },
         ) ?? row;
       }
-      await tgEditRichHtml(
-        this.dependencies.env,
-        chatId,
-        messageId,
-        formatRestartingCard(row),
-        emptyKeyboard(),
-      ).catch(() => undefined);
+      if (messageId !== undefined) {
+        await tgEditRichHtml(
+          this.dependencies.env,
+          chatId,
+          messageId,
+          formatRestartingCard(row),
+          emptyKeyboard(),
+        ).catch(() => undefined);
+      }
       const profile = {
         name: row.topic_name,
         cwd: row.cwd,
@@ -1466,20 +1508,22 @@ export class TopicSessionController {
           ...profile,
         }).catch(() => null);
       if (!launched?.ok || !("pane" in launched)) {
-        await tgEditRichHtml(
-          this.dependencies.env,
-          chatId,
-          messageId,
-          formatRestingCard(
-            row,
-            resumingSavedSession
-              ? "Resume failed. Your saved chat was not replaced. " +
-                "If it is already open in a terminal, reconnect it from " +
-                "/setup → existing Codex."
-              : "Restart failed. Tap to try again.",
-          ),
-          await this.restartKeyboard(row),
-        );
+        if (messageId !== undefined) {
+          await tgEditRichHtml(
+            this.dependencies.env,
+            chatId,
+            messageId,
+            formatRestingCard(
+              row,
+              resumingSavedSession
+                ? "Resume failed. Your saved chat was not replaced. " +
+                  "If it is already open in a terminal, reconnect it from " +
+                  "/setup → existing Codex."
+                : "Restart failed. Tap to try again.",
+            ),
+            await this.restartKeyboard(row),
+          );
+        }
         return;
       }
       this.dependencies.store.attachCodex(
@@ -1509,13 +1553,15 @@ export class TopicSessionController {
       if (icons && updated) {
         await this.setTopicIconStatus(updated, "done", icons);
       }
-      await tgEditRichHtml(
-        this.dependencies.env,
-        chatId,
-        messageId,
-        formatBackOnlineCard(row, launched.pane),
-        emptyKeyboard(),
-      );
+      if (messageId !== undefined) {
+        await tgEditRichHtml(
+          this.dependencies.env,
+          chatId,
+          messageId,
+          formatBackOnlineCard(row, launched.pane),
+          emptyKeyboard(),
+        );
+      }
     } finally {
       this.starting.delete(key);
     }
