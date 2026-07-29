@@ -1,59 +1,104 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="320" viewBox="0 0 1200 320" role="img" aria-labelledby="title description">
   <title id="title">Chatinabox</title>
-  <desc id="description">Codex sessions through Telegram.</desc>
+  <desc id="description">Real Codex CLI sessions, driven from Telegram, one session per work topic.</desc>
+
   <defs>
-    <pattern id="grid" width="24" height="24" patternUnits="userSpaceOnUse">
-      <path d="M24 0H0V24" fill="none" stroke="#223035" stroke-width="1"/>
-    </pattern>
-    <linearGradient id="signal" x1="0" x2="1">
-      <stop offset="0" stop-color="#39758d"/>
-      <stop offset="1" stop-color="#58a7c4"/>
+    <linearGradient id="cb-spectral" gradientUnits="userSpaceOnUse" x1="196" y1="120" x2="428" y2="180">
+      <stop offset="0" stop-color="#6ee7ff"/>
+      <stop offset=".55" stop-color="#8fb8ff"/>
+      <stop offset="1" stop-color="#b5a3ff"/>
     </linearGradient>
+    <linearGradient id="cb-seam" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#6ee7ff" stop-opacity="0"/>
+      <stop offset=".18" stop-color="#6ee7ff" stop-opacity=".85"/>
+      <stop offset=".52" stop-color="#8fb8ff" stop-opacity=".5"/>
+      <stop offset="1" stop-color="#b5a3ff" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="cb-meter" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#6ee7ff"/>
+      <stop offset="1" stop-color="#b5a3ff"/>
+    </linearGradient>
+    <linearGradient id="cb-row" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0d181e"/>
+      <stop offset="1" stop-color="#070e12"/>
+    </linearGradient>
+    <radialGradient id="cb-sky" cx=".28" cy="0" r=".85">
+      <stop offset="0" stop-color="#6ee7ff" stop-opacity=".13"/>
+      <stop offset=".5" stop-color="#8fb8ff" stop-opacity=".045"/>
+      <stop offset="1" stop-color="#8fb8ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cb-bloom" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#6ee7ff" stop-opacity=".15"/>
+      <stop offset=".6" stop-color="#8fb8ff" stop-opacity=".045"/>
+      <stop offset="1" stop-color="#8fb8ff" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="cb-drift" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#b5a3ff" stop-opacity=".13"/>
+      <stop offset="1" stop-color="#b5a3ff" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="cb-grain" width="22" height="22" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r=".6" fill="#dfeff6" fill-opacity=".05"/>
+    </pattern>
+    <clipPath id="cb-card">
+      <rect width="1200" height="320" rx="20"/>
+    </clipPath>
   </defs>
 
-  <rect width="1200" height="320" fill="#070909"/>
-  <rect width="1200" height="320" fill="url(#grid)" opacity=".16"/>
-  <rect x=".5" y=".5" width="1199" height="319" fill="none" stroke="#263536"/>
+  <g clip-path="url(#cb-card)">
+    <rect width="1200" height="320" fill="#05080b"/>
+    <rect width="1200" height="320" fill="url(#cb-grain)"/>
+    <rect width="1200" height="320" fill="url(#cb-sky)"/>
+    <ellipse cx="120" cy="330" rx="340" ry="150" fill="url(#cb-drift)"/>
+    <ellipse cx="914" cy="150" rx="290" ry="145" fill="url(#cb-bloom)"/>
+    <rect width="1200" height="1.5" fill="url(#cb-seam)"/>
+  </g>
+  <rect x=".5" y=".5" width="1199" height="319" rx="19.5" fill="none" stroke="#16262b"/>
 
-  <g fill="#98a3a1" font-family="Consolas, ui-monospace, monospace" font-size="11" letter-spacing="2">
-    <text x="64" y="48">REMOTE INSTRUMENT / 01</text>
-    <text x="1042" y="48">REV. 2.5.0</text>
+  <!-- Identity -->
+  <rect x="72" y="63" width="24" height="2" rx="1" fill="#6ee7ff"/>
+  <text x="108" y="70" fill="#6ee7ff" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11.5" letter-spacing="3.4">CODEX SESSIONS OVER TELEGRAM</text>
+
+  <text x="70" y="170" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="76" font-weight="700" letter-spacing="-2.4">
+    <tspan fill="#f2f7f6">chat</tspan><tspan fill="url(#cb-spectral)">inabox</tspan>
+  </text>
+
+  <text x="73" y="210" fill="#93a6a5" font-family="'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="19">Leave the terminal. Come back to the same session.</text>
+
+  <rect x="73" y="236" width="430" height="1" fill="#16262b"/>
+  <text x="73" y="264" fill="#5f7173" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11" letter-spacing="2.6">REAL SESSIONS · ONE PER TOPIC · RESUMABLE · SELF-HOSTED</text>
+
+  <!-- Artifact: the forum overview -->
+  <text x="700" y="70" fill="#5f7173" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="11" letter-spacing="2.8">WORK TOPICS</text>
+
+  <g font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace">
+    <!-- working -->
+    <rect x="700" y="90" width="428" height="34" rx="11" fill="url(#cb-row)" stroke="#255b6b"/>
+    <circle cx="722" cy="107" r="3.5" fill="#6ee7ff"/>
+    <text x="740" y="112" fill="#d7e7ea" font-size="13.5">parser-fix</text>
+    <g fill="#6ee7ff">
+      <circle cx="1010" cy="107" r="2" opacity=".35"/>
+      <circle cx="1019" cy="107" r="2" opacity=".65"/>
+      <circle cx="1028" cy="107" r="2"/>
+    </g>
+    <text x="1112" y="111" fill="#6ee7ff" font-size="10" letter-spacing="1.8" text-anchor="end">WORKING</text>
+
+    <!-- ready -->
+    <rect x="700" y="130" width="428" height="34" rx="11" fill="url(#cb-row)" stroke="#16262b"/>
+    <circle cx="722" cy="147" r="3.5" fill="#9bffdc"/>
+    <text x="740" y="152" fill="#a9bdc0" font-size="13.5">deploy-audit</text>
+    <text x="1112" y="151" fill="#7f9497" font-size="10" letter-spacing="1.8" text-anchor="end">READY</text>
+
+    <!-- sleeping -->
+    <rect x="700" y="170" width="428" height="34" rx="11" fill="url(#cb-row)" stroke="#16262b"/>
+    <circle cx="722" cy="187" r="3.5" fill="#3c4d50"/>
+    <text x="740" y="192" fill="#8a9ea1" font-size="13.5">release-notes</text>
+    <text x="1112" y="191" fill="#5f7173" font-size="10" letter-spacing="1.8" text-anchor="end">SLEEPING</text>
   </g>
 
-  <text x="59" y="143" fill="#d8ceba" font-family="Georgia, 'Times New Roman', serif" font-size="72" font-style="italic">chatinabox</text>
-  <text x="66" y="183" fill="#aeb8b6" font-family="Consolas, ui-monospace, monospace" font-size="14" letter-spacing="2">YOUR CODEX SESSION / IN YOUR POCKET</text>
-
-  <g fill="#96a19f" font-family="Consolas, ui-monospace, monospace" font-size="10" letter-spacing="1.5">
-    <text x="67" y="260">DISCOVER</text>
-    <text x="181" y="260">ATTACH</text>
-    <text x="283" y="260">CONTINUE</text>
-  </g>
-  <path d="M67 236H131M181 236H242M283 236H354" stroke="#39758d" stroke-width="2"/>
-  <circle cx="131" cy="236" r="2.5" fill="#58a7c4"/>
-  <circle cx="242" cy="236" r="2.5" fill="#58a7c4"/>
-  <rect x="351" y="233" width="6" height="6" fill="#58a7c4"/>
-
-  <g fill="none" stroke-linecap="square">
-    <rect x="690" y="111" width="146" height="94" rx="3" stroke="#425456"/>
-    <path d="M714 205L704 221L731 205" stroke="#425456"/>
-    <path d="M733 142H793M733 158H809M733 174H778" stroke="#39758d" stroke-width="2"/>
-
-    <path d="M836 158H920" stroke="url(#signal)" stroke-width="2"/>
-    <path d="M850 146L862 158L850 170M906 146L894 158L906 170" stroke="#58a7c4"/>
-
-    <path d="M934 111L958 91L978 111M1042 111L1062 91L1086 111" stroke="#425456"/>
-    <rect x="920" y="111" width="180" height="112" rx="3" stroke="#538788" stroke-width="2"/>
-    <path d="M920 135H1100" stroke="#334244"/>
-    <circle cx="938" cy="123" r="2.5" fill="#538788"/>
-    <circle cx="950" cy="123" r="2.5" fill="#425456"/>
-    <path d="M947 167L961 179L947 191M974 191H1002" stroke="#d8ceba" stroke-width="2"/>
-  </g>
-
-  <g fill="#96a19f" font-family="Consolas, ui-monospace, monospace" font-size="10" letter-spacing="1.5">
-    <text x="690" y="92">TELEGRAM</text>
-    <text x="853" y="137">RELAY</text>
-    <text x="920" y="74">YOUR SERVER</text>
-    <text x="1026" y="247">CODEX / TMUX</text>
-    <text x="690" y="277">MESSAGES / FILES / SCREEN / KEYS / SESSION STATE</text>
-  </g>
+  <!-- Instrument row -->
+  <rect x="700" y="228" width="427" height="3" rx="1.5" fill="#132522"/>
+  <rect x="700" y="228" width="285" height="3" rx="1.5" fill="url(#cb-meter)"/>
+  <circle cx="985" cy="229.5" r="3.5" fill="#8fb8ff"/>
+  <text x="700" y="256" fill="#5f7173" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10.5" letter-spacing="2.2">SESSIONS ATTACHED</text>
+  <text x="1127" y="256" fill="#93a6a5" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="10.5" letter-spacing="1.4" text-anchor="end">3 live</text>
 </svg>

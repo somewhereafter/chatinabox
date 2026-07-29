@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/chatinabox.svg" alt="Chatinabox — Codex sessions through Telegram" width="100%">
+  <img src="assets/chatinabox.svg" alt="Chatinabox — leave the terminal, come back to the same Codex session" width="100%">
 </p>
 
 Chatinabox lets you use the Codex CLI running on your server from Telegram.
