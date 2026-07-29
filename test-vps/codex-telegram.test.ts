@@ -1930,7 +1930,11 @@ describe("Codex Telegram attachments", () => {
     }));
     const events: Array<{
       id: number;
-      kind: "agent_reasoning" | "assistant_progress" | "assistant_final";
+      kind:
+        | "agent_reasoning"
+        | "assistant_progress"
+        | "assistant_final"
+        | "user_local";
       target: typeof pane;
       sessionId: string;
       turnId: string;
@@ -1971,7 +1975,11 @@ describe("Codex Telegram attachments", () => {
       thinkingFlushIntervalMs: 5_000,
     });
     const addEvent = (
-      kind: "agent_reasoning" | "assistant_progress" | "assistant_final",
+      kind:
+        | "agent_reasoning"
+        | "assistant_progress"
+        | "assistant_final"
+        | "user_local",
       message: string,
     ) => {
       events.push({
@@ -2008,6 +2016,20 @@ describe("Codex Telegram attachments", () => {
 
     calls.length = 0;
     addEvent("agent_reasoning", "Preparing continuation");
+    addEvent("user_local", "A terminal-authored note.");
+    await controller.deliverEventsOnce();
+    const localRelay = calls.find((call) =>
+      JSON.stringify(call.body).includes("A terminal-authored note.")
+    );
+    expect(JSON.stringify(localRelay?.body)).toContain("You · VPS");
+    expect(JSON.stringify(localRelay?.body)).not.toContain("show thinking");
+    expect(JSON.stringify(localRelay?.body)).not.toContain(
+      "Preparing continuation",
+    );
+    expect(store.codexThinkingSection(-10088, 42, pane)?.summaries_json)
+      .toContain("Preparing continuation");
+
+    calls.length = 0;
     addEvent("assistant_progress", "The intermediate result.");
     await controller.deliverEventsOnce();
     expect(calls[0]?.method).toBe("editMessageText");

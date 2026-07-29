@@ -4,6 +4,15 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.5.3 — 2026-07-29
+
+- Routes the message that woke a saved topic as soon as the bridge proves the
+  exact Codex session identity, without waiting on topic-icon or card updates.
+- Removes the temporary wake card asynchronously so slow Telegram cleanup
+  cannot delay the prompt or leave a late “session waking” update.
+- Keeps buffered agent thinking and the active transient off terminal-authored
+  `You · VPS` relays, preserving both for the assistant response they precede.
+
 ## 2.5.2 — 2026-07-29
 
 - Gave new, resumed, and managed Codex sessions a dedicated startup deadline

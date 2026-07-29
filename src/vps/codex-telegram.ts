@@ -2257,21 +2257,22 @@ export class CodexTelegramController {
         storedGoalRowBeforeOutput?.awaiting_edit === 1;
       const outputThinking =
         event.kind === "assistant_progress" ||
-          event.kind === "assistant_final" ||
-          event.kind === "user_local"
+          event.kind === "assistant_final"
           ? this.dependencies.store.codexThinkingSection(
             attachment.chat_id,
             attachment.owner_user_id,
             event.target,
           )
           : null;
-      const transient = preserveGoalEditor
-        ? this.dependencies.store.codexStatus(
-          attachment.chat_id,
-          attachment.owner_user_id,
-          event.target,
-        )
-        : this.takeTransientStatus(attachment, event.target);
+      const transient = event.kind === "user_local"
+        ? null
+        : preserveGoalEditor
+          ? this.dependencies.store.codexStatus(
+            attachment.chat_id,
+            attachment.owner_user_id,
+            event.target,
+          )
+          : this.takeTransientStatus(attachment, event.target);
       const checkpointTransient = preserveGoalEditor ? null : transient;
       const responseCheckpoint = event.kind === "assistant_final"
         ? (
