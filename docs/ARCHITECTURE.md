@@ -11,6 +11,7 @@ chatinabox service (unprivileged)
       │
       ├── owner policy, menus, formatting, attachments, voice transcription
       ├── forum routing, setup, presence, and delivery state
+      ├── durable schedules, occurrence claims, and direct message delivery
       ├── read-only private experience profile
       │
       └── group-only Unix socket
@@ -103,6 +104,25 @@ offset advances only after handling completes; an in-flight marker is reclaimed
 on process restart, while completed updates remain deduplicated. Telegram prompt
 handoffs also carry stable delivery IDs into the root bridge, so replaying an
 update after a bot restart does not paste the same prompt into Codex twice.
+
+## Scheduled actions
+
+Schedules and their occurrence ledger live in the unprivileged Telegram
+service's SQLite state. One-time ISO dates, bounded intervals, and five-field
+cron expressions with IANA timezones resolve to a single `next_run_at`. Missed
+recurring windows coalesce into one current occurrence instead of replaying a
+backlog.
+
+Claiming an occurrence and advancing its schedule happen in one immediate
+transaction. Abandoned claims become eligible for retry after five minutes.
+Successful messages record their Telegram message ID; topic tasks use a stable
+occurrence delivery ID when they cross the bridge. Three consecutive dispatch
+failures pause a schedule.
+
+Messages are sent directly and do not start Codex. Tasks target a stable
+chat/owner/topic route, resume a sleeping topic when needed, and enter its
+normal follow-up queue. Recent outcomes are rendered in the same rate-limited
+Overview update as session, goal, and usage state.
 
 ## Follow-up queue
 

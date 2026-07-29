@@ -2501,6 +2501,15 @@ export class CodexBridge {
       started_at: number;
     } | undefined;
     if (!row || row.session_id !== sessionId) return null;
+    // Older releases used one fallback turn id for the lifetime of a resumed
+    // session. Once any turn with that id completed, the terminal fence could
+    // mistake every later progress event for a replay and suppress it. Drop
+    // that legacy activity row; the transcript mirror will recreate it with a
+    // record-scoped fallback below.
+    if (row.turn_id === `transcript-${sessionId}`) {
+      this.deleteTurnActivity(target);
+      return null;
+    }
     let editedFiles: string[] = [];
     try {
       const parsed = JSON.parse(row.edited_files) as unknown;
@@ -2889,7 +2898,10 @@ export class CodexBridge {
           turnId:
             typeof payload.turn_id === "string"
               ? payload.turn_id.slice(0, 200)
-              : `transcript-${binding.session_id}`,
+              : transcriptFallbackTurnId(
+                binding.session_id,
+                recordOffset,
+              ),
           toolCalls: 0,
           editedFiles: new Set(),
           exploredThings: 0,
@@ -2951,7 +2963,10 @@ export class CodexBridge {
       if (reasoningSummaries.length > 0) {
         activity ??= {
           sessionId: binding.session_id,
-          turnId: `transcript-${binding.session_id}`,
+          turnId: transcriptFallbackTurnId(
+            binding.session_id,
+            recordOffset,
+          ),
           toolCalls: 0,
           editedFiles: new Set(),
           exploredThings: 0,
@@ -2983,7 +2998,10 @@ export class CodexBridge {
       ) {
         activity ??= {
           sessionId: binding.session_id,
-          turnId: `transcript-${binding.session_id}`,
+          turnId: transcriptFallbackTurnId(
+            binding.session_id,
+            recordOffset,
+          ),
           toolCalls: 0,
           editedFiles: new Set(),
           exploredThings: 0,
@@ -3033,7 +3051,10 @@ export class CodexBridge {
       ) {
         activity ??= {
           sessionId: binding.session_id,
-          turnId: `transcript-${binding.session_id}`,
+          turnId: transcriptFallbackTurnId(
+            binding.session_id,
+            recordOffset,
+          ),
           toolCalls: 0,
           editedFiles: new Set(),
           exploredThings: 0,
@@ -3981,6 +4002,13 @@ function transcriptRecordTime(record: Record<string, unknown>): number | null {
   if (typeof record.timestamp !== "string") return null;
   const parsed = Date.parse(record.timestamp);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function transcriptFallbackTurnId(
+  sessionId: string,
+  recordOffset: number,
+): string {
+  return `transcript-fallback-${sessionId}:${recordOffset}`;
 }
 
 function transcriptSessionIdFromHead(

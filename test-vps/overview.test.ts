@@ -251,6 +251,72 @@ describe("Overview dashboard", () => {
     expect(card).not.toContain("<p><b>✓ Review</b>");
   });
 
+  it("batches schedules and their occurrence ledger into the dashboard", () => {
+    const now = Date.parse("2026-07-29T10:00:00.000Z");
+    const next = now + 60 * 60_000;
+    const card = formatOverviewDashboard(
+      {
+        total: 1,
+        active: 1,
+        working: 1,
+        idle: 0,
+        bridgeOnline: true,
+        usage: null,
+      },
+      now,
+      customProfile,
+      { current: [], recent: [] },
+      {
+        active: [{
+          id: 7,
+          chat_id: -10042,
+          owner_user_id: 42,
+          message_thread_id: 20,
+          topic_name: "Build",
+          kind: "task",
+          name: "Morning build check",
+          payload: "Inspect the build.",
+          timing: "cron",
+          timing_value: "0 9 * * 1-5",
+          timezone: "Europe/London",
+          enabled: 1,
+          next_run_at: next,
+          last_run_at: null,
+          last_error: null,
+          run_count: 0,
+          consecutive_failures: 0,
+          created_at: now,
+          updated_at: now,
+          cancelled_at: null,
+        }],
+        recent: [{
+          id: 4,
+          schedule_id: 7,
+          scheduled_for: now - 60_000,
+          manual: 0,
+          status: "queued",
+          attempt_count: 1,
+          claimed_at: now - 60_000,
+          completed_at: now - 59_000,
+          telegram_message_id: null,
+          error: null,
+          created_at: now - 60_000,
+          updated_at: now - 59_000,
+          schedule_name: "Morning build check",
+          schedule_kind: "task",
+          topic_name: "Build",
+        }],
+      },
+    );
+
+    expect(card).toContain("<p><b>scheduled</b></p>");
+    expect(card).toContain("⛅️ #7 Morning build check");
+    expect(card).toContain("cron 0 9 * * 1-5 · Europe/London");
+    expect(card).toContain("<details><summary>occurrence ledger</summary>");
+    expect(card).toContain("✓ #7 Morning build check");
+    expect(card).toContain("task · Build · queued");
+  });
+
   it("deletes the old dashboard after creating a replacement", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-overview-replace-"));
     let now = 1_800_000_000_000;

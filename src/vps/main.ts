@@ -32,6 +32,7 @@ import {
   controlTopicRole,
   controlTopicSetupBlockedText,
 } from "./control-topics";
+import { ScheduleController } from "./schedules";
 
 interface App {
   readonly env: ChatinaboxEnv;
@@ -377,6 +378,46 @@ async function main(): Promise<void> {
     progressPacer,
     topicPresence: topics,
   });
+  const schedules = new ScheduleController({
+    env,
+    store,
+    dispatchTask: async (occurrence) => {
+      let attachment = await topics.ensureTopicAwake(
+        occurrence.schedule.chat_id,
+        occurrence.schedule.owner_user_id,
+        occurrence.schedule.message_thread_id,
+      );
+      if (!attachment && occurrence.schedule.message_thread_id === 0) {
+        const attached = await codex.ensureLobbyAttached(
+          occurrence.schedule.chat_id,
+          occurrence.schedule.owner_user_id,
+          0,
+        );
+        if (attached) {
+          attachment = store.codexAttachment(
+            occurrence.schedule.chat_id,
+            occurrence.schedule.owner_user_id,
+            0,
+          );
+        }
+      }
+      if (!attachment) {
+        return {
+          ok: false as const,
+          error: "The target topic could not resume its Codex session.",
+        };
+      }
+      return codex.routeScheduledTask({
+        chatId: occurrence.schedule.chat_id,
+        ownerUserId: occurrence.schedule.owner_user_id,
+        messageThreadId: occurrence.schedule.message_thread_id,
+        occurrenceId: occurrence.id,
+        scheduleId: occurrence.schedule.id,
+        name: occurrence.schedule.name,
+        prompt: occurrence.schedule.payload,
+      });
+    },
+  });
   const overview = new OverviewController({
     env,
     store,
@@ -411,6 +452,7 @@ async function main(): Promise<void> {
     await Promise.all([
       runPoller(env, store, (update) => handleUpdate(app, update), controller.signal),
       codex.run(controller.signal),
+      schedules.run(controller.signal),
       overview.run(controller.signal),
       topics.run(controller.signal),
     ]);

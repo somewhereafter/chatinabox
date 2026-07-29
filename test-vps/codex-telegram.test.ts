@@ -422,6 +422,90 @@ describe("Codex Telegram attachments", () => {
     );
   });
 
+  it("queues scheduled tasks with a deterministic delivery id and no synthetic reply", async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-scheduled-task-"));
+    temporaryRoots.push(root);
+    const store = new ChatinaboxStore(path.join(root, "state.sqlite"));
+    const pane = {
+      serverPid: 100,
+      paneId: "%4",
+      panePid: 200,
+      sessionName: "codex",
+      windowName: "Build",
+      windowIndex: 1,
+      cwd: root,
+      active: true,
+      busy: false,
+      codexPid: 300,
+      assistantName: "Sol" as const,
+      sessionId: "session",
+    };
+    store.attachCodex(-10042, 42, pane, 26);
+    const telegramBodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", vi.fn(async (
+      _url: string | URL | Request,
+      init?: RequestInit,
+    ) => {
+      telegramBodies.push(
+        JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>,
+      );
+      return new Response(JSON.stringify({
+        ok: true,
+        result: { message_id: 900 },
+      }), { status: 200 });
+    }));
+    const bridge = {
+      request: vi.fn(async () => ({
+        ok: true,
+        sent: true,
+        queuedUntilNextToolCall: false,
+      })),
+    };
+    const controller = new CodexTelegramController({
+      env: {
+        TG_BOT_TOKEN: "test-token",
+        TG_ALLOWED_USER_IDS: "42",
+        DATA_DIR: root,
+        CODEX_BRIDGE_SOCKET: path.join(root, "bridge.sock"),
+        DEFAULT_CWD: root,
+      },
+      store,
+      bridge: bridge as never,
+    });
+
+    await expect(controller.routeScheduledTask({
+      chatId: -10042,
+      ownerUserId: 42,
+      messageThreadId: 26,
+      occurrenceId: 9,
+      scheduleId: 7,
+      name: "Morning build check",
+      prompt: "Inspect the build and report failures.",
+    })).resolves.toEqual({ ok: true });
+
+    expect(bridge.request).toHaveBeenCalledWith({
+      op: "send",
+      target: {
+        serverPid: 100,
+        paneId: "%4",
+        panePid: 200,
+      },
+      text: expect.stringContaining(
+        '<codex_internal_context source="chatinabox_schedule" schedule_id="7">',
+      ),
+      mode: "queue",
+      deliveryId: "schedule:7:9",
+    });
+    expect(JSON.stringify(telegramBodies)).not.toContain(
+      '"reply_parameters":{"message_id":-9}',
+    );
+    expect(store.nextCodexPrompt(-10042, 42, pane)).toMatchObject({
+      telegram_message_id: -9,
+      message_thread_id: 26,
+    });
+    store.close();
+  });
+
   it("delivers a generated image only to the originating Telegram topic", async () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "chatinabox-output-"));
     temporaryRoots.push(root);

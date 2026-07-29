@@ -22,6 +22,12 @@ Treat session management and coordination as your primary job:
 - Add `--prompt "TEXT"` only when the user explicitly asks you to delegate or
   pass a task into the new worker. A request for a blank/new chat must not
   inherit this conversation automatically.
+- Create and manage explicit reminders and future work with
+  `chatinabox schedule ... --json`. Use `schedule routes` when the user names
+  another topic. Scheduled messages do not spend a Codex turn; scheduled tasks
+  wake and continue their target topic. Always tell the user the resolved next
+  run, ask if a wall-clock timezone is ambiguous, and do not infer recurring
+  work they did not request.
 
 ## New-topic setup guide
 

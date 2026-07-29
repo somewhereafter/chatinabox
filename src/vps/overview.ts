@@ -40,11 +40,14 @@ import type {
   CodexGoalHistoryRow,
   CodexGoalRow,
   OverviewDashboardRow,
+  ScheduledActionRow,
+  ScheduledOccurrenceRow,
 } from "./store";
 import {
   TelegramProgressPacer,
   type ProgressPacer,
 } from "./progress-pacer";
+import { SCHEDULE_ICON_EMOJI, scheduleTimingText } from "./schedules";
 
 const NEXUS_POLL_MS = 5_000;
 const NEXUS_TIMESTAMP_REFRESH_MS = 120_000;
@@ -67,6 +70,15 @@ export interface OverviewGoals {
     readonly topic_name?: string;
   })[];
   readonly recent: readonly CodexGoalHistoryRow[];
+}
+
+export interface OverviewSchedules {
+  readonly active: readonly ScheduledActionRow[];
+  readonly recent: ReadonlyArray<ScheduledOccurrenceRow & {
+    readonly schedule_name: string;
+    readonly schedule_kind: "message" | "task";
+    readonly topic_name: string;
+  }>;
 }
 
 interface OverviewDependencies {
@@ -337,8 +349,20 @@ export class OverviewController {
         }),
       recent: this.dependencies.store.recentCompletedCodexGoals(chatId, 10),
     };
+    const schedules: OverviewSchedules = {
+      active: this.dependencies.store.scheduledActionsForChat(chatId),
+      recent: this.dependencies.store.recentScheduledOccurrencesForChat(
+        chatId,
+        10,
+      ),
+    };
     const profile = this.profile();
-    const signature = overviewRenderSignature(stats, profile, goals);
+    const signature = overviewRenderSignature(
+      stats,
+      profile,
+      goals,
+      schedules,
+    );
     const timestampDue =
       this.now() - row.rendered_at >= NEXUS_TIMESTAMP_REFRESH_MS;
     if (
@@ -379,7 +403,13 @@ export class OverviewController {
     const keyboard = buildInlineKeyboard([
       [{ label: "↻  refresh", callbackData: refreshButton }],
     ]);
-    const text = formatOverviewDashboard(stats, this.now(), profile, goals);
+    const text = formatOverviewDashboard(
+      stats,
+      this.now(),
+      profile,
+      goals,
+      schedules,
+    );
     if (row.dashboard_message_id !== null) {
       const edited = await tgEditRichHtml(
         this.dependencies.env,
@@ -532,9 +562,10 @@ export function overviewRenderSignature(
   stats: OverviewStats,
   profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
   goals: OverviewGoals = { current: [], recent: [] },
+  schedules: OverviewSchedules = { active: [], recent: [] },
 ): string {
   return JSON.stringify({
-    formatVersion: 2,
+    formatVersion: 3,
     total: stats.total,
     active: stats.active,
     working: stats.working,
@@ -560,6 +591,29 @@ export function overviewRenderSignature(
         completedAt: goal.completed_at,
       })),
     },
+    schedules: {
+      active: schedules.active.map((schedule) => ({
+        id: schedule.id,
+        kind: schedule.kind,
+        name: schedule.name,
+        topicName: schedule.topic_name,
+        timing: schedule.timing,
+        timingValue: schedule.timing_value,
+        timezone: schedule.timezone,
+        nextRunAt: schedule.next_run_at,
+        failures: schedule.consecutive_failures,
+      })),
+      recent: schedules.recent.map((occurrence) => ({
+        id: occurrence.id,
+        scheduleId: occurrence.schedule_id,
+        name: occurrence.schedule_name,
+        kind: occurrence.schedule_kind,
+        topicName: occurrence.topic_name,
+        scheduledFor: occurrence.scheduled_for,
+        status: occurrence.status,
+        error: occurrence.error,
+      })),
+    },
     usage: stats.usage
       ? {
           creditsBalance: stats.usage.creditsBalance,
@@ -574,6 +628,7 @@ export function formatOverviewDashboard(
   refreshedAt: number = Date.now(),
   profile: ExperienceProfile = DEFAULT_EXPERIENCE_PROFILE,
   goals: OverviewGoals = { current: [], recent: [] },
+  schedules: OverviewSchedules = { active: [], recent: [] },
 ): string {
   const status = stats.bridgeOnline
     ? "🟢 live"
@@ -587,14 +642,73 @@ export function formatOverviewDashboard(
     `</blockquote>`;
   const usage = formatUsage(stats.usage);
   const goalState = formatOverviewGoals(goals);
+  const scheduleState = formatOverviewSchedules(schedules);
   return (
     `<mark>${escapeTelegramHtml(profile.overview.name)} ` +
     `${escapeTelegramHtml(profile.overview.emoji)} · ${status}</mark>\n\n` +
     `<p><b>sessions</b></p>${sessions}\n\n` +
     `<p><b>goals</b></p>${goalState}\n\n` +
+    `<p><b>scheduled</b></p>${scheduleState}\n\n` +
     `<p><b>usage limits</b></p>${usage}\n\n` +
     `<footer>synced ${formatUtcDate(refreshedAt)}</footer>`
   );
+}
+
+function formatOverviewSchedules(schedules: OverviewSchedules): string {
+  const active = schedules.active.length === 0
+    ? "<blockquote>no active schedules</blockquote>"
+    : schedules.active.slice(0, 10).map((schedule) => {
+      const destination = schedule.topic_name ||
+        (schedule.message_thread_id > 0
+          ? `topic ${schedule.message_thread_id}`
+          : "direct chat");
+      const next = schedule.next_run_at === null
+        ? "not scheduled"
+        : formatUtcDate(schedule.next_run_at);
+      return (
+        `<blockquote><b>${SCHEDULE_ICON_EMOJI} #${schedule.id} ` +
+        `${escapeTelegramHtml(schedule.name)}</b><br/>` +
+        `${escapeTelegramHtml(schedule.kind)} · ` +
+        `${escapeTelegramHtml(destination)}<br/>` +
+        `<i>${escapeTelegramHtml(scheduleTimingText(schedule))} · ` +
+        `next ${next}</i></blockquote>`
+      );
+    }).join("");
+  if (schedules.recent.length === 0) return active;
+  const recent = schedules.recent.map((occurrence) => {
+    const destination = occurrence.topic_name ||
+      "direct chat";
+    const error = occurrence.error
+      ? `<br/>${escapeTelegramHtml(shortScheduleText(occurrence.error))}`
+      : "";
+    return (
+      `<blockquote><b>${occurrenceStatusIcon(occurrence.status)} ` +
+      `#${occurrence.schedule_id} ` +
+      `${escapeTelegramHtml(occurrence.schedule_name)}</b><br/>` +
+      `${escapeTelegramHtml(occurrence.schedule_kind)} · ` +
+      `${escapeTelegramHtml(destination)} · ` +
+      `${escapeTelegramHtml(occurrence.status)}<br/>` +
+      `<i>${formatUtcDate(occurrence.scheduled_for)}</i>${error}</blockquote>`
+    );
+  }).join("");
+  return (
+    `${active}<details><summary>occurrence ledger</summary>` +
+    `${recent}</details>`
+  );
+}
+
+function occurrenceStatusIcon(
+  status: ScheduledOccurrenceRow["status"],
+): string {
+  if (status === "delivered" || status === "queued") return "✓";
+  if (status === "failed") return "⚠️";
+  if (status === "claimed") return "↻";
+  return "•";
+}
+
+function shortScheduleText(value: string): string {
+  const compact = value.replace(/\s+/gu, " ").trim();
+  return compact.length <= 140 ? compact : `${compact.slice(0, 139)}…`;
 }
 
 function formatOverviewGoals(goals: OverviewGoals): string {

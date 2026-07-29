@@ -43,6 +43,12 @@ import {
   type ArtifactRoute,
   type ArtifactShelf,
 } from "./artifacts";
+import { ChatinaboxStore, type ScheduledActionRow } from "./store";
+import {
+  nextRunFromNow,
+  scheduleTimingDefinition,
+  scheduleTimingText,
+} from "./schedules";
 
 async function main(): Promise<number> {
   const environmentPath =
@@ -285,6 +291,9 @@ async function main(): Promise<number> {
         bridge,
         json,
       );
+    }
+    if (command === "schedule") {
+      return await scheduleCommand(args, bridge, json);
     }
     if (command === "help" || command === "--help" || command === "-h") {
       process.stdout.write(help());
@@ -878,6 +887,465 @@ function readStdin(): string {
   return readFileSync(0, "utf8").trim();
 }
 
+async function scheduleCommand(
+  args: string[],
+  bridge: CodexBridgeClient,
+  json: boolean,
+): Promise<number> {
+  const action = args.shift() ?? "list";
+  const store = new ChatinaboxStore(chatinaboxDatabasePath());
+  try {
+    const ownerUserId = configuredTelegramOwner();
+    if (action === "routes") {
+      if (args.length > 0) return usage("schedule routes takes no arguments");
+      const routes = scheduleRoutes(store, ownerUserId);
+      return outputSchedule({ ok: true, routes }, json);
+    }
+    if (action === "list") {
+      const includeInactive = removeFlag(args, "--all");
+      if (args.length > 0) return usage(`unknown schedule list option: ${args[0]}`);
+      return outputSchedule({
+        ok: true,
+        schedules: store.scheduledActionsForOwner(ownerUserId, includeInactive)
+          .map(scheduleOutput),
+      }, json);
+    }
+    if (action === "occurrences") {
+      const id = optionalScheduleId(args.shift());
+      if (args.length > 0) {
+        return usage("schedule occurrences accepts at most one schedule id");
+      }
+      const schedules = store.scheduledActionsForOwner(ownerUserId, true);
+      const allowed = id === undefined
+        ? schedules
+        : schedules.filter((schedule) => schedule.id === id);
+      if (id !== undefined && allowed.length === 0) {
+        return usage(`schedule #${id} was not found`);
+      }
+      const occurrences = allowed.flatMap((schedule) =>
+        store.recentScheduledOccurrencesForChat(schedule.chat_id, 100)
+          .filter((occurrence) => occurrence.schedule_id === schedule.id)
+      ).sort((left, right) =>
+        right.scheduled_for - left.scheduled_for || right.id - left.id
+      ).slice(0, 100);
+      return outputSchedule({ ok: true, occurrences }, json);
+    }
+    if (action === "create") {
+      const kind = args.shift();
+      if (kind !== "message" && kind !== "task") {
+        return usage("schedule create requires message or task");
+      }
+      const nameOption = takeOption(args, "--name");
+      const at = takeOption(args, "--at");
+      const every = takeOption(args, "--every");
+      const cron = takeOption(args, "--cron");
+      const timezone = takeOption(args, "--timezone");
+      const chatOption = takeOption(args, "--chat");
+      const threadOption = takeOption(args, "--thread");
+      const topicOption = takeOption(args, "--topic");
+      const payloadOption = takeOption(
+        args,
+        kind === "message" ? "--text" : "--prompt",
+      );
+      if (args.length > 0) {
+        return usage(`unknown schedule create option: ${args[0]}`);
+      }
+      const payload = (payloadOption ?? readStdin()).trim();
+      validateScheduledPayload(kind, payload);
+      const source = chatOption
+        ? null
+        : await resolveCurrentTarget(bridge);
+      const route = resolveScheduleRoute(
+        store,
+        loadTelegramRoute(
+          chatOption,
+          topicOption ? undefined : threadOption,
+          source,
+        ),
+        topicOption,
+        threadOption,
+      );
+      if (kind === "task" && !scheduleTaskRouteIsReady(store, route)) {
+        return usage(
+          "scheduled tasks require a running or resumable Codex topic",
+        );
+      }
+      const timing = scheduleTimingDefinition({
+        at,
+        every,
+        cron,
+        timezone,
+      });
+      const name = normalizeScheduleName(
+        nameOption || payload,
+      );
+      const schedule = store.createScheduledAction({
+        chatId: route.chatId,
+        ownerUserId: route.ownerUserId,
+        messageThreadId: route.messageThreadId,
+        topicName: route.topicName,
+        kind,
+        name,
+        payload,
+        ...timing,
+      });
+      return outputSchedule({
+        ok: true,
+        created: true,
+        schedule: scheduleOutput(schedule),
+      }, json);
+    }
+
+    const id = parseScheduleId(args.shift(), `schedule ${action}`);
+    const schedule = store.scheduledAction(id);
+    if (!schedule || schedule.owner_user_id !== ownerUserId) {
+      return usage(`schedule #${id} was not found`);
+    }
+    if (action === "show") {
+      if (args.length > 0) return usage("schedule show takes only an id");
+      return outputSchedule({
+        ok: true,
+        schedule: scheduleOutput(schedule),
+        occurrences: store.recentScheduledOccurrencesForChat(
+          schedule.chat_id,
+          100,
+        ).filter((occurrence) => occurrence.schedule_id === schedule.id)
+          .slice(0, 20),
+      }, json);
+    }
+    if (action === "pause") {
+      if (args.length > 0) return usage("schedule pause takes only an id");
+      const updated = store.setScheduledActionEnabled(id, false);
+      return outputSchedule({
+        ok: true,
+        paused: true,
+        schedule: scheduleOutput(updated!),
+      }, json);
+    }
+    if (action === "resume") {
+      if (args.length > 0) return usage("schedule resume takes only an id");
+      const nextRunAt = nextRunFromNow(schedule);
+      if (nextRunAt === null) {
+        return usage("that one-time schedule is already in the past");
+      }
+      const updated = store.setScheduledActionEnabled(id, true, nextRunAt);
+      return outputSchedule({
+        ok: true,
+        resumed: true,
+        schedule: scheduleOutput(updated!),
+      }, json);
+    }
+    if (action === "cancel" || action === "delete") {
+      if (args.length > 0) return usage("schedule cancel takes only an id");
+      const updated = store.cancelScheduledAction(id);
+      return outputSchedule({
+        ok: true,
+        cancelled: true,
+        schedule: scheduleOutput(updated!),
+      }, json);
+    }
+    if (action === "run") {
+      if (args.length > 0) return usage("schedule run takes only an id");
+      const occurrence = store.requestScheduledActionRunNow(id);
+      if (!occurrence) return usage(`schedule #${id} cannot be run`);
+      return outputSchedule({
+        ok: true,
+        requested: true,
+        occurrence,
+      }, json);
+    }
+    if (action === "update") {
+      const name = takeOption(args, "--name");
+      const payload = takeOption(
+        args,
+        schedule.kind === "message" ? "--text" : "--prompt",
+      );
+      const at = takeOption(args, "--at");
+      const every = takeOption(args, "--every");
+      const cron = takeOption(args, "--cron");
+      const timezone = takeOption(args, "--timezone");
+      if (args.length > 0) {
+        return usage(`unknown schedule update option: ${args[0]}`);
+      }
+      if (payload !== undefined) {
+        validateScheduledPayload(schedule.kind, payload.trim());
+      }
+      const timingChanged =
+        at !== undefined || every !== undefined || cron !== undefined;
+      let timing:
+        | ReturnType<typeof scheduleTimingDefinition>
+        | undefined;
+      if (timingChanged) {
+        timing = scheduleTimingDefinition({
+          at,
+          every,
+          cron,
+          timezone: timezone ?? schedule.timezone,
+        });
+      } else if (timezone !== undefined) {
+        const prospective = {
+          ...schedule,
+          timezone,
+        };
+        const nextRunAt = nextRunFromNow(prospective);
+        if (nextRunAt === null) {
+          return usage("that one-time schedule is already in the past");
+        }
+        timing = {
+          timing: schedule.timing,
+          timingValue: schedule.timing_value,
+          timezone,
+          nextRunAt,
+        };
+      }
+      if (name === undefined && payload === undefined && timing === undefined) {
+        return usage("schedule update requires a field to change");
+      }
+      const updated = store.updateScheduledAction(id, {
+        ...(name !== undefined ? { name: normalizeScheduleName(name) } : {}),
+        ...(payload !== undefined ? { payload: payload.trim() } : {}),
+        ...(timing ?? {}),
+      });
+      return outputSchedule({
+        ok: true,
+        updated: true,
+        schedule: scheduleOutput(updated!),
+      }, json);
+    }
+    return usage(
+      "schedule requires create, list, show, update, pause, resume, run, cancel, occurrences, or routes",
+    );
+  } finally {
+    store.close();
+  }
+}
+
+interface ResolvedScheduleRoute {
+  readonly chatId: number;
+  readonly ownerUserId: number;
+  readonly messageThreadId: number;
+  readonly topicName: string;
+}
+
+function resolveScheduleRoute(
+  store: ChatinaboxStore,
+  base: ReturnType<typeof loadTelegramRoute>,
+  topicOption: string | undefined,
+  threadOption: string | undefined,
+): ResolvedScheduleRoute {
+  let messageThreadId = base.messageThreadId;
+  if (topicOption !== undefined) {
+    const normalized = topicOption.trim().toLowerCase();
+    const matches = scheduleRoutes(store, base.ownerUserId)
+      .filter((route) => route.chatId === base.chatId)
+      .filter((route) =>
+        String(route.messageThreadId) === normalized ||
+        route.topicName.toLowerCase() === normalized
+      );
+    if (matches.length !== 1) {
+      throw new Error(
+        matches.length === 0
+          ? `No known topic matched ${topicOption}`
+          : `More than one topic matched ${topicOption}; use --thread`,
+      );
+    }
+    messageThreadId = matches[0]!.messageThreadId;
+  } else if (threadOption !== undefined) {
+    if (!/^\d+$/u.test(threadOption)) {
+      throw new Error("--thread must be a non-negative Telegram topic id");
+    }
+    messageThreadId = Number(threadOption);
+  }
+  const setup = store.topicSetup(
+    base.chatId,
+    base.ownerUserId,
+    messageThreadId,
+  );
+  const attachment = store.codexAttachment(
+    base.chatId,
+    base.ownerUserId,
+    messageThreadId,
+  );
+  return {
+    chatId: base.chatId,
+    ownerUserId: base.ownerUserId,
+    messageThreadId,
+    topicName:
+      setup?.topic_name ||
+      attachment?.window_name ||
+      (messageThreadId > 0 ? `topic ${messageThreadId}` : "direct chat"),
+  };
+}
+
+function scheduleRoutes(
+  store: ChatinaboxStore,
+  ownerUserId: number,
+): ResolvedScheduleRoute[] {
+  const byKey = new Map<string, ResolvedScheduleRoute>();
+  for (const setup of store.topicSetups()) {
+    if (setup.owner_user_id !== ownerUserId) continue;
+    const route = {
+      chatId: setup.chat_id,
+      ownerUserId,
+      messageThreadId: setup.message_thread_id,
+      topicName: setup.topic_name,
+    };
+    byKey.set(`${route.chatId}:${route.messageThreadId}`, route);
+  }
+  for (const attachment of store.codexAttachments()) {
+    if (attachment.owner_user_id !== ownerUserId) continue;
+    const key = `${attachment.chat_id}:${attachment.message_thread_id}`;
+    if (!byKey.has(key)) {
+      byKey.set(key, {
+        chatId: attachment.chat_id,
+        ownerUserId,
+        messageThreadId: attachment.message_thread_id,
+        topicName: attachment.window_name ||
+          (attachment.message_thread_id > 0
+            ? `topic ${attachment.message_thread_id}`
+            : "direct chat"),
+      });
+    }
+  }
+  return [...byKey.values()].sort((left, right) =>
+    left.chatId - right.chatId ||
+    left.messageThreadId - right.messageThreadId
+  );
+}
+
+function scheduleTaskRouteIsReady(
+  store: ChatinaboxStore,
+  route: ResolvedScheduleRoute,
+): boolean {
+  if (
+    store.codexAttachment(
+      route.chatId,
+      route.ownerUserId,
+      route.messageThreadId,
+    )
+  ) return true;
+  const setup = store.topicSetup(
+    route.chatId,
+    route.ownerUserId,
+    route.messageThreadId,
+  );
+  return setup?.closed_at !== null && setup?.closed_at !== undefined;
+}
+
+function scheduleOutput(schedule: ScheduledActionRow): Record<string, unknown> {
+  return {
+    id: schedule.id,
+    kind: schedule.kind,
+    name: schedule.name,
+    text: schedule.kind === "message" ? schedule.payload : undefined,
+    prompt: schedule.kind === "task" ? schedule.payload : undefined,
+    chatId: schedule.chat_id,
+    ownerUserId: schedule.owner_user_id,
+    messageThreadId: schedule.message_thread_id,
+    topicName: schedule.topic_name,
+    enabled: schedule.enabled === 1,
+    cancelled: schedule.cancelled_at !== null,
+    timing: schedule.timing,
+    timingValue: schedule.timing_value,
+    timezone: schedule.timezone,
+    timingText: scheduleTimingText(schedule),
+    nextRunAt: schedule.next_run_at === null
+      ? null
+      : new Date(schedule.next_run_at).toISOString(),
+    lastRunAt: schedule.last_run_at === null
+      ? null
+      : new Date(schedule.last_run_at).toISOString(),
+    runCount: schedule.run_count,
+    consecutiveFailures: schedule.consecutive_failures,
+    lastError: schedule.last_error,
+  };
+}
+
+function outputSchedule(
+  result: Record<string, unknown>,
+  json: boolean,
+): number {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return result.ok === true ? 0 : 1;
+  }
+  if (result.schedule) {
+    const schedule = result.schedule as Record<string, unknown>;
+    process.stdout.write(
+      `#${schedule.id} ${schedule.name}\n` +
+        `${schedule.kind} · ${schedule.timingText}\n` +
+        `${schedule.enabled ? `next ${schedule.nextRunAt}` : "inactive"}\n`,
+    );
+  } else if (Array.isArray(result.schedules)) {
+    const schedules = result.schedules as Record<string, unknown>[];
+    process.stdout.write(
+      schedules.length === 0
+        ? "No scheduled actions.\n"
+        : schedules.map((schedule) =>
+          `#${schedule.id} ${schedule.enabled ? "on" : "off"} ` +
+          `${schedule.kind} · ${schedule.name} · ${schedule.timingText}`
+        ).join("\n") + "\n",
+    );
+  } else {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  }
+  return result.ok === true ? 0 : 1;
+}
+
+function chatinaboxDatabasePath(): string {
+  return path.join(
+    process.env.CHATINABOX_DATA_DIR ?? "/var/lib/chatinabox",
+    "chatinabox.sqlite",
+  );
+}
+
+function configuredTelegramOwner(): number {
+  const raw = process.env.TG_ALLOWED_USER_IDS?.split(",")
+    .map((value) => value.trim())
+    .find((value) => /^[1-9]\d*$/u.test(value));
+  const owner = Number(raw);
+  if (!Number.isSafeInteger(owner) || owner <= 0) {
+    throw new Error("No valid Telegram owner is configured");
+  }
+  return owner;
+}
+
+function validateScheduledPayload(
+  kind: "message" | "task",
+  payload: string,
+): void {
+  const bytes = Buffer.byteLength(payload);
+  const maximum = kind === "message" ? 3_000 : 48_000;
+  if (!payload || bytes > maximum || payload.includes("\u0000")) {
+    throw new Error(
+      kind === "message"
+        ? "Scheduled message text must be from 1 to 3000 bytes"
+        : "Scheduled task prompt must be from 1 to 48000 bytes",
+    );
+  }
+}
+
+function normalizeScheduleName(value: string): string {
+  const compact = value.replace(/\s+/gu, " ").trim();
+  if (!compact) throw new Error("Schedule name must not be empty");
+  return [...compact].slice(0, 80).join("");
+}
+
+function parseScheduleId(value: string | undefined, command: string): number {
+  const id = optionalScheduleId(value);
+  if (id === undefined) throw new Error(`${command} requires an id`);
+  return id;
+}
+
+function optionalScheduleId(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const id = Number(value.replace(/^#/u, ""));
+  if (!Number.isSafeInteger(id) || id <= 0) {
+    throw new Error("Schedule id must be a positive integer");
+  }
+  return id;
+}
+
 async function artifactCommand(
   args: string[],
   bridge: CodexBridgeClient,
@@ -1149,7 +1617,21 @@ function loadTelegramDeliveryTarget(
   if (existsSync(secretsPath)) process.loadEnvFile(secretsPath);
   const token = process.env.TG_BOT_TOKEN?.trim();
   if (!token) throw new Error("TG_BOT_TOKEN is unavailable");
+  return {
+    env: { TG_BOT_TOKEN: token },
+    ...loadTelegramRoute(chatOption, threadOption, source),
+  };
+}
 
+function loadTelegramRoute(
+  chatOption: string | undefined,
+  threadOption: string | undefined,
+  source: CodexPaneIdentity | null,
+): {
+  readonly chatId: number;
+  readonly ownerUserId: number;
+  readonly messageThreadId: number;
+} {
   const attachedRoute = chatOption
     ? null
     : source
@@ -1187,7 +1669,6 @@ function loadTelegramDeliveryTarget(
     throw new Error("No valid Telegram owner is configured");
   }
   return {
-    env: { TG_BOT_TOKEN: token },
     chatId,
     ownerUserId,
     messageThreadId,
@@ -1512,6 +1993,12 @@ function parseReasoningEffort(
 }
 
 function usage(error: string): number {
+  if (process.argv.includes("--json")) {
+    process.stdout.write(
+      `${JSON.stringify({ ok: false, code: "INVALID", error })}\n`,
+    );
+    return 2;
+  }
   process.stderr.write(`chatinabox: ${error}\n\n${help()}`);
   return 2;
 }
@@ -1542,6 +2029,15 @@ Commands:
   artifact add SOURCE [OPTS]   Register a file or deployed HTTPS artifact
   artifact list                List artifacts made in this session
   artifact link|sync           Publish and print this session's shelf link
+  schedule create TYPE [OPTS]  Schedule a message or topic task
+  schedule list [--all]        List scheduled actions
+  schedule show ID             Show one schedule and recent occurrences
+  schedule update ID [OPTS]    Change its name, payload, or timing
+  schedule pause|resume ID     Control future occurrences
+  schedule run ID              Request one immediate occurrence
+  schedule cancel ID           Permanently cancel a schedule
+  schedule occurrences [ID]    Inspect the occurrence ledger
+  schedule routes              List available Telegram destinations
   profile show                 Show the private experience profile
   profile set [OPTIONS]        Update names, symbols, defaults, or setup state
   profile sync                 Reapply bot and forum identity to Telegram
@@ -1559,6 +2055,13 @@ Artifact SOURCE may be a local file or any deployed HTTPS URL. Options:
   --metadata JSON, --no-deliver, --chat ID, --thread ID, --session ID.
 Chatinabox records navigation only; agents remain free to build and deploy
 artifacts through any suitable tool or hosting route.
+Schedule creation:
+  schedule create message --at ISO --text TEXT [--name NAME]
+  schedule create task --every 15m --prompt TEXT [--name NAME]
+  schedule create task --cron "0 9 * * 1-5" --timezone AREA --prompt TEXT
+Choose exactly one of --at, --every, or --cron. The current Telegram topic is
+the default destination; use --topic NAME, --thread ID, or --chat ID.
+Update accepts --name, --text/--prompt, --at, --every, --cron, and --timezone.
 Profile options include --assistant-name, --assistant-mark, --assistant-photo,
   --overview-name, --overview-emoji, --group-name, --group-photo,
   --manager-name, --manager-emoji, --manager-role,
