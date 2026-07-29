@@ -62,6 +62,7 @@ const TRANSCRIPT_DISCOVERY_TIMEOUT_MS = 15_000;
 const TRANSCRIPT_COMPLETION_TIMEOUT_MS = 6 * 60 * 60 * 1_000;
 const MANAGED_STARTUP_ATTEMPTS = 80;
 const MANAGED_STARTUP_INTERVAL_MS = 250;
+const SESSION_ID_STARTUP_ATTEMPTS = 600;
 const TMUX = resolveExecutable("CHATINABOX_TMUX_PATH", [
   "/usr/bin/tmux",
   "/usr/local/bin/tmux",
@@ -1319,7 +1320,7 @@ export class CodexBridge {
         (candidate) =>
           samePaneIdentity(candidate, pane) &&
           typeof candidate.sessionId === "string",
-        50,
+        SESSION_ID_STARTUP_ATTEMPTS,
       );
     if (!readyPane) {
       await run(TMUX, ["kill-pane", "-t", pane.paneId])
