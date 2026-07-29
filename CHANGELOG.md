@@ -4,6 +4,13 @@ Notable changes to Chatinabox are recorded here.
 
 ## Unreleased
 
+## 2.5.2 — 2026-07-29
+
+- Gave new, resumed, and managed Codex sessions a dedicated startup deadline
+  instead of the three-second timeout used by ordinary local bridge calls.
+- Waits up to a minute for a starting pane to prove its exact Codex session
+  identity before attaching, without weakening saved-session protection.
+
 ## 2.5.1 — 2026-07-29
 
 - Made stopped topics wait for a real Codex session before attaching, and
